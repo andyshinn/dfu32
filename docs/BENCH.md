@@ -148,8 +148,13 @@ Tuning knobs:
 | Date | DFU32 | Target / bootloader | Image | Settings | Stream | Total |
 |---|---|---|---|---|---|---|
 | 2026-11-04 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 (MAC+1 after jump) | 413,680 B MeshCore repeater | 244 B, PRN 8, default interval | 44.9 s (9.2 kB/s) | 53.0 s, `ver` OK |
+| 2026-11-04 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 16, default interval | 41.8 s (9.8 kB/s) | 50.4 s |
+| 2026-11-04 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 30, default interval | 40.4 s (10.2 kB/s), 1,206 TX back-off retries | 49.4 s |
 
-Each 8-packet window took about 212 ms. That points at connection events, not nRF flash speed. The levers are `--prn`, `--interval`, and 2M PHY (Feather S3).
+PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash. Next to test:
+- `--interval` (the build that also logs the negotiated interval);
+- whether data length extension is actually active;
+- 2M PHY (Feather S3).
 
 ## If `probe` can't find the bootloader after the jump
 

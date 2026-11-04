@@ -35,7 +35,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - Everything is logged, including MTU, packet size, DIS string, per-phase timings and throughput.
 - **Done when:** on the XIAO you run `start ota`, run `flash --yes` on the Feather, the repeater reboots, and `ver` shows the flashed version. Done three times in a row.
 - **Also answers:** open questions 1, 7 and 8 (run `probe` first), and an initial throughput number. Based on these, update SPEC §5/§6 defaults.
-- **Status:** **first end-to-end flash succeeded on 2026-11-04.** A Feather V2 flashed a Heltec T096 on OTAFIX 2.3 with a 413,680 B MeshCore repeater image in 53 s (stream 9.2 kB/s), and `ver` confirmed it. Two more runs are needed for the "three in a row" criterion; they double as PRN and interval tuning runs. See [BENCH.md](BENCH.md).
+- **Status:** **first end-to-end flash succeeded on 2026-11-04.** A Feather V2 flashed a Heltec T096 on OTAFIX 2.3 with a 413,680 B MeshCore repeater image in 53 s (stream 9.2 kB/s), and `ver` confirmed it. Runs 2 and 3 (PRN 16 and 30) also succeeded, so the **"three in a row" criterion is met**. Throughput was 9.2 / 9.8 / 10.2 kB/s. Connection-interval tuning continues into M2. See [BENCH.md](BENCH.md).
   - Host tests pass (48 C++ tests, 10 Python), including the transfer engine against the simulated bootloader.
   - The firmware build is verified by CI.
 
