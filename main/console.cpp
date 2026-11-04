@@ -93,6 +93,11 @@ void print_link(const ble::LinkInfo& l) {
     std::printf("  packet size       %u bytes%s\n", l.packet_size,
                 l.packet_size >= 244 ? "" : l.packet_size == 20 ? "  (legacy 20-byte mode)" : "");
     std::printf("  PHY tx/rx         %u/%u  (1 = 1M, 2 = 2M)\n", l.tx_phy, l.rx_phy);
+    if (l.conn_interval) {
+        const unsigned hundredths = l.conn_interval * 125u;  // 1.25 ms units -> 0.01 ms
+        std::printf("  conn interval     %u.%02u ms, latency %u, supervision %u ms\n", hundredths / 100,
+                    hundredths % 100, l.conn_latency, l.conn_timeout * 10u);
+    }
     std::printf("  timings           find %" PRIu32 " ms, jump %" PRIu32 " ms, connect %" PRIu32 " ms\n", l.find_ms,
                 l.jump_ms, l.connect_ms);
 }
@@ -174,7 +179,9 @@ int cmd_probe(int argc, char** argv) {
     std::printf("Probing %s (waiting up to %ld s; run `start ota` on the repeater now if you haven't).\n"
                 "Non-destructive: no START is sent%s.\n",
                 mac.str().c_str(), wait_s, reset ? "; SYS_RESET at the end reboots the target into its app" : "");
-    const auto r = ble::probe(mac, static_cast<uint32_t>(wait_s) * 1000, reset);
+    ble::ConnParams conn;
+    conn.interval_ms = static_cast<uint16_t>(opt_long(argc, argv, "--interval", 0));
+    const auto r = ble::probe(mac, static_cast<uint32_t>(wait_s) * 1000, reset, conn);
     if (!r.ok) {
         std::printf("PROBE FAILED: %s\n", r.error.c_str());
         return 1;
@@ -192,7 +199,7 @@ int cmd_flash(int argc, char** argv) {
     if (!require_target(mac)) return 1;
     if (!has_flag(argc, argv, "--yes")) {
         std::printf("This ERASES the target's application and flashes the staged image.\n"
-                    "Re-run as: flash --yes [--prn N] [--packet N] [--settle MS] [--wait S]\n");
+                    "Re-run as: flash --yes [--prn N] [--packet N] [--interval MS] [--settle MS] [--wait S]\n");
         return 1;
     }
     StagedImage img;
@@ -207,6 +214,7 @@ int cmd_flash(int argc, char** argv) {
     o.max_packet = static_cast<uint16_t>(opt_long(argc, argv, "--packet", 0));
     o.start_settle_ms = static_cast<uint32_t>(opt_long(argc, argv, "--settle", 500));
     o.scan_ms = static_cast<uint32_t>(opt_long(argc, argv, "--wait", 600)) * 1000;
+    o.conn.interval_ms = static_cast<uint16_t>(opt_long(argc, argv, "--interval", 0));
     std::printf("Staged image OK (%" PRIu32 " B, \"%s\"). Waiting up to %" PRIu32
                 " s for %s: run `start ota` on the repeater now.\n",
                 img.header().bin_size, img.header().version.c_str(), o.scan_ms / 1000, mac.str().c_str());
@@ -292,9 +300,9 @@ void start_console() {
     reg("probe",
         "Non-destructive link test: enter the bootloader, report MTU / packet size / PHY / bootloader version, "
         "then SYS_RESET back to the app.",
-        "[--no-reset] [--wait S]", &cmd_probe);
+        "[--no-reset] [--interval MS] [--wait S]", &cmd_probe);
     reg("flash", "Flash the staged image to the target (erases its app).",
-        "--yes [--prn N] [--packet N] [--settle MS] [--wait S]", &cmd_flash);
+        "--yes [--prn N] [--packet N] [--interval MS] [--settle MS] [--wait S]", &cmd_flash);
     reg("blreset", "Send SYS_RESET to the target's bootloader (recover a stuck session).", "[--wait S]",
         &cmd_blreset);
 

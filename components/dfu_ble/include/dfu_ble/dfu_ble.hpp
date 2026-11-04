@@ -56,6 +56,15 @@ struct LinkInfo {
     dfu::BootloaderInfo bootloader;
     uint16_t packet_size = 0;        // what DFU32 will use
     uint32_t find_ms = 0, jump_ms = 0, connect_ms = 0;
+    uint16_t conn_interval = 0;      // 1.25 ms units, as negotiated with the bootloader
+    uint16_t conn_latency = 0;
+    uint16_t conn_timeout = 0;       // 10 ms units
+};
+
+/// Connection interval request. 0 = default range 15-30 ms; otherwise request
+/// exactly this many milliseconds (rounded down to 1.25 ms steps, min 7.5 ms).
+struct ConnParams {
+    uint16_t interval_ms = 0;
 };
 
 struct ProbeReport {
@@ -70,13 +79,14 @@ struct ProbeReport {
 /// negotiates MTU/PHY/DLE, reads Version + DIS, computes the packet size, then
 /// (if `reset_after`) sends SYS_RESET so the target reboots into its app.
 /// Never sends START, so nothing is erased.
-ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after = true);
+ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after = true, ConnParams conn = {});
 
 struct FlashOptions {
     uint32_t scan_ms = 600000;   // how long to wait for the target (arm timeout)
     uint16_t prn = 8;
     uint32_t start_settle_ms = 500;
     uint16_t max_packet = 0;     // 0 = automatic; else cap (e.g. 20 for testing)
+    ConnParams conn{};
 };
 
 struct FlashReport {

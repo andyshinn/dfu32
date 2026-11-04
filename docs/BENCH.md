@@ -139,8 +139,17 @@ Tuning knobs:
 |---|---|---|
 | `--prn N` | 8 | Packets per receipt. Try 4 if transfers stall. |
 | `--packet N` | automatic | Cap the packet size, e.g. `--packet 20` to compare throughput. |
+| `--interval MS` | 15–30 ms range | Request a fixed BLE connection interval, e.g. `--interval 8`. Shorter means more packets per second. `probe` takes it too, and both report the interval actually negotiated. |
 | `--settle MS` | 500 | Delay between START and the size packet. |
 | `--wait S` | 600 | How long to wait for the target. |
+
+## Bench results so far
+
+| Date | DFU32 | Target / bootloader | Image | Settings | Stream | Total |
+|---|---|---|---|---|---|---|
+| 2026-11-04 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 (MAC+1 after jump) | 413,680 B MeshCore repeater | 244 B, PRN 8, default interval | 44.9 s (9.2 kB/s) | 53.0 s, `ver` OK |
+
+Each 8-packet window took about 212 ms. That points at connection events, not nRF flash speed. The levers are `--prn`, `--interval`, and 2M PHY (Feather S3).
 
 ## If `probe` can't find the bootloader after the jump
 

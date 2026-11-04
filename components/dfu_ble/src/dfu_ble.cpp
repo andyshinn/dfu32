@@ -207,14 +207,18 @@ public:
     Link(const Link&) = delete;
     Link& operator=(const Link&) = delete;
 
-    bool connect(const Mac& mac, std::string& err) {
+    bool connect(const Mac& mac, const ConnParams& conn, std::string& err) {
         client_ = NimBLEDevice::createClient();
         if (client_ == nullptr) {
             err = "createClient failed (too many clients?)";
             return false;
         }
         client_->setClientCallbacks(this, false);
-        client_->setConnectionParams(12, 24, 0, 400);  // 15-30 ms interval, 4 s supervision
+        uint16_t itvl_min = 12, itvl_max = 24;  // 15-30 ms default
+        if (conn.interval_ms != 0) {
+            itvl_min = itvl_max = std::max<uint16_t>(6, static_cast<uint16_t>(conn.interval_ms * 4 / 5));
+        }
+        client_->setConnectionParams(itvl_min, itvl_max, 0, 200);  // latency 0, 2 s supervision
         client_->setConnectTimeout(10000);
         mtu_changed_ = false;
         if (!client_->connect(to_nimble(mac), true, false, true)) {
@@ -361,6 +365,21 @@ public:
         ESP_LOGI(TAG, "MTU %u", mtu);
         mtu_changed_ = true;
     }
+    bool onConnParamsUpdateRequest(NimBLEClient*, const ble_gap_upd_params* p) override {
+        ESP_LOGI(TAG, "peer requests conn params: interval %u-%u (x1.25 ms), latency %u, timeout %u (x10 ms); accepting",
+                 p->itvl_min, p->itvl_max, p->latency, p->supervision_timeout);
+        return true;
+    }
+
+    void read_conn(uint16_t& interval, uint16_t& latency, uint16_t& timeout) const {
+        interval = latency = timeout = 0;
+        if (!is_connected()) return;
+        const NimBLEConnInfo ci = client_->getConnInfo();
+        interval = ci.getConnInterval();
+        latency = ci.getConnLatency();
+        timeout = ci.getConnTimeout();
+    }
+
     void onPhyUpdate(NimBLEClient*, uint8_t tx, uint8_t rx) override {
         ESP_LOGI(TAG, "PHY tx %u rx %u", tx, rx);
     }
@@ -378,7 +397,8 @@ private:
 
 /// Finds the target and returns a connected Link to its bootloader, performing
 /// the buttonless jump if the target is still in its app.
-std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo& info, std::string& err) {
+std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, const ConnParams& conn, LinkInfo& info,
+                                      std::string& err) {
     Advert adv;
     bool plus_one = false;
     uint32_t t0 = now_ms();
@@ -390,7 +410,7 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
 
     auto link = std::make_unique<Link>();
     t0 = now_ms();
-    if (!link->connect(adv.mac, err) || !link->discover(err)) return nullptr;
+    if (!link->connect(adv.mac, conn, err) || !link->discover(err)) return nullptr;
     uint16_t version = link->read_version();
     ESP_LOGI(TAG, "connected to %s, DFU Version char 0x%04x, MTU %u", adv.mac.str().c_str(), version, link->mtu());
 
@@ -414,7 +434,7 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
         info.jump_ms = now_ms() - tj;
         link = std::make_unique<Link>();
         t0 = now_ms();
-        if (!link->connect(adv.mac, err) || !link->discover(err)) return nullptr;
+        if (!link->connect(adv.mac, conn, err) || !link->discover(err)) return nullptr;
         version = link->read_version();
         ESP_LOGI(TAG, "connected to bootloader %s, Version 0x%04x, MTU %u", adv.mac.str().c_str(), version,
                  link->mtu());
@@ -438,6 +458,7 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
     info.version_char = version;
     info.mtu = link->mtu();
     link->read_phy(info.tx_phy, info.rx_phy);
+    link->read_conn(info.conn_interval, info.conn_latency, info.conn_timeout);
     info.dis_fw_rev = link->read_dis("2A26");
     info.dis_model = link->read_dis("2A24");
     info.bootloader = dfu::classify_bootloader(info.dis_fw_rev);
@@ -531,9 +552,9 @@ std::vector<Advert> scan(uint32_t duration_ms) {
     return out;
 }
 
-ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after) {
+ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after, ConnParams conn) {
     ProbeReport r;
-    auto link = open_bootloader(app, scan_ms, r.link, r.error);
+    auto link = open_bootloader(app, scan_ms, conn, r.link, r.error);
     if (!link) return r;
     r.ok = true;
     if (reset_after) {
@@ -548,7 +569,7 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
                   std::span<const uint8_t> init_packet, const dfu::InitPacket& init, const FlashOptions& opts) {
     FlashReport r;
     const uint32_t t0 = now_ms();
-    auto link = open_bootloader(app, opts.scan_ms, r.link, r.error);
+    auto link = open_bootloader(app, opts.scan_ms, opts.conn, r.link, r.error);
     if (!link) {
         r.total_ms = now_ms() - t0;
         return r;
@@ -594,7 +615,9 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
     params.prn = opts.prn;
     params.start_settle_ms = opts.start_settle_ms;
 
-    ESP_LOGI(TAG, "transfer: %" PRIu32 " B in %u-byte packets, PRN %u", image_size, params.packet_size, params.prn);
+    link->read_conn(r.link.conn_interval, r.link.conn_latency, r.link.conn_timeout);
+    ESP_LOGI(TAG, "transfer: %" PRIu32 " B in %u-byte packets, PRN %u, conn interval %u x1.25 ms, latency %u",
+             image_size, params.packet_size, params.prn, r.link.conn_interval, r.link.conn_latency);
     uint32_t next_pct = 0;
     r.transfer = dfu::run_transfer(*link, image, image_size, init_packet, params,
                                    [&](uint32_t acked, uint32_t total) {
@@ -637,7 +660,7 @@ bool reset_bootloader(const Mac& app, uint32_t scan_ms, std::string& error) {
         return false;
     }
     Link link;
-    if (!link.connect(adv.mac, error) || !link.discover(error)) return false;
+    if (!link.connect(adv.mac, ConnParams{}, error) || !link.discover(error)) return false;
     send_sys_reset(link);
     link.close();
     return true;
