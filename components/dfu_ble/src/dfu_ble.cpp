@@ -26,7 +26,7 @@ namespace {
 
 constexpr const char* TAG = "dfu_ble";
 constexpr uint16_t kPreferredMtu = 247;
-constexpr uint32_t kBootloaderScanMs = 20000;
+constexpr uint32_t kBootloaderScanMs = 30000;
 constexpr uint32_t kJumpDisconnectMs = 5000;
 constexpr uint32_t kMtuWaitMs = 1500;
 constexpr uint32_t kPacketRetryLimit = 200;  // x 1 tick of back-off on ENOMEM
@@ -60,17 +60,24 @@ const NimBLEUUID& dfu_uuid() {
 
 // ---- scanning -----------------------------------------------------------------
 
+const NimBLEUUID& secure_dfu_uuid() {
+    static const NimBLEUUID u("FE59");
+    return u;
+}
+
 class ScanCallbacks : public NimBLEScanCallbacks {
 public:
-    // Target search: exact app MAC matches on address alone (the MeshCore app
-    // does not advertise the DFU UUID); MAC+1 additionally needs the DFU UUID.
-    // With `bootloader_only`, both need the UUID (skips a lingering app advert).
-    void arm(const Mac& app, bool bootloader_only, SemaphoreHandle_t done) {
+    // Target search by address only: the app MAC, or MAC+1 (bootloader after a
+    // 0xA8 reset). Advertising content is not required to match: the MeshCore
+    // app's OTA adverts carry no DFU UUID, and some bootloader builds put it in
+    // the scan response or omit it. The GATT Version characteristic, read after
+    // connecting, is what proves app (0x0001) vs bootloader (0x0008).
+    void arm(const Mac& app, SemaphoreHandle_t done) {
         app_ = app;
         plus_one_ = app.plus_one();
-        bootloader_only_ = bootloader_only;
         done_ = done;
         found_ = false;
+        notable_count_ = 0;
         searching_ = true;
     }
     void disarm() {
@@ -81,14 +88,30 @@ public:
     const Advert& hit() const { return hit_; }
     bool hit_plus_one() const { return hit_plus_one_; }
 
-    void onDiscovered(const NimBLEAdvertisedDevice* dev) override {
+    /// DFU-looking advertisers seen during a search that did not match the target.
+    size_t notable_count() const { return std::min<size_t>(notable_count_.load(), notable_.size()); }
+    const Advert& notable(size_t i) const { return notable_[i]; }
+    bool notable_secure(size_t i) const { return notable_secure_[i]; }
+
+    void onDiscovered(const NimBLEAdvertisedDevice* dev) override { consider(dev); }
+    void onResult(const NimBLEAdvertisedDevice* dev) override { consider(dev); }  // after scan response
+
+    void onScanEnd(const NimBLEScanResults&, int) override {
+        if (!searching_) return;
+        if (SemaphoreHandle_t d = done_.load()) xSemaphoreGive(d);
+    }
+
+private:
+    void consider(const NimBLEAdvertisedDevice* dev) {
         if (!searching_ || found_) return;
         const uint8_t* v = dev->getAddress().getVal();
         const bool exact = app_.same_bytes(v);
         const bool plus = plus_one_.same_bytes(v);
-        if (!exact && !plus) return;
         const bool has_uuid = dev->isAdvertisingService(dfu_uuid());
-        if ((plus || bootloader_only_) && !has_uuid) return;
+        if (!exact && !plus) {
+            note(dev, has_uuid);
+            return;
+        }
         hit_.mac = from_nimble(dev->getAddress());
         hit_.name = dev->haveName() ? dev->getName() : "";
         hit_.rssi = dev->getRSSI();
@@ -100,30 +123,48 @@ public:
         if (SemaphoreHandle_t d = done_.load()) xSemaphoreGive(d);
     }
 
-    void onScanEnd(const NimBLEScanResults&, int) override {
-        if (!searching_) return;
-        if (SemaphoreHandle_t d = done_.load()) xSemaphoreGive(d);
+    void note(const NimBLEAdvertisedDevice* dev, bool has_uuid) {
+        const bool secure = dev->isAdvertisingService(secure_dfu_uuid());
+        const std::string name = dev->haveName() ? dev->getName() : "";
+        const bool dfu_name = name.find("DFU") != std::string::npos || name.find("dfu") != std::string::npos;
+        if (!has_uuid && !secure && !dfu_name) return;
+        const Mac m = from_nimble(dev->getAddress());
+        const size_t n = notable_count();
+        for (size_t i = 0; i < n; ++i) {
+            if (notable_[i].mac.val == m.val) {
+                if (!name.empty()) notable_[i].name = name;  // scan response may add the name
+                return;
+            }
+        }
+        if (n >= notable_.size()) return;
+        notable_[n].mac = m;
+        notable_[n].name = name;
+        notable_[n].rssi = dev->getRSSI();
+        notable_[n].dfu_service = has_uuid;
+        notable_secure_[n] = secure;
+        notable_count_.store(n + 1);
     }
 
-private:
     Mac app_, plus_one_;
-    bool bootloader_only_ = false;
     std::atomic<bool> searching_{false};
     std::atomic<bool> found_{false};
     bool hit_plus_one_ = false;
     Advert hit_;
     std::atomic<SemaphoreHandle_t> done_{nullptr};
+    std::array<Advert, 8> notable_{};
+    std::array<bool, 8> notable_secure_{};
+    std::atomic<size_t> notable_count_{0};
 };
 
 ScanCallbacks g_scan_cb;
 
-bool find_target(const Mac& app, uint32_t timeout_ms, bool bootloader_only, Advert& out, bool& plus_one) {
+bool find_target(const Mac& app, uint32_t timeout_ms, const char* what, Advert& out, bool& plus_one) {
     NimBLEScan* scan = NimBLEDevice::getScan();
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
-    g_scan_cb.arm(app, bootloader_only, done);
+    g_scan_cb.arm(app, done);
     scan->clearResults();
-    ESP_LOGI(TAG, "scanning up to %" PRIu32 " s for %s%s (or MAC+1 %s)", timeout_ms / 1000,
-             app.str().c_str(), bootloader_only ? " [bootloader]" : "", app.plus_one().str().c_str());
+    ESP_LOGI(TAG, "scanning up to %" PRIu32 " s for the %s at %s or MAC+1 %s", timeout_ms / 1000, what,
+             app.str().c_str(), app.plus_one().str().c_str());
     bool ok = false;
     if (scan->start(timeout_ms, false, true)) {
         xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms + 1000));
@@ -137,10 +178,21 @@ bool find_target(const Mac& app, uint32_t timeout_ms, bool bootloader_only, Adve
     if (ok) {
         out = g_scan_cb.hit();
         plus_one = g_scan_cb.hit_plus_one();
-        ESP_LOGI(TAG, "found %s \"%s\" rssi %d dfu_uuid=%d", out.mac.str().c_str(), out.name.c_str(), out.rssi,
-                 out.dfu_service);
+        ESP_LOGI(TAG, "found %s%s \"%s\" rssi %d dfu_uuid=%d", out.mac.str().c_str(), plus_one ? " (MAC+1)" : "",
+                 out.name.c_str(), out.rssi, out.dfu_service);
+        return true;
     }
-    return ok;
+    const size_t n = g_scan_cb.notable_count();
+    if (n == 0) {
+        ESP_LOGW(TAG, "no %s at either address, and no other DFU-looking advertisers seen", what);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const Advert& a = g_scan_cb.notable(i);
+        ESP_LOGW(TAG, "not the target, but DFU-looking: %s \"%s\" rssi %d%s%s", a.mac.str().c_str(), a.name.c_str(),
+                 a.rssi, a.dfu_service ? " [legacy DFU 1530]" : "",
+                 g_scan_cb.notable_secure(i) ? " [Secure DFU FE59: not supported]" : "");
+    }
+    return false;
 }
 
 // ---- connection / transport -----------------------------------------------------
@@ -330,7 +382,7 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
     Advert adv;
     bool plus_one = false;
     uint32_t t0 = now_ms();
-    if (!find_target(app, scan_ms, false, adv, plus_one)) {
+    if (!find_target(app, scan_ms, "app or bootloader", adv, plus_one)) {
         err = "target not found: run `start ota` on the repeater (or check the MAC)";
         return nullptr;
     }
@@ -355,8 +407,8 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
         link->close();
         info.via_buttonless = true;
         sleep_ms(300);
-        if (!find_target(app, kBootloaderScanMs, true, adv, plus_one)) {
-            err = "bootloader did not appear after the buttonless jump";
+        if (!find_target(app, kBootloaderScanMs, "bootloader", adv, plus_one)) {
+            err = "bootloader did not appear after the buttonless jump (see warnings above for what was seen)";
             return nullptr;
         }
         info.jump_ms = now_ms() - tj;
@@ -369,8 +421,13 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
     }
 
     if (version != dfu::kVersionBootloader) {
-        char buf[80];
-        std::snprintf(buf, sizeof(buf), "unexpected DFU Version 0x%04x (want 0x0008 bootloader)", version);
+        char buf[120];
+        if (info.via_buttonless && version == dfu::kVersionAppButtonless) {
+            std::snprintf(buf, sizeof(buf), "the app is still running at %s after the buttonless START (no jump)",
+                          adv.mac.str().c_str());
+        } else {
+            std::snprintf(buf, sizeof(buf), "unexpected DFU Version 0x%04x (want 0x0008 bootloader)", version);
+        }
         err = buf;
         return nullptr;
     }
@@ -575,8 +632,8 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
 bool reset_bootloader(const Mac& app, uint32_t scan_ms, std::string& error) {
     Advert adv;
     bool plus_one = false;
-    if (!find_target(app, scan_ms, true, adv, plus_one)) {
-        error = "no bootloader advertising at the target MAC or MAC+1";
+    if (!find_target(app, scan_ms, "bootloader", adv, plus_one)) {
+        error = "nothing advertising at the target MAC or MAC+1";
         return false;
     }
     Link link;

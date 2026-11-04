@@ -142,6 +142,13 @@ Tuning knobs:
 | `--settle MS` | 500 | Delay between START and the size packet. |
 | `--wait S` | 600 | How long to wait for the target. |
 
+## If `probe` can't find the bootloader after the jump
+
+DFU32 logs every DFU-looking advertiser it saw, by name, legacy DFU UUID or Secure DFU UUID. Then:
+- If nothing was seen, run `scan 10` right away and look for a `*DFU*` name or anything near the repeater's MAC. On the repeater, `get bootloader.ver` (before probing) tells us which bootloader it runs.
+- If the board is stuck in its bootloader (on OTAFIX and older upstream it advertises forever), run `blreset` or power-cycle it. Nothing has been erased.
+- `Secure DFU FE59` means the board's bootloader uses Nordic Secure DFU, which DFU32 does not support.
+
 ## If a flash fails
 
 - After a failure DFU32 sends SYS_RESET. An OTAFIX bootloader then comes back in BLE OTA mode, usually at **MAC+1**, and DFU32 finds it there. Run `flash --yes` again; no `start ota` is needed, because the app is gone and the bootloader is waiting.
