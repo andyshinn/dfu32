@@ -113,6 +113,7 @@ StagingVerify StagedImage::verify(uint32_t max_app_size) {
         return v;
     }
 
+    if (max_app_size == 0) max_app_size = dfu::default_max_app_size(v.init.device_type);
     const dfu::ImageError e = dfu::check_app_image(v.init, header_.bin_size, crc, max_app_size);
     if (e != dfu::ImageError::Ok) {
         v.error = dfu::to_string(e);

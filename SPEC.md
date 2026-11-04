@@ -136,10 +136,16 @@ It then classifies the bootloader:
 | `upstream_ge_0_10` | semver ≥ 0.10.0 | `SYS_RESET` mid-transfer returns to BLE OTA. 360 s inactivity timeout. A power cut with no app gives **USB DFU** (BLE lost). | proceed, warn on power-cut risk |
 | `upstream_le_0_9` | semver ≤ 0.9.x, no OTAFIX | Any reset with no app gives **USB-only DFU**. A failed transfer needs a cable to recover. | **warn** (`BOOTLOADER_RECOVERY_REQUIRES_USB`) and proceed |
 | `unknown` | DIS missing or unparsable | unknown | warn and proceed |
+| `nrf54` | SoftDevice `s145` in the firmware revision ([meshtastic/nRF54_Bootloader](https://github.com/meshtastic/nRF54_Bootloader), e.g. `v0.5.0-dev2 s145 10.0.1` on a XIAO nRF54LM20A) | Same legacy DFU, MTU 247, 244-byte packets. The `.dat` **device type must be 0x0054**. RRAM is written without erasing, so the old app **stays bootable until the init packet is accepted**. MAC+1 after a reset. | proceed |
 
 The SoftDevice version is parsed from the same string. If `.dat` `sd_req` contains neither `0xFFFE` nor the FWID of the installed SoftDevice (6.1.1 → `0x00B6`, 7.3.0 → `0x0123`, from a built-in table), DFU32 **aborts before START** with `SD_REQ_MISMATCH`. Otherwise the bootloader would reject INIT *after* erasing the app **[verified]**.
 
 The classification also sets transfer parameters: `upstream_le_0_9` has a 20-byte Packet characteristic and MTU 23 **[verified]**.
+
+It also sets the `.dat` device type the bootloader requires: 0x0052 for every nRF52 variant, 0x0054 for `nrf54`.
+- At staging time DFU32 accepts either known type.
+- Once the bootloader is identified, still before START, a mismatch aborts with `DEVICE_TYPE_MISMATCH` and sends SYS_RESET.
+- The nRF52840 size ceiling (§7.2) applies only to 0x0052 images. The nRF54 bootloader checks the size at START itself.
 
 ---
 

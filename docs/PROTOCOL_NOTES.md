@@ -89,3 +89,16 @@ Throughout, `T` = `lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_b
 - It ends lines on CR, echoes input, and prefixes replies with `"  -> "`. There is no password.
 - `start ota` is also allowed remotely after an admin login over LoRa (MC `CommonCLI.cpp:220`; `docs/faq.md:732-747`).
 - `ver` → `vX.Y.Z-<sha7> (Build: DD-Mon-YYYY)`; `board` → e.g. `RAK 4631`; `get bootloader.ver` scans flash for `"UF2 Bootloader "`.
+
+## nRF54L: meshtastic/nRF54_Bootloader (bench find, M1)
+
+On the bench, a XIAO nRF54LM20A running MeshCore reported DIS firmware revision `v0.5.0-dev2 s145 10.0.1` and model `XIAO nRF54LM20A`. The source checked is [meshtastic/nRF54_Bootloader](https://github.com/meshtastic/nRF54_Bootloader) `d19edbe`, Release 0.5.0, an SDK11 Adafruit-bootloader port. Paths below are relative to that repo.
+- Same legacy DFU service and opcodes; the buttonless jump from the app works.
+- **Bootloader address after the jump:** the same address as the app. After a reset it is MAC+1 (`dfu_transport_ble.c:1119`).
+- **Packet size:** `BLEGATT_ATT_MTU_MAX` is 247 and the Packet characteristic's max length is 244 (`ble_dfu.c:20,87`). Writes must be multiples of 4 (`dfu_transport_ble.c:447`).
+- **Device type:** `DFU_DEVICE_TYPE` is **0x0054** (`src/dfu_init.c:93,218`).
+- **Size check:** the image size is checked at START against `DFU_IMAGE_MAX_SIZE_FULL` (`dfu_single_bank.c:301`).
+- **When the app is invalidated:** only once the init packet is accepted. A rejected package leaves the old app bootable (`dfu_single_bank.c:437-439`).
+- **Not verified:**
+  - Release 0.5.0 has no LM20A board definition (only nRF54L05/L10/L15 boards), so the bench board runs a dev build from elsewhere;
+  - the bootloader advertised at RSSI −103 dBm against −48 dBm for the app, a big gap worth checking (TX power or antenna switch).

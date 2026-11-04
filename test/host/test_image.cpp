@@ -41,6 +41,26 @@ TEST_CASE("Precheck failures", "[image]") {
     CHECK(check_app_image(p, kRak4631BinSize, kRak4631Crc) == ImageError::WrongDeviceType);
 }
 
+TEST_CASE("Device type: any known family before identification, exact after", "[image]") {
+    auto p = rak4631_dat();
+    CHECK(check_app_image(p, kRak4631BinSize, kRak4631Crc, dfu::kDefaultMaxAppSize, dfu::kAdafruitDeviceType) ==
+          ImageError::Ok);
+    CHECK(check_app_image(p, kRak4631BinSize, kRak4631Crc, dfu::kDefaultMaxAppSize, dfu::kNrf54DeviceType) ==
+          ImageError::WrongDeviceType);
+
+    p.device_type = dfu::kNrf54DeviceType;
+    CHECK(check_app_image(p, kRak4631BinSize, kRak4631Crc) == ImageError::Ok);  // known family
+    CHECK(check_app_image(p, kRak4631BinSize, kRak4631Crc, dfu::kDefaultMaxAppSize, dfu::kNrf54DeviceType) ==
+          ImageError::Ok);
+    CHECK(check_app_image(p, kRak4631BinSize, kRak4631Crc, dfu::kDefaultMaxAppSize, dfu::kAdafruitDeviceType) ==
+          ImageError::WrongDeviceType);
+}
+
+TEST_CASE("Default size ceiling depends on device type", "[image]") {
+    CHECK(dfu::default_max_app_size(dfu::kAdafruitDeviceType) == dfu::kMaxAppSizeS140v7);
+    CHECK(dfu::default_max_app_size(dfu::kNrf54DeviceType) == UINT32_MAX);
+}
+
 TEST_CASE("ImageError strings are distinct", "[image]") {
     CHECK(std::string(dfu::to_string(ImageError::CrcMismatch)) == "DAT_CRC_MISMATCH");
     CHECK(std::string(dfu::to_string(ImageError::NotWordAligned)) == "IMAGE_NOT_WORD_ALIGNED");

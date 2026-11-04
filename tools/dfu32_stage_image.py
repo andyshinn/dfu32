@@ -8,8 +8,9 @@ parttool.py or esptool (the command is printed at the end).
 
 Inputs are either an adafruit-nrfutil DFU .zip (the MeshCore release format)
 or a separate firmware.bin + firmware.dat. The image is validated the same way
-DFU32 validates it before touching a target: .dat layout, device type 0x0052,
-word alignment, size limit and CRC16 of the .bin against the .dat.
+DFU32 validates it before touching a target: .dat layout, device type (0x0052
+nRF52 / 0x0054 nRF54), word alignment, size limit and CRC16 of the .bin
+against the .dat.
 
 Examples:
   dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --board rak4631 -o staging.img
@@ -34,7 +35,9 @@ HEADER_SIZE = 0x240
 DATA_OFFSET = 0x1000
 MAX_DAT = 64
 MAX_APP_SIZE = 802816  # nRF52840 + S140 6.1.1; S140 7.3.0 is 798720
-ADAFRUIT_DEVICE_TYPE = 0x0052
+ADAFRUIT_DEVICE_TYPE = 0x0052  # Adafruit nRF52 bootloader
+NRF54_DEVICE_TYPE = 0x0054     # meshtastic/nRF54_Bootloader (checks size itself at START)
+KNOWN_DEVICE_TYPES = (ADAFRUIT_DEVICE_TYPE, NRF54_DEVICE_TYPE)
 STAGING_SIZES = {"4mb": 0xD0000, "8mb": 0x100000}
 STAGING_OFFSETS = {"4mb": 0x300000, "8mb": 0x630000}
 
@@ -142,13 +145,14 @@ def load_package(zip_path: Path | None, bin_path: Path | None, dat_path: Path | 
 
 def validate(bin_data: bytes, dat: bytes, max_app_size: int) -> InitPacket:
     pkt = parse_dat(dat)
-    if pkt.device_type != ADAFRUIT_DEVICE_TYPE:
-        raise ValueError(f".dat device_type is 0x{pkt.device_type:04X}; the Adafruit bootloader requires 0x0052")
+    if pkt.device_type not in KNOWN_DEVICE_TYPES:
+        raise ValueError(f".dat device_type is 0x{pkt.device_type:04X}; expected 0x0052 (Adafruit nRF52 "
+                         "bootloader) or 0x0054 (nRF54 bootloader). Was --dev-type passed to adafruit-nrfutil?")
     if not bin_data:
         raise ValueError("empty .bin")
     if len(bin_data) % 4:
         raise ValueError(f".bin size {len(bin_data)} is not a multiple of 4")
-    if len(bin_data) > max_app_size:
+    if pkt.device_type == ADAFRUIT_DEVICE_TYPE and len(bin_data) > max_app_size:
         raise ValueError(f".bin size {len(bin_data)} exceeds max app size {max_app_size}")
     crc = crc16_ccitt(bin_data)
     if crc != pkt.crc16:

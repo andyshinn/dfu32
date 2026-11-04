@@ -85,6 +85,9 @@ void print_link(const ble::LinkInfo& l) {
                     l.bootloader.sd_fwid);
     }
     std::printf("\n");
+    if (l.bootloader.device_type) {
+        std::printf("  .dat device type  0x%04X required\n", l.bootloader.device_type);
+    }
     std::printf("  ATT MTU           %u\n", l.mtu);
     std::printf("  packet size       %u bytes%s\n", l.packet_size,
                 l.packet_size >= 244 ? "" : l.packet_size == 20 ? "  (legacy 20-byte mode)" : "");

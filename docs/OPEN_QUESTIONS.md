@@ -44,6 +44,13 @@ Items are ranked by how much the design changes if the answer differs from the a
    - *Impact:* chunk size (20 vs 244 → about 5–10× throughput), timeouts, and the SCAN_BL step. This is the first thing M1 measures.
    - **Source hint (M1):** MeshCore's `startOTAUpdate` calls `Bluefruit.configPrphBandwidth(BANDWIDTH_MAX)` before `Bluefruit.begin()`. That configures the app's SoftDevice for MTU 247, and on the 0xB1 path the bootloader inherits the app's SoftDevice. 244-byte packets are therefore likely. Confirm with the M1 `probe` command (see `docs/BENCH.md`).
    - **Also found:** the app's OTA advertising has no DFU service UUID, so target matching on the exact app MAC is by address only (SPEC §5.2 updated).
+   - **Bench result, nRF54 (XIAO nRF54LM20A, Feather V2):**
+     - buttonless jump OK, taking about 4.5 s (link supervision timeout);
+     - app MTU 92 (MeshCore `configPrphConn(92, …)`);
+     - bootloader at the **same MAC** with **MTU 247**;
+     - SYS_RESET returned the board to its app.
+
+     This exposed an nRF54 bootloader class (device type 0x0054), now handled. **Still open: an nRF52840 bench probe (Heltec T096 next).**
 
 2. ~~**Q — Which bootloader is on your repeaters?**~~ **Answered:** the first repeater reports `0.9.2-OTAFIX2.2-BP1.3`.
    - OTAFIX 2.2 has MTU 247, DLE, lazy erase, +8 dBm, and BLE OTA recovery after a failure or power cut. That's the best case, and the spec's reference target.

@@ -42,10 +42,11 @@ def golden_header() -> si.StagingHeader:
     )
 
 
-def synthetic_package(size: int = 1024) -> tuple[bytes, bytes]:
+def synthetic_package(size: int = 1024, device_type: int = 0x0052) -> tuple[bytes, bytes]:
     bin_data = bytes((i * 7 + 3) & 0xFF for i in range(size))
     crc = si.crc16_ccitt(bin_data)
-    dat = bytes([0x52, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0xB6, 0x00, crc & 0xFF, crc >> 8])
+    dat = bytes([device_type & 0xFF, device_type >> 8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00,
+                 0xB6, 0x00, crc & 0xFF, crc >> 8])
     return bin_data, dat
 
 
@@ -101,6 +102,10 @@ class Image(unittest.TestCase):
             si.validate(bin_data, dat, 512)
         with self.assertRaisesRegex(ValueError, "device_type"):
             si.validate(bin_data, b"\xFF\xFF" + dat[2:], si.MAX_APP_SIZE)
+
+    def test_nrf54_device_type(self):
+        bin_data, dat = synthetic_package(2048, device_type=0x0054)
+        si.validate(bin_data, dat, 512)  # nRF52 ceiling does not apply to nRF54 images
 
     def test_cli_with_zip(self):
         bin_data, dat = synthetic_package(2048)

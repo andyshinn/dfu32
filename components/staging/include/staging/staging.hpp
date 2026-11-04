@@ -38,7 +38,8 @@ public:
 
     /// Re-reads the whole image: SHA-256 and CRC16 of the .bin, SHA-256 and
     /// layout of the .dat, then the pre-START checks (SPEC.md §7.2).
-    StagingVerify verify(uint32_t max_app_size = dfu::kDefaultMaxAppSize);
+    /// `max_app_size` 0 = the default ceiling for the .dat's device type.
+    StagingVerify verify(uint32_t max_app_size = 0);
 
     bool read(uint32_t offset, std::span<uint8_t> out) override;
 

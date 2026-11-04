@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "dfu_proto/chunk.hpp"
+#include "dfu_proto/init_packet.hpp"
 
 namespace dfu {
 namespace {
@@ -50,6 +51,7 @@ const char* to_string(BootloaderClass c) noexcept {
         case BootloaderClass::Otafix: return "otafix";
         case BootloaderClass::UpstreamGe0_10: return "upstream_ge_0_10";
         case BootloaderClass::UpstreamLe0_9: return "upstream_le_0_9";
+        case BootloaderClass::Nrf54: return "nrf54";
     }
     return "unknown";
 }
@@ -68,6 +70,7 @@ uint16_t max_packet_for(BootloaderClass c) noexcept {
     switch (c) {
         case BootloaderClass::Otafix:
         case BootloaderClass::UpstreamGe0_10:
+        case BootloaderClass::Nrf54:
             return kPacketMax;
         case BootloaderClass::UpstreamLe0_9:
         case BootloaderClass::Unknown:
@@ -94,11 +97,22 @@ BootloaderInfo classify_bootloader(std::string_view rev) {
         }
     }
 
-    if (parse_semver(tokens[0], info.major, info.minor, info.patch) < 2) {
-        info.major = info.minor = info.patch = -1;
+    std::string_view ver = tokens[0];
+    if (!ver.empty() && (ver[0] == 'v' || ver[0] == 'V')) ver.remove_prefix(1);  // "v0.5.0-dev2"
+    const int parts = parse_semver(ver, info.major, info.minor, info.patch);
+    if (parts < 2) info.major = info.minor = info.patch = -1;
+    if (parts >= 2 && info.patch < 0) info.patch = 0;
+
+    // nRF54L port: identified by its SoftDevice family (S145), any version.
+    if (info.sd_variant == "s145") {
+        info.cls = BootloaderClass::Nrf54;
+        info.device_type = kNrf54DeviceType;
+        return info;
+    }
+    if (parts < 2) {
         return info;  // Unknown
     }
-    if (info.patch < 0) info.patch = 0;
+    info.device_type = kAdafruitDeviceType;  // all nRF52 Adafruit bootloader variants
 
     if (tokens[0].find("OTAFIX") != std::string_view::npos) {
         info.cls = BootloaderClass::Otafix;

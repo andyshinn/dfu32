@@ -390,6 +390,8 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, LinkInfo
              info.packet_size, info.tx_phy, info.rx_phy);
     if (info.bootloader.cls == dfu::BootloaderClass::UpstreamLe0_9) {
         ESP_LOGW(TAG, "upstream bootloader <= 0.9.x: a failed transfer needs USB to recover");
+    } else if (info.bootloader.cls == dfu::BootloaderClass::Nrf54) {
+        ESP_LOGI(TAG, "nRF54 bootloader: .dat device type must be 0x0054");
     } else if (info.bootloader.cls == dfu::BootloaderClass::Unknown) {
         ESP_LOGW(TAG, "bootloader not recognised; using 20-byte packets");
     }
@@ -491,6 +493,18 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
     const uint32_t t0 = now_ms();
     auto link = open_bootloader(app, opts.scan_ms, r.link, r.error);
     if (!link) {
+        r.total_ms = now_ms() - t0;
+        return r;
+    }
+
+    const uint16_t want_type = r.link.bootloader.device_type;
+    if (want_type != 0 && init.device_type != want_type) {
+        char buf[112];
+        std::snprintf(buf, sizeof(buf), "DEVICE_TYPE_MISMATCH: image is for device type 0x%04X, bootloader wants 0x%04X",
+                      init.device_type, want_type);
+        r.error = buf;
+        send_sys_reset(*link);  // nothing erased; let the app boot again
+        link->close();
         r.total_ms = now_ms() - t0;
         return r;
     }
