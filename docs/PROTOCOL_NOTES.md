@@ -21,7 +21,7 @@ Throughout, `T` = `lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_b
 | Brief said | Source says |
 |---|---|
 | `start ota` on a repeater sets GPREGRET=0xA8 and resets | **No.** MC `NRF52Board.cpp:412-458` starts Bluefruit `BLEDfu` ("buttonless") in the running app. It advertises `<BOARD>_OTA` at the **app MAC** and replies `OK - mac: …`. The jump only happens when a DFU client writes START to the app's CP: BF `:107-182` saves peer data, sets GPREGRET=**0xB1** and jumps with no reset. |
-| Bootloader is at app MAC + 1 | **Only on the 0xA8 reset path** (T U:1106-1115 / O:1215-1225: `addr[0] += 1`, the LSB, uint8 wrap). On the 0xB1 app-jump path with peer data, it keeps the **same** address (T U:1099-1102). After a failed OTAFIX transfer, the board resets with 0xA8, so it is at MAC+1. |
+| Bootloader is at app MAC + 1 | **Only on the 0xA8 reset path** (T U:1106-1115 / O:1215-1225: `addr[0] += 1`, the LSB, uint8 wrap). On the 0xB1 app-jump path with peer data, it keeps the **same** address (T U:1099-1102). After a failed OTAFIX transfer, the board resets with 0xA8, so it is at MAC+1. **Bench:** after a MeshCore buttonless jump, OTAFIX 2.3 on a Heltec T096 came up at **MAC+1**, so it did not accept the peer data. The nRF54 port stayed on the same MAC. DFU32 accepts both addresses. |
 | Name `AdaDFU` | Upstream: `AdaDFU` (T:44-47). OTAFIX: per board, e.g. `4631_DFU`, `3401_DFU`, `XIAO_DFU` (`board.mk`). |
 | Legacy clients write 20-byte packets | U ≥0.10 and OTAFIX configure ATT MTU 247 with a 244-byte Packet char. U ≤0.9.2 uses MTU 23 and 20 bytes. Neither side starts the MTU exchange, so the client must. **Every data write must be a multiple of 4** (T:445-453). |
 | Image ~800 KB | The nRF52840 maximum app size is **802 816 B** (S140 6.1.1, app at 0x26000) or **798 720 B** (S140 7.3.0, XIAO). The actual MeshCore repeater v1.18.0 `.bin` files are **360–441 KB** (measured in M0). The 0x26000 app start for S140 6.1.1 is confirmed from a RAK UF2's block addresses. |
@@ -102,3 +102,14 @@ On the bench, a XIAO nRF54LM20A running MeshCore reported DIS firmware revision 
 - **Not verified:**
   - Release 0.5.0 has no LM20A board definition (only nRF54L05/L10/L15 boards), so the bench board runs a dev build from elsewhere;
   - the bootloader advertised at RSSI −103 dBm against −48 dBm for the app, a big gap worth checking (TX power or antenna switch).
+
+## Bench: nRF52840 with OTAFIX (Heltec T096, M1)
+
+- Factory bootloader `0.9.0-2-g836c8dc-dirty` (Heltec build): after the buttonless jump nothing advertised at the MAC or MAC+1, even though stock 0.9.0 code advertises name + UUID normally. Cause unknown; DFU32 now logs DFU-looking advertisers when this happens.
+- After installing OTAFIX `0.9.2-OTAFIX2.3-BP1.4` (UF2 `update-` file):
+  - the app advertised as `T096_OTA` with MTU 92;
+  - after the jump, the bootloader advertised as `T096_DFU` at **MAC+1**, with the DFU UUID;
+  - DIS firmware revision `0.9.2-OTAFIX2.3-BP1.4 s140 6.1.1`, model `Tracker`;
+  - **MTU 247, so 244-byte packets**; PHY 1M (the DFU32 here was a Feather V2, BLE 4.2);
+  - SYS_RESET returned the board to its app.
+- Both "jump" timings (about 4.5 s) are mostly the link supervision timeout (4 s), because the peer vanishes rather than disconnecting cleanly.

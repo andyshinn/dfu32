@@ -50,7 +50,9 @@ Items are ranked by how much the design changes if the answer differs from the a
      - bootloader at the **same MAC** with **MTU 247**;
      - SYS_RESET returned the board to its app.
 
-     This exposed an nRF54 bootloader class (device type 0x0054), now handled. **Still open: an nRF52840 bench probe (Heltec T096 next).**
+     This exposed an nRF54 bootloader class (device type 0x0054), now handled.
+   - **Answered for nRF52840 (Heltec T096, OTAFIX 2.3):** MTU 247, so **244-byte packets** after the buttonless jump. The bootloader came up at **MAC+1** (peer data not accepted), which DFU32 handles. With its factory Heltec bootloader (0.9.0-dirty) the T096 never advertised after the jump; OTAFIX fixed that.
+   - **Possible M2 tweak:** lower the supervision timeout from 4 s to about 2 s. That would cut the jump time by about 2 s and detect a dropped link mid-transfer sooner.
 
 2. ~~**Q — Which bootloader is on your repeaters?**~~ **Answered:** the first repeater reports `0.9.2-OTAFIX2.2-BP1.3`.
    - OTAFIX 2.2 has MTU 247, DLE, lazy erase, +8 dBm, and BLE OTA recovery after a failure or power cut. That's the best case, and the spec's reference target.
