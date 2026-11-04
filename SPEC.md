@@ -78,11 +78,17 @@ DFU32 can also stage without arming: `POST /targets/{id}/stage`. This lets the o
 
 Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top of the root `sdkconfig.defaults`. Each profile sets flash size, the partition CSV, the console transport, PSRAM, and pins (LED, button).
 
-| Profile | Flash / PSRAM | Partition CSV | Console | LED | Button |
-|---|---|---|---|---|---|
-| `feather_esp32s3` (Adafruit #5477, **primary bench board**) | 4 MB / 2 MB quad PSRAM | `partitions/4mb.csv` | USB-Serial-JTAG | NeoPixel GPIO33, power GPIO21 *(verify)* | BOOT GPIO0 |
-| `feather_esp32_v2` | 8 MB / 2 MB | `partitions/8mb.csv` | UART0 via USB bridge | NeoPixel GPIO0, power GPIO2 *(verify)* | SW GPIO38 *(verify)* |
-| `esp32s3_n16r8` | 16 MB / 8 MB | `partitions/8mb.csv` (8 MB is plenty) | USB-Serial-JTAG | WS2812 GPIO48 *(verify)* | BOOT GPIO0 |
+| Profile | Flash / PSRAM | Partition CSV | Console | NeoPixel (data / power, active-high) | Red LED | Button |
+|---|---|---|---|---|---|---|
+| `feather_esp32s3` (Adafruit #5477, **primary bench board**) | 4 MB / 2 MB quad PSRAM | `partitions/4mb.csv` | USB-Serial-JTAG | GPIO33 / GPIO21 | GPIO13 | BOOT GPIO0 |
+| `feather_esp32_v2` | 8 MB / 2 MB | `partitions/8mb.csv` | UART0 via USB bridge | GPIO0 / GPIO2 (shared with STEMMA I2C power) | GPIO13 | SW GPIO38 (input-only) |
+| `esp32s3_n16r8` | 16 MB / 8 MB | `partitions/8mb.csv` (8 MB is plenty) | USB-Serial-JTAG | GPIO48 / none *(varies by clone, verify)* | none | BOOT GPIO0 |
+
+The Feather pins are verified against Adafruit's board definitions: arduino-esp32 `variants/adafruit_feather_esp32s3/pins_arduino.h` and `variants/adafruit_feather_esp32_v2/pins_arduino.h`, plus CircuitPython `ports/espressif/boards/adafruit_feather_esp32s3_4mbflash_2mbpsram/`. The NeoPixel power pin must be driven HIGH before the LED is used.
+
+Both button pins have quirks:
+- Feather S3 BOOT (GPIO0) is a strapping pin. A long-press is only interpreted once the app is running; holding it at reset enters the ROM download mode, as normal.
+- Feather V2 GPIO38 is input-only and has no internal pull-up. The board supplies one.
 
 ---
 
@@ -568,7 +574,7 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
 
 DFU32 Kconfig (`main/Kconfig.projbuild`):
 - `DFU32_MAX_TARGETS` (default 1)
-- `DFU32_LED_GPIO`, `DFU32_LED_POWER_GPIO`, `DFU32_BUTTON_GPIO` (−1 = none)
+- `DFU32_NEOPIXEL_GPIO`, `DFU32_NEOPIXEL_POWER_GPIO`, `DFU32_STATUS_LED_GPIO` (plain red LED), `DFU32_BUTTON_GPIO`. −1 = none; set by the board profile.
 - `DFU32_LOG_RING_KB` (default 64, in PSRAM)
 - `DFU32_IMPROV_BLE` (y)
 - `DFU32_DEBUG_ENDPOINTS` (n): fault injection (§14.2)
@@ -615,6 +621,8 @@ Writes are rare (one sector per run), so wear isn't a concern.
 | solid red | last run failed |
 | red fast blink | target erased and not reflashed |
 | amber flash | button-hold feedback |
+
+On the Feathers, the plain red LED (GPIO13) is the **attention** indicator, separate from the NeoPixel. It stays solid while the target is known to be erased and not yet reflashed, so the warning is visible even if the NeoPixel is dimmed or disabled. It blinks during the transfer.
 
 ---
 

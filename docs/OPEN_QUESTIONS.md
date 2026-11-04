@@ -63,9 +63,11 @@ Items are ranked by how much the design changes if the answer differs from the a
    - If it's over budget, fallbacks in order: (a) drop mDNS, (b) make Improv BLE a separate build flavour, (c) treat 4 MB as "no self-OTA" (one app slot), (d) raise the floor to 8 MB.
    - *Your call needed only if (c) or (d) becomes necessary.*
 
-6. ~~**Q — Which Feather ESP32-S3?**~~ **Answered:** the 4 MB flash / 2 MB PSRAM version (#5477). **PSRAM is now required**; no-PSRAM boards such as #5323 aren't supported. Still open: confirm the NeoPixel and button pins (below).
-   - Also confirm the NeoPixel and button pins in §4. They're from memory and marked *(verify)*.
-   - *Impact:* bench profile only.
+6. ~~**Q — Which Feather ESP32-S3, and its pins?**~~ **Answered:** the 4 MB flash / 2 MB PSRAM version (#5477). PSRAM is now required.
+   - The pins are verified from Adafruit's arduino-esp32 and CircuitPython board files (SPEC §4).
+   - Feather S3: NeoPixel GPIO33, power GPIO21, red LED GPIO13, BOOT GPIO0.
+   - Feather V2: NeoPixel GPIO0, power GPIO2, red LED GPIO13, button GPIO38.
+   - learn.adafruit.com isn't reachable from the build session, so the pinout page itself wasn't read.
 
 7. **A — The DIS Firmware Revision string is available in the bootloader on both entry paths.**
    - DFU32 uses it to classify the bootloader and cross-check `sd_req` before START.
