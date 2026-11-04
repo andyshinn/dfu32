@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
-// DFU32 M0 skeleton: boot banner and layout self-check. The DFU client,
-// staging, networking and API arrive in later milestones (docs/MILESTONES.md).
+// DFU32 M1: boot banner, layout self-check, NimBLE central and the USB-serial
+// bench console (scan / probe / flash). Networking and the HTTP API arrive in
+// M3 (docs/MILESTONES.md).
 #include <cinttypes>
 #include <cstdint>
 
-#include "dfu_proto/chunk.hpp"
+#include "console.hpp"
+#include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/image.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -14,6 +16,7 @@
 #include "esp_partition.h"
 #include "esp_psram.h"
 #include "nvs_flash.h"
+#include "psa/crypto.h"
 #include "sdkconfig.h"
 
 namespace {
@@ -71,17 +74,24 @@ extern "C" void app_main(void) {
     ok &= check_data_partition("staging", kSubtypeStaging, kStagingHeaderSize + dfu::kMaxAppSizeS140v6);
     ok &= check_data_partition("runlog", kSubtypeRunlog, kMinRunlogSlots * kRunlogSlotSize);
 
-    ESP_LOGI(TAG, "dfu_proto: packet size at MTU 23 = %u, at MTU 247 = %u",
-             static_cast<unsigned>(dfu::packet_size_for_mtu(23)),
-             static_cast<unsigned>(dfu::packet_size_for_mtu(247)));
-
     if (!ok) {
         ESP_LOGE(TAG, "layout self-check FAILED; refusing to mark this image valid");
         return;
     }
+    ESP_LOGI(TAG, "layout self-check OK");
 
-    // M0 has no network, so mark valid once the layout self-check passes.
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        ESP_LOGE(TAG, "psa_crypto_init failed");
+        return;
+    }
+    if (!dfu32::ble::init()) {
+        ESP_LOGE(TAG, "BLE init failed; refusing to mark this image valid");
+        return;
+    }
+
+    // No network yet, so mark valid once the self-check and BLE init pass.
     // M3 moves this after Wi-Fi + HTTP come up (SPEC.md §12.3, rollback).
     esp_ota_mark_app_valid_cancel_rollback();
-    ESP_LOGI(TAG, "layout self-check OK");
+
+    dfu32::start_console();
 }

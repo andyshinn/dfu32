@@ -114,7 +114,11 @@ A UART/USB-host trigger may come later as an optional `trigger` plugin. The data
 
 What this means for discovery:
 - The configured identity is the **app MAC** plus its address type. Usually that is random static; it is captured from the scan.
-- When looking for a target, DFU32 accepts an advertiser if **(addr == app_mac OR addr == app_mac_lsb_plus_1) AND** it advertises service `00001530-1212-EFDE-1523-785FEABCD123`. Names are logged but never used for matching, because they differ by bootloader variant and board.
+- When looking for a target, DFU32 accepts an advertiser if either:
+  - its address **equals the app MAC**, by address alone; or
+  - its address is **app MAC LSB + 1 and** it advertises service `00001530-1212-EFDE-1523-785FEABCD123`.
+
+  The UUID is not required for the exact match because the MeshCore app's `start ota` advertising carries only flags, TX power and the name **[verified: `NRF52Board::startOTAUpdate`]**. The DFU service is confirmed by GATT discovery after connecting. After a buttonless jump, the re-scan for the bootloader requires the UUID on both addresses, so a lingering app advert can't be mistaken for the bootloader. Names are logged but never used for matching, because they differ by bootloader variant and board.
 - After connecting, DFU32 reads the Version char (`0x1534`). `0x0001` means take path A. `0x0008` means skip straight to the transfer.
 - **Bonded-peer whitelist:** if the app handed over a non-zero IRK, the bootloader whitelists only that peer **[verified]**. DFU32 never bonds, so this doesn't arise. If DFU32 sees the target advertising but can't connect, it reports `TARGET_WHITELISTED?` as a hint.
 

@@ -2,10 +2,13 @@
 # dependencies, so it builds both as an IDF component and as a plain CMake
 # library for host unit tests (test/host).
 set(DFU_PROTO_SRCS
+    src/bootloader_info.cpp
     src/crc16.cpp
     src/image.cpp
     src/init_packet.cpp
     src/protocol.cpp
+    src/staging_format.cpp
+    src/transfer.cpp
 )
 
 if(ESP_PLATFORM)
