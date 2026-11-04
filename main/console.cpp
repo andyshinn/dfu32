@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unistd.h>
 
 #include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/protocol.hpp"
@@ -253,12 +254,24 @@ int cmd_blreset(int argc, char** argv) {
     return 0;
 }
 
+// linenoise redraws the prompt with a raw write() that starts with "\r" and
+// "erase to end of line". Anything still in the stdio buffer at that point is
+// overwritten or appears after the prompt, so flush before returning.
+int run_and_flush(void* context, int argc, char** argv) {
+    const auto fn = reinterpret_cast<esp_console_cmd_func_t>(context);
+    const int ret = fn(argc, argv);
+    std::fflush(stdout);
+    fsync(fileno(stdout));
+    return ret;
+}
+
 void reg(const char* name, const char* help, const char* hint, esp_console_cmd_func_t fn) {
     esp_console_cmd_t cmd{};
     cmd.command = name;
     cmd.help = help;
     cmd.hint = hint;
-    cmd.func = fn;
+    cmd.func_w_context = &run_and_flush;
+    cmd.context = reinterpret_cast<void*>(fn);
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
 }
 
