@@ -25,6 +25,27 @@ idf.py -B build/feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 
 The monitor shows the boot banner, "layout self-check OK", the NimBLE address, and a `dfu32>` prompt. Type `help` to list the commands.
 
+### Or flash a CI build from macOS
+
+Each CI run uploads a `dfu32-<board>` artifact. Its `dfu32-<board>-merged.bin` contains the bootloader, partition table, OTA data and app as one image, written at offset 0. Use esptool, from your activated IDF environment (`python -m esptool`) or a standalone install (`brew install esptool` or `pipx install esptool`).
+
+1. Find the port: `ls /dev/cu.usbmodem*` (Feather S3, native USB) or `ls /dev/cu.usbserial* /dev/cu.wchusbserial*` (Feather V2, USB-UART bridge).
+2. The first time only, erase the factory firmware (Adafruit ships TinyUF2/CircuitPython). This also clears NVS and staging:
+
+   ```bash
+   python -m esptool --port /dev/cu.usbmodem1101 erase-flash
+   ```
+
+3. Write the merged image:
+
+   ```bash
+   python -m esptool --port /dev/cu.usbmodem1101 --baud 921600 write-flash 0x0 dfu32-feather_esp32s3-merged.bin
+   ```
+
+If esptool can't connect, the board isn't in download mode: hold **BOOT**, tap **RESET**, release BOOT, then retry. This is normal while the factory TinyUF2 firmware is still on the Feather S3. Tap RESET after flashing if the board doesn't restart on its own.
+
+Open a serial terminal afterwards to get the `dfu32>` prompt, e.g. `idf.py -p PORT monitor` or `screen /dev/cu.usbmodem1101 115200`.
+
 ## 2. Find the repeater's MAC
 
 On the repeater's serial console, or remotely as admin over LoRa, run:
