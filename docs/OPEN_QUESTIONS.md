@@ -12,7 +12,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 | OTA trigger | Manual (`start ota` over serial or remote admin over LoRa); DFU32 only scans |
 | Flow | Arm, then wait (stage and verify first, then scan up to `arm_timeout_s`) |
 | Update policy | Manual only, no polling |
-| Staging partition | v1, and it is the primary store; PSRAM is not used for staging |
+| Staging partition | v1, and it is the primary store (flash, survives reboot). PSRAM holds buffers and logs. |
 | Board safety rail | Configured `target.board` must be in `manifest.boards` |
 | Target identity | Configured **app** MAC; DFU32 accepts MAC or MAC+1 that advertises the DFU UUID |
 | BLE picker | `POST /api/v1/ble/scan` plus "Use as target" in the UI |
@@ -26,7 +26,9 @@ Items are ranked by how much the design changes if the answer differs from the a
 | Multi-target | Data model keyed by ID, v1 cap = 1 |
 | Old bootloaders | Warn only |
 | Retries | Configurable, default 3 full restarts with backoff |
-| Hardware | Portable, 4 MB floor; bench on Feather ESP32-S3 (+ Feather V2) |
+| Hardware | Portable, 4 MB flash floor, **2 MB PSRAM required**; bench on Feather ESP32-S3 #5477 (4 MB/2 MB) (+ Feather V2) |
+| WiFi during transfer | Option (`wifi_off_dfu` + per-request `wifi_off`); default set after bench A/B |
+| Reference bootloader | OTAFIX 2.2 (`0.9.2-OTAFIX2.2-BP1.3`) on the production repeater |
 | Logs | RAM ring + persisted run records (last 14–16) |
 | License | MIT |
 
@@ -41,17 +43,17 @@ Items are ranked by how much the design changes if the answer differs from the a
      - whether the link must be dropped by DFU32 or by the target.
    - *Impact:* chunk size (20 vs 244 → about 5–10× throughput), timeouts, and the SCAN_BL step. This is the first thing M1 measures.
 
-2. **Q — Which bootloader is on each of your repeaters right now?**
-   - Run `get bootloader.ver` on each repeater, or check the DFU32 IDENTIFY log once M1 exists.
-   - With "warn only" chosen, upstream ≤0.9.2 boards will need **USB to recover** after any failed transfer or power cut.
-   - *Impact:* whether you should upgrade them to OTAFIX before deploying DFU32. This is strongly recommended, especially for RAK3401, which is OTAFIX-only anyway. Also: Ikoka's bootloader is in **neither** repo, so I couldn't check it.
+2. ~~**Q — Which bootloader is on your repeaters?**~~ **Answered:** the first repeater reports `0.9.2-OTAFIX2.2-BP1.3`.
+   - OTAFIX 2.2 has MTU 247, DLE, lazy erase, +8 dBm, and BLE OTA recovery after a failure or power cut. That's the best case, and the spec's reference target.
+   - Still to do: check any other repeaters. Ikoka's bootloader is in neither repo.
+   - **New sub-item (B):** `get bootloader.ver` reads the UF2 string from flash. The BLE DIS Firmware Revision string that DFU32 reads is built differently (`<git ver> s140 <SD ver>`). M1 logs the DIS string so the classifier regex can be confirmed against real output.
 
 3. **B — Real `.bin` sizes and word alignment of your MeshCore builds.**
    - Release zips are 353–431 KB, so the bins are probably 450–700 KB, below the 798 720 / 802 816 B limits.
    - A bin whose size isn't a multiple of 4 is refused (DFU32 doesn't pad).
    - *Impact:* staging size, and whether the 4 MB layout's 832 KB staging is comfortable.
 
-4. **Q — Default for `wifi_off_during_dfu`.**
+4. **B — Default for WiFi-off during the transfer.** **Resolved as an option:** config `wifi_off_dfu`, a per-request `wifi_off` override, and a UI checkbox, recorded in every run record. You'll compare on/off on the bench, and the shipped default comes from that. Your hypothesis is that nRF52 flash writes are the bottleneck, so it may not matter. Original notes:
    - The spec defaults to **true**, as you preferred: there is no live HTTP progress during the transfer; the LED and run record cover it.
    - On S3, software coexistence may make WiFi-on transfers reliable enough to keep live progress.
    - Plan: measure both in the M2 throughput matrix, then decide the default. Do you want the default fixed now regardless?
@@ -61,7 +63,7 @@ Items are ranked by how much the design changes if the answer differs from the a
    - If it's over budget, fallbacks in order: (a) drop mDNS, (b) make Improv BLE a separate build flavour, (c) treat 4 MB as "no self-OTA" (one app slot), (d) raise the floor to 8 MB.
    - *Your call needed only if (c) or (d) becomes necessary.*
 
-6. **Q — Is the Feather ESP32-S3 you have the 4 MB flash / 2 MB PSRAM version (#5477) or the 8 MB / no PSRAM version (#5323)?**
+6. ~~**Q — Which Feather ESP32-S3?**~~ **Answered:** the 4 MB flash / 2 MB PSRAM version (#5477). **PSRAM is now required**; no-PSRAM boards such as #5323 aren't supported. Still open: confirm the NeoPixel and button pins (below).
    - Also confirm the NeoPixel and button pins in §4. They're from memory and marked *(verify)*.
    - *Impact:* bench profile only.
 

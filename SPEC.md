@@ -20,7 +20,7 @@ Statements marked **[verified]** were checked against the source of the referenc
 4. **G4:** Survive failure. A failed or interrupted flash can be retried from the staged image without the network, including after the ESP32 reboots.
 5. **G5:** Never leave the network permanently down. Layered timeouts and watchdogs restore WiFi or reboot the ESP32.
 6. **G6:** Make it observable. Structured logs, a persisted record per run, live state and progress, and a full browser UI plus a JSON API.
-7. **G7:** Make it portable. Run on any ESP32-S3 or classic ESP32 with ≥4 MB flash. PSRAM is optional.
+7. **G7:** Make it portable. Run on any ESP32-S3 or classic ESP32 with ≥4 MB flash and **≥2 MB PSRAM**. Boards without PSRAM are not supported.
 8. **G8:** Keep it firmware-agnostic. Nothing in the device depends on MeshCore.
 
 ## 2. Non-goals (v1)
@@ -72,7 +72,7 @@ DFU32 can also stage without arming: `POST /targets/{id}/stage`. This lets the o
 | JSON | `espressif/cjson` managed component (IDF 6 removed the built-in `json` component). |
 | Hashing | mbedTLS / PSA SHA-256 (built in). CRC16-CCITT implemented locally. |
 | Supported SoCs | ESP32-S3 (BLE 5: 2M PHY, DLE) and classic ESP32 (BLE 4.2: DLE, no 2M PHY). |
-| Min flash | 4 MB. PSRAM optional (used only for a bigger log ring when present). |
+| Min flash / PSRAM | 4 MB flash, **2 MB PSRAM required**. PSRAM holds the 64 KB log ring, HTTP and JSON buffers, and WiFi/LWIP buffers (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`). That leaves internal RAM for NimBLE, which stays on internal allocation. Staging stays in flash, for offline retry after a reboot. |
 | Bench boards | **Adafruit Feather ESP32-S3** (primary: native USB, NeoPixel, BOOT button) and **Adafruit Feather ESP32 V2** (secondary target, or the fake-bootloader test fixture, §14.3). |
 | Also supported | Generic ESP32-S3 N16R8 DevKitC (8/16 MB layout). |
 
@@ -80,7 +80,7 @@ Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top
 
 | Profile | Flash / PSRAM | Partition CSV | Console | LED | Button |
 |---|---|---|---|---|---|
-| `feather_esp32s3` | 4 MB / 2 MB (or 8 MB / none) | `partitions/4mb.csv` (or `8mb.csv`) | USB-Serial-JTAG | NeoPixel GPIO33, power GPIO21 *(verify)* | BOOT GPIO0 |
+| `feather_esp32s3` (Adafruit #5477, **primary bench board**) | 4 MB / 2 MB quad PSRAM | `partitions/4mb.csv` | USB-Serial-JTAG | NeoPixel GPIO33, power GPIO21 *(verify)* | BOOT GPIO0 |
 | `feather_esp32_v2` | 8 MB / 2 MB | `partitions/8mb.csv` | UART0 via USB bridge | NeoPixel GPIO0, power GPIO2 *(verify)* | SW GPIO38 *(verify)* |
 | `esp32s3_n16r8` | 16 MB / 8 MB | `partitions/8mb.csv` (8 MB is plenty) | USB-Serial-JTAG | WS2812 GPIO48 *(verify)* | BOOT GPIO0 |
 
@@ -122,7 +122,7 @@ It then classifies the bootloader:
 
 | Class | Detected by | Failure behaviour [verified] | Policy (decided: warn only) |
 |---|---|---|---|
-| `otafix` | `OTAFIX` in the firmware revision | After a failure or power cut with no app, it comes back in **BLE OTA indefinitely** at MAC+1. | proceed |
+| `otafix` | `OTAFIX` in the firmware revision | After a failure or power cut with no app, it comes back in **BLE OTA indefinitely** at MAC+1. This is the reference target: the operator's repeater reports `0.9.2-OTAFIX2.2-BP1.3`, which has MTU 247, DLE and lazy erase. | proceed |
 | `upstream_ge_0_10` | semver ≥ 0.10.0 | `SYS_RESET` mid-transfer returns to BLE OTA. 360 s inactivity timeout. A power cut with no app gives **USB DFU** (BLE lost). | proceed, warn on power-cut risk |
 | `upstream_le_0_9` | semver ≤ 0.9.x, no OTAFIX | Any reset with no app gives **USB-only DFU**. A failed transfer needs a cable to recover. | **warn** (`BOOTLOADER_RECOVERY_REQUIRES_USB`) and proceed |
 | `unknown` | DIS missing or unparsable | unknown | warn and proceed |
@@ -265,9 +265,12 @@ stateDiagram-v2
 ### 7.1 Radio handover
 
 - WiFi stays up during FETCHING and AWAITING_TARGET; scanning coexists through software coex.
-- When the target is found and `wifi_off_during_dfu=true` (default), DFU32 calls `esp_wifi_stop()` before connecting. The driver stays initialised, so restoring is just `esp_wifi_start()` plus reconnect.
+- **WiFi-off during the transfer is an option.** The device-level default is the `wifi_off_dfu` config value. Any flash request can override it with `"wifi_off": true|false`, and the UI has a checkbox next to **Flash**.
+  - The value used is recorded in each run record (`wifi_off`) so that on/off runs can be compared.
+  - The shipped default is decided after bench comparison. The nRF52's flash writes are probably the bottleneck, so WiFi on/off may make little difference.
+- When the option is on and the target is found, DFU32 calls `esp_wifi_stop()` before connecting. The driver stays initialised, so restoring is just `esp_wifi_start()` plus reconnect.
 - While WiFi is off, the HTTP API can't be reached. The LED shows progress, and the run record captures it afterwards.
-- Setting `wifi_off_during_dfu=false` keeps WiFi up for live progress. This is a bench option for comparing reliability.
+- With the option off, WiFi stays up for live progress, and the §7.3 deadline/restore layers still apply. On S3 this relies on software coexistence; on a classic ESP32 it's expected to be slower.
 - NimBLE stays initialised for the life of the app. `NimBLEDevice::deinit()` is used only for Improv BLE teardown if needed. **`esp_bt_controller_mem_release` is never called**, because it is irreversible.
 
 ### 7.2 Prechecks (all run before the target is touched)
@@ -347,7 +350,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `hostname` | str | Default `dfu32-XXXX` (last 2 bytes of MAC). Also the mDNS name. |
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
-| `wifi_off_dfu` | u8 | Default 1 |
+| `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
 | `tgt.0.*` | — | Target 0 (v1 cap = 1): |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
@@ -398,7 +401,7 @@ After 5 failed auth attempts, responses are delayed 1 s for 60 s.
 | `DELETE /api/v1/targets/{id}` | |
 | `POST /api/v1/targets/{id}/check` | Fetch the manifest; return its version, sizes, board match, whether it equals the staged image, and `last_ok_version`. Writes nothing. |
 | `POST /api/v1/targets/{id}/stage` | Fetch, verify and stage without arming. Async; poll status. |
-| `POST /api/v1/targets/{id}/flash` | Body `{"source":"manifest"\|"staged","arm_timeout_s":600}`. Arms the job (§3.1). Async → `202`. |
+| `POST /api/v1/targets/{id}/flash` | Body `{"source":"manifest"\|"staged","arm_timeout_s":600,"wifi_off":true}`. Every field is optional; `wifi_off` defaults to config `wifi_off_dfu`. Arms the job (§3.1). Async → `202`. |
 | `POST /api/v1/jobs/current/abort` | Abort the job. If the transfer has started, this leaves the target erased; the response warns about that. |
 | `GET /api/v1/targets/{id}/runs` · `GET /api/v1/runs/{seq}` | Run records (§13.2), including the log tail |
 | `GET /api/v1/staging` · `DELETE /api/v1/staging` | Staged image header / invalidate it |
@@ -436,7 +439,7 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 }
 ```
 
-(With WiFi off during the transfer, this is only visible if `wifi_off_during_dfu=false`.)
+(This is visible during the transfer only when the run has `wifi_off: false`.)
 
 ### 10.2 Web UI (decided: full config UI)
 
@@ -542,6 +545,13 @@ CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=y
 # Coexistence
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
+# PSRAM (required; mode is set per profile: quad on Feather S3 / Feather V2, octal on N16R8)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n                 # refuse to boot on a no-PSRAM board
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# NimBLE stays on internal RAM (default BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL)
+
 # Watchdogs
 CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
@@ -559,7 +569,7 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
 DFU32 Kconfig (`main/Kconfig.projbuild`):
 - `DFU32_MAX_TARGETS` (default 1)
 - `DFU32_LED_GPIO`, `DFU32_LED_POWER_GPIO`, `DFU32_BUTTON_GPIO` (−1 = none)
-- `DFU32_LOG_RING_KB` (16 without PSRAM, 64 with)
+- `DFU32_LOG_RING_KB` (default 64, in PSRAM)
 - `DFU32_IMPROV_BLE` (y)
 - `DFU32_DEBUG_ENDPOINTS` (n): fault injection (§14.2)
 
@@ -578,13 +588,13 @@ For Improv, a small local implementation of the Improv Serial and BLE protocols 
 ### 13.1 Logging
 
 - Every module logs through `ESP_LOGx` with a stable tag (`dfu`, `ble`, `fetch`, `stage`, `api`, `net`, `job`).
-- An `esp_log_set_vprintf` hook tees output to the console and to a **RAM ring** (16 KB, or 64 KB in PSRAM). Each line gets a monotonically increasing sequence number and an uptime timestamp.
+- An `esp_log_set_vprintf` hook tees output to the console and to a **64 KB ring in PSRAM**. Each line gets a monotonically increasing sequence number and an uptime timestamp.
 - DFU phase transitions are logged as one-line `key=value` events, so they can be parsed: `evt=phase run=42 attempt=1 from=START to=INIT dt_ms=17234`.
 
 ### 13.2 Run records (persisted)
 
 The `runlog` partition is a ring of 4 KB slots: 14 slots on 4 MB, 16 on 8 MB. A slot is erased and written once per run, at the end of the run or when an abort-by-reboot is detected at boot. Each slot holds:
-- A JSON header (≤ 1 KB): `seq`, `target`, `trigger` (`api`/`ui`), `source` (`manifest`/`staged`), `version`, `bin_sha256`, `started_at`, `duration_ms`, `result` (`SUCCEEDED`/`FAILED`/`ABORTED`/`ABORTED_BY_REBOOT`), `error` (code from §13.3), `last_phase`, `attempts`, `target_erased`, `bootloader` (class + DIS string), `mtu`, `chunk`, `prn`, `bytes_acked`, `rate_bps`, `warnings[]`.
+- A JSON header (≤ 1 KB): `seq`, `target`, `trigger` (`api`/`ui`), `source` (`manifest`/`staged`), `version`, `bin_sha256`, `started_at`, `duration_ms`, `result` (`SUCCEEDED`/`FAILED`/`ABORTED`/`ABORTED_BY_REBOOT`), `error` (code from §13.3), `last_phase`, `attempts`, `target_erased`, `bootloader` (class + DIS string), `wifi_off`, `mtu`, `chunk`, `prn`, `bytes_acked`, `rate_bps`, `warnings[]`.
 - The last **≤ 3 KB of log lines** from the run.
 
 Writes are rare (one sector per run), so wear isn't a concern.

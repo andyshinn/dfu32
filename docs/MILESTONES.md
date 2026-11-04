@@ -3,8 +3,8 @@
 Each milestone ends with something demonstrable on the bench.
 
 **Bench kit:**
-- Feather ESP32-S3 running DFU32
-- XIAO nRF52840 with the OTAFIX bootloader and a MeshCore repeater build (sacrificial)
+- Feather ESP32-S3 #5477 (4 MB flash / 2 MB PSRAM) running DFU32
+- XIAO nRF52840 with the OTAFIX bootloader and a MeshCore repeater build (sacrificial). Match the production repeaters: OTAFIX 2.2 (`0.9.2-OTAFIX2.2-BP1.3`) or newer.
 - A PC on the XIAO's USB CDC port for `start ota` and `ver`, and for UF2 recovery
 
 ## M0: Skeleton (½ day)
@@ -41,7 +41,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - link drop mid-transfer leads to automatic recovery and success;
   - power cut mid-transfer, then reflash from staging;
   - bad `.dat` / SD mismatch is refused before START;
-  - the throughput matrix (PRN × MTU × PHY).
+  - the throughput matrix (PRN × MTU × PHY). WiFi on vs off is compared in M3, once WiFi exists.
 - **Done when:** the §14.4 failure rows that don't need networking all pass, and the run records show the right error codes.
 
 ## M3: Networking & API (3–4 days)
@@ -57,7 +57,8 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - wrong board;
   - arm timeout;
   - WiFi-restore watchdog (debug fault endpoint);
-  - an offline re-flash from staging with the AP off.
+  - an offline re-flash from staging with the AP off;
+  - **WiFi on vs off during the transfer** (`wifi_off` per request): at least 5 runs each, comparing rate, PRN timeouts and failures in the run records. This sets the shipped `wifi_off_dfu` default.
 - **Done when:** a full flash is done end to end using only HTTP calls and `start ota` sent **remotely over LoRa** from a companion app.
 
 ## M4: UI, provisioning & polish (3–4 days)
@@ -74,7 +75,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX.
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
 - `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API).
-- Fix defaults from the measurements (PRN, `wifi_off_during_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0.
+- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0.
 
 ## Later (post-v1, in rough priority order)
 
