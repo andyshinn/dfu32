@@ -1,0 +1,6 @@
+## IDF Component Manager manifest for DFU32 (SPEC.md §4, §12.3).
+## Commit the generated dependencies.lock after the first successful build.
+dependencies:
+  idf: "~6.1.0"
+  # Pinned: master is already 3.0.0-dev.
+  h2zero/esp-nimble-cpp: "2.6.0"

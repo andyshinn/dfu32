@@ -1,0 +1,55 @@
+menu "DFU32"
+
+    config DFU32_BOARD_NAME
+        string "Board profile name"
+        default "generic"
+        help
+            Set by boards/<profile>/sdkconfig.defaults. Reported in logs and /api/v1/status.
+
+    config DFU32_MAX_TARGETS
+        int "Maximum number of nRF52 targets"
+        range 1 1
+        default 1
+        help
+            The data model is keyed by target id; v1 supports exactly one target.
+
+    menu "Board pins"
+
+        config DFU32_NEOPIXEL_GPIO
+            int "Addressable status LED (NeoPixel) data GPIO (-1 = none)"
+            range -1 48
+            default -1
+
+        config DFU32_NEOPIXEL_POWER_GPIO
+            int "NeoPixel power-enable GPIO, active high (-1 = none)"
+            range -1 48
+            default -1
+
+        config DFU32_STATUS_LED_GPIO
+            int "Plain attention LED GPIO, active high (-1 = none)"
+            range -1 48
+            default -1
+
+        config DFU32_BUTTON_GPIO
+            int "User button GPIO, active low (-1 = none)"
+            range -1 48
+            default -1
+            help
+                Long-press 5 s unclaims the API token, 15 s factory-resets (SPEC.md §9.3).
+
+    endmenu
+
+    config DFU32_LOG_RING_KB
+        int "In-memory log ring size (KB, allocated in PSRAM)"
+        range 8 256
+        default 64
+
+    config DFU32_IMPROV_BLE
+        bool "Improv Wi-Fi provisioning over BLE (only while unprovisioned)"
+        default y
+
+    config DFU32_DEBUG_ENDPOINTS
+        bool "Fault-injection debug endpoints (never enable in release builds)"
+        default n
+
+endmenu

@@ -1,0 +1,22 @@
+# Adafruit Feather ESP32-S3, 4 MB flash / 2 MB PSRAM (product #5477, ESP32-S3FN4R2).
+# Pins verified against arduino-esp32 variants/adafruit_feather_esp32s3/pins_arduino.h
+# and CircuitPython boards/adafruit_feather_esp32s3_4mbflash_2mbpsram.
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/4mb.csv"
+
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# Native USB on the USB-C connector.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# BLE 5 features (2M PHY, DLE) on S3.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=y
+
+CONFIG_DFU32_BOARD_NAME="feather_esp32s3"
+CONFIG_DFU32_NEOPIXEL_GPIO=33
+CONFIG_DFU32_NEOPIXEL_POWER_GPIO=21
+CONFIG_DFU32_STATUS_LED_GPIO=13
+CONFIG_DFU32_BUTTON_GPIO=0

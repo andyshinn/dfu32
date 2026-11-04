@@ -1,0 +1,48 @@
+# DFU32 common defaults (SPEC.md §12.3). Board specifics (target, flash size,
+# partition CSV, PSRAM mode, console, pins) are in boards/<profile>/sdkconfig.defaults.
+
+# ---- Partitions / app ----------------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# C++ exceptions and RTTI stay at their IDF default (disabled).
+
+# ---- Bluetooth (NimBLE) --------------------------------------------------------
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+# Peripheral + broadcaster are only for Improv BLE while unprovisioned.
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+# >= PRN(8) x fragments + headroom; tune on the bench (M2).
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=32
+# DFU32 never bonds (BT_NIMBLE_NVS_PERSIST stays at its default, off).
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# ---- Coexistence ---------------------------------------------------------------
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# ---- PSRAM (required; mode set per board profile) -------------------------------
+CONFIG_SPIRAM=y
+# Refuse to boot on a board without PSRAM (SPIRAM_IGNORE_NOTFOUND stays off).
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---- Watchdogs -----------------------------------------------------------------
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# ---- HTTP ----------------------------------------------------------------------
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+# v1 is HTTP-only (SPEC.md §2, §11).
+# CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS is not set
+
+# ---- Logging -------------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y

@@ -14,6 +14,11 @@ Each milestone ends with something demonstrable on the bench.
 - GitHub Actions: build esp32s3 + esp32, enforce the app size budget (fail above 1.30 MB on the 4 MB profile), run host unit tests.
 - `components/dfu_proto` with CRC16, the `.dat` parser, the chunk planner and host tests (§14.1 subset).
 - **Done when:** CI is green and the host tests pass.
+- **Status:** implemented.
+  - Host tests pass on GCC 13 and Clang. They include CRC16 checks against four real MeshCore v1.18.0 images.
+  - The partition and size-budget scripts are tested.
+  - The firmware build is verified by CI and on the developer's machine, not in the authoring environment (no ESP-IDF toolchain there).
+  - Beyond the plan, `dfu_proto` also gained the Control Point encoders and notification decoder that M1 needs.
 
 ## M1: Smallest end-to-end proof: flash one known-good image (2–3 days)
 

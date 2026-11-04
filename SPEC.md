@@ -519,7 +519,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 
 ### 12.2 `partitions/8mb.csv` (8 MB and 16 MB boards)
 
-nvs 64 KB, otadata, phy, runlog 64 KB (16 slots), ota_0/ota_1 3 MB each, staging 1 MB, coredump 64 KB, and the remainder free. That leaves room for future features such as zip ingestion or a larger log.
+nvs 60 KB, otadata, phy, runlog 64 KB (16 slots), ota_0/ota_1 3 MB each, staging 1 MB, coredump 64 KB, and about 768 KB free (more on 16 MB boards). The exact offsets are in `partitions/8mb.csv`. That leaves room for future features such as zip ingestion or a larger log.
 
 ### 12.3 sdkconfig requirements (root `sdkconfig.defaults`)
 

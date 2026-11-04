@@ -1,0 +1,13 @@
+# DFU32 partition table, 8 MB+ flash (SPEC.md §12.2). Also used on 16 MB boards.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0xF000,
+otadata,    data, ota,      0x18000,  0x2000,
+phy_init,   data, phy,      0x1A000,  0x1000,
+# runlog: 16 x 4 KB run-record slots (custom data subtype 0x41)
+runlog,     data, 0x41,     0x1B000,  0x10000,
+ota_0,      app,  ota_0,    0x30000,  0x300000,
+ota_1,      app,  ota_1,    0x330000, 0x300000,
+# staging: 4 KB header + nRF52 application image (custom data subtype 0x40)
+staging,    data, 0x40,     0x630000, 0x100000,
+coredump,   data, coredump, 0x730000, 0x10000,
+# 0x740000 onwards left free

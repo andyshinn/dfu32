@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: Host tests & layout checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Partition tables
+        run: python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
+
+      - name: Configure
+        run: cmake -S test/host -B build-host -G Ninja
+
+      - name: Build
+        run: cmake --build build-host
+
+      - name: Test
+        run: ctest --test-dir build-host --output-on-failure
+
+  firmware:
+    name: Firmware (${{ matrix.board }})
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [feather_esp32s3, feather_esp32_v2, esp32s3_n16r8]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
+
+      - name: App size budget
+        run: python3 tools/check_app_size.py "build/${{ matrix.board }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfu32-${{ matrix.board }}
+          path: |
+            build/${{ matrix.board }}/dfu32.bin
+            build/${{ matrix.board }}/dfu32.elf
+            build/${{ matrix.board }}/bootloader/bootloader.bin
+            build/${{ matrix.board }}/partition_table/partition-table.bin
+            build/${{ matrix.board }}/flasher_args.json
+            build/${{ matrix.board }}/sdkconfig
+            dependencies.lock
+          if-no-files-found: warn

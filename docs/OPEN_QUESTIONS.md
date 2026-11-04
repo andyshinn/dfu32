@@ -48,10 +48,13 @@ Items are ranked by how much the design changes if the answer differs from the a
    - Still to do: check any other repeaters. Ikoka's bootloader is in neither repo.
    - **New sub-item (B):** `get bootloader.ver` reads the UF2 string from flash. The BLE DIS Firmware Revision string that DFU32 reads is built differently (`<git ver> s140 <SD ver>`). M1 logs the DIS string so the classifier regex can be confirmed against real output.
 
-3. **B — Real `.bin` sizes and word alignment of your MeshCore builds.**
-   - Release zips are 353–431 KB, so the bins are probably 450–700 KB, below the 798 720 / 802 816 B limits.
-   - A bin whose size isn't a multiple of 4 is refused (DFU32 doesn't pad).
-   - *Impact:* staging size, and whether the 4 MB layout's 832 KB staging is comfortable.
+3. ~~**B — Real `.bin` sizes and word alignment of your MeshCore builds.**~~ **Answered (M0):** MeshCore repeater v1.18.0 `.bin` sizes, all word-aligned:
+   - RAK4631: 440 924 B
+   - RAK3401: 410 036 B
+   - XIAO: 360 768 B
+   - your RAKSHARE build: 409 216 B
+
+   That's about 55% of the app ceiling, so the brief's "~800 KB" was really the region limit, not the image size. The 832 KB staging partition has ample headroom. DFU32's CRC16 matches the `.dat` on all four images. The RAKSHARE UF2 payload is byte-identical to its `.bin` and loads at `0x26000` (S140 6.1.1 app start).
 
 4. **B — Default for WiFi-off during the transfer.** **Resolved as an option:** config `wifi_off_dfu`, a per-request `wifi_off` override, and a UI checkbox, recorded in every run record. You'll compare on/off on the bench, and the shipped default comes from that. Your hypothesis is that nRF52 flash writes are the bottleneck, so it may not matter. Original notes:
    - The spec defaults to **true**, as you preferred: there is no live HTTP progress during the transfer; the LED and run record cover it.

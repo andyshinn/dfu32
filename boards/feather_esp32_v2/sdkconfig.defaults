@@ -1,0 +1,20 @@
+# Adafruit Feather ESP32 V2 (ESP32-PICO-V3-02: 8 MB flash, 2 MB PSRAM). Classic
+# ESP32, BLE 4.2 (DLE, no 2M PHY). Console via the on-board USB-UART bridge.
+# Pins verified against arduino-esp32 variants/adafruit_feather_esp32_v2/pins_arduino.h.
+CONFIG_IDF_TARGET="esp32"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/8mb.csv"
+
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Classic ESP32: run the controller in BLE-only mode (no BR/EDR memory).
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+
+CONFIG_DFU32_BOARD_NAME="feather_esp32_v2"
+CONFIG_DFU32_NEOPIXEL_GPIO=0
+# GPIO2 also powers the STEMMA QT I2C port.
+CONFIG_DFU32_NEOPIXEL_POWER_GPIO=2
+CONFIG_DFU32_STATUS_LED_GPIO=13
+# Input-only pin, no internal pull-up.
+CONFIG_DFU32_BUTTON_GPIO=38
