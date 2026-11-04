@@ -88,7 +88,7 @@ The Feather pins are verified against Adafruit's board definitions: arduino-esp3
 
 Both button pins have quirks:
 - Feather S3 BOOT (GPIO0) is a strapping pin. A long-press is only interpreted once the app is running; holding it at reset enters the ROM download mode, as normal.
-- Feather V2 GPIO38 is input-only and has no internal pull-up. The board supplies one.
+- Feather V2 GPIO38 is input-only and has no internal pull-up, so the firmware must not rely on one. Whether the board has an external pull-up, and the button polarity, are **[bench]**.
 
 ---
 
