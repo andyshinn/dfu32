@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
-// M1 bench console (USB serial). Commands: target, scan, staged, probe, flash,
-// blreset. Replaced by the HTTP API / web UI in M3-M4, kept as a debug tool.
+// Bench console (USB serial): target, wifi, check, stage, scan, staged, probe,
+// flash, runs, run, logs, blreset. The HTTP API (M3b) and web UI (M4) cover the
+// same ground; the console stays as a debug tool.
 #include "console.hpp"
 
 #include <cinttypes>
@@ -11,13 +12,15 @@
 #include <string>
 #include <unistd.h>
 
+#include "config/config.hpp"
 #include "dfu_ble/dfu_ble.hpp"
+#include "fetch/fetch.hpp"
+#include "net/net.hpp"
 #include "dfu_proto/protocol.hpp"
 #include "dfu_proto/retry.hpp"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "nvs.h"
 #include "runlog/run_record.hpp"
 #include "runlog/runlog_idf.hpp"
 #include "staging/staging.hpp"
@@ -26,9 +29,6 @@ namespace dfu32 {
 namespace {
 
 constexpr const char* TAG = "console";
-constexpr const char* kNvsNamespace = "dfu32";
-constexpr const char* kKeyMac = "tgt0_mac";
-constexpr const char* kKeyType = "tgt0_type";
 
 // ---- helpers ------------------------------------------------------------------
 
@@ -47,29 +47,13 @@ long opt_long(int argc, char** argv, const char* flag, long def) {
 }
 
 bool load_target(ble::Mac& out) {
-    nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return false;
-    char buf[18] = {};
-    size_t len = sizeof(buf);
-    uint8_t type = 1;
-    const bool ok = nvs_get_str(h, kKeyMac, buf, &len) == ESP_OK;
-    nvs_get_u8(h, kKeyType, &type);
-    nvs_close(h);
-    return ok && ble::Mac::parse(buf, type, out);
-}
-
-bool save_target(const ble::Mac& mac) {
-    nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) return false;
-    const bool ok = nvs_set_str(h, kKeyMac, mac.str().c_str()) == ESP_OK &&
-                    nvs_set_u8(h, kKeyType, mac.type) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    return ok;
+    TargetConfig t;
+    return config::load_target(t) && !t.mac.empty() && ble::Mac::parse(t.mac, t.addr_type, out);
 }
 
 bool require_target(ble::Mac& mac) {
     if (load_target(mac)) return true;
-    std::printf("No target set. Use: target <MAC> [random|public]\n"
+    std::printf("No target MAC set. Use: target <MAC> [random|public]\n"
                 "(MeshCore prints the MAC in its `start ota` reply.)\n");
     return false;
 }
@@ -155,27 +139,189 @@ runlog::RunRecord make_record(uint32_t seq, const ble::Mac& mac, const StagedIma
 
 // ---- commands -----------------------------------------------------------------
 
+void print_target(const TargetConfig& t) {
+    std::printf("  id         %s%s\n", t.effective_id().c_str(), t.id.empty() ? " (default)" : "");
+    std::printf("  mac        %s", t.mac.empty() ? "(not set)" : t.mac.c_str());
+    ble::Mac mac;
+    if (!t.mac.empty() && ble::Mac::parse(t.mac, t.addr_type, mac)) {
+        std::printf(" (%s), bootloader after reset at %s or %s", t.addr_type ? "random" : "public", mac.str().c_str(),
+                    mac.plus_one().str().c_str());
+    }
+    std::printf("\n  board      %s\n", t.board.empty() ? "(not set: needed for `check`/`stage`)" : t.board.c_str());
+    std::printf("  manifest   %s\n", t.manifest_url.empty() ? "(not set)" : t.manifest_url.c_str());
+    if (t.max_app_size) {
+        std::printf("  max app    %" PRIu32 " B\n", t.max_app_size);
+    } else {
+        std::printf("  max app    default (798720 B for nRF52, none for nRF54)\n");
+    }
+}
+
 int cmd_target(int argc, char** argv) {
+    TargetConfig t;
+    if (!config::load_target(t)) {
+        std::printf("Failed to read settings from NVS\n");
+        return 1;
+    }
     if (argc >= 2) {
-        uint8_t type = 1;
-        if (argc >= 3 && std::strcmp(argv[2], "public") == 0) type = 0;
-        ble::Mac mac;
-        if (!ble::Mac::parse(argv[1], type, mac)) {
-            std::printf("Bad MAC '%s' (want AA:BB:CC:DD:EE:FF)\n", argv[1]);
+        const std::string field = argv[1];
+        const std::string value = argc >= 3 ? argv[2] : "";
+        std::string err;
+        if (field == "board") {
+            err = validate_board(value);
+            t.board = value;
+        } else if (field == "url") {
+            err = validate_manifest_url(value);
+            t.manifest_url = value;
+        } else if (field == "id") {
+            err = validate_target_id(value);
+            t.id = value;
+        } else if (field == "maxapp") {
+            t.max_app_size = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 0));
+        } else if (field == "clear") {
+            if (!config::erase_target()) {
+                std::printf("Failed to clear the target\n");
+                return 1;
+            }
+            std::printf("Target cleared.\n");
+            return 0;
+        } else {
+            // target <MAC> [random|public]
+            const std::string mac = normalize_mac(field);
+            if (mac.empty()) {
+                std::printf("Bad MAC or field '%s'. Use: target <MAC> [random|public] | board <name> | url <manifest-url>"
+                            " | id <slug> | maxapp <bytes> | clear\n",
+                            argv[1]);
+                return 1;
+            }
+            t.mac = mac;
+            t.addr_type = (argc >= 3 && std::strcmp(argv[2], "public") == 0) ? 0 : 1;
+        }
+        if (!err.empty()) {
+            std::printf("Not saved: %s\n", err.c_str());
             return 1;
         }
-        if (!save_target(mac)) {
+        if (!config::save_target(t)) {
             std::printf("Failed to save target to NVS\n");
             return 1;
         }
     }
-    ble::Mac mac;
-    if (!load_target(mac)) {
-        std::printf("No target set.\n");
-        return 0;
+    print_target(t);
+    return 0;
+}
+
+// ---- networking (M3) -------------------------------------------------------------
+
+int cmd_wifi(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "forget") == 0) {
+        const bool ok = net::forget();
+        std::printf("%s\n", ok ? "WiFi credentials cleared." : "Failed to clear WiFi credentials.");
+        return ok ? 0 : 1;
     }
-    std::printf("target %s (%s), bootloader after reset at %s\n", mac.str().c_str(),
-                mac.type ? "random" : "public", mac.plus_one().str().c_str());
+    if (argc >= 2) {
+        const std::string ssid = argv[1];
+        const std::string pass = argc >= 3 ? argv[2] : "";
+        if (ssid.size() > 32 || pass.size() > 64 || (!pass.empty() && pass.size() < 8)) {
+            std::printf("SSID must be 1-32 characters and the password 8-64 (or none for an open network).\n");
+            return 1;
+        }
+        if (!net::set_credentials(ssid, pass)) {
+            std::printf("Failed to store credentials.\n");
+            return 1;
+        }
+        std::printf("Connecting to \"%s\"...\n", ssid.c_str());
+        std::fflush(stdout);
+        if (!net::wait_connected(20000)) std::printf("Not connected yet; it keeps retrying in the background.\n");
+    }
+    const net::Status st = net::status();
+    std::printf("  hostname   %s (http://%s.local/)\n", st.hostname.c_str(), st.hostname.c_str());
+    std::printf("  network    %s\n", st.provisioned ? st.ssid.c_str() : "(none: wifi <ssid> [password])");
+    if (st.connected) {
+        std::printf("  connected  yes, IP %s, RSSI %d dBm\n", st.ip.c_str(), st.rssi);
+    } else {
+        std::printf("  connected  no%s", st.stopped ? " (stopped for a transfer)" : "");
+        if (st.last_disconnect_reason) std::printf(", last disconnect reason %u", st.last_disconnect_reason);
+        std::printf("\n");
+    }
+    std::printf("  reconnects %" PRIu32 "\n", st.reconnects);
+    std::printf("  clock      %s\n", st.time_synced ? "synced (SNTP)" : "not synced");
+    return 0;
+}
+
+bool require_network() {
+    if (net::status().connected) return true;
+    std::printf("WiFi is not connected (see `wifi`).\n");
+    return false;
+}
+
+int cmd_check(int argc, char** argv) {
+    TargetConfig t;
+    config::load_target(t);
+    const std::string url = argc >= 2 ? argv[1] : t.manifest_url;
+    if (url.empty()) {
+        std::printf("No manifest URL. Use: check <url>, or set one with `target url <url>`.\n");
+        return 1;
+    }
+    if (!require_network()) return 1;
+    fetch::CheckReport r;
+    const Status s = fetch::check(url, t.board, r);
+    if (!s.ok()) {
+        std::printf("CHECK FAILED: %s\n", s.str().c_str());
+        return 1;
+    }
+    const Manifest& m = r.manifest;
+    std::printf("  version    %s%s%s\n", m.version.c_str(), m.name.empty() ? "" : "  (", m.name.empty() ? "" : (m.name + ")").c_str());
+    std::string boards;
+    for (const auto& b : m.boards) boards += (boards.empty() ? "" : ", ") + b;
+    std::printf("  boards     %s  -> target board \"%s\": %s\n", boards.c_str(), t.board.c_str(),
+                t.board.empty() ? "NOT SET" : r.board_ok ? "match" : "MISMATCH");
+    std::printf("  bin        %" PRIu32 " B  sha256 %s\n             %s\n", m.bin.size, sha256_hex(m.bin.sha256).c_str(),
+                m.bin.url.c_str());
+    std::printf("  dat        %" PRIu32 " B  %s\n", m.dat.size, m.dat.url.c_str());
+    if (!m.created.empty()) std::printf("  created    %s\n", m.created.c_str());
+    if (r.staged_valid) {
+        std::printf("  staged     \"%s\": %s\n", r.staged.version.c_str(),
+                    r.staged_same ? "same image (stage/flash will reuse it)" : "different image");
+    } else {
+        std::printf("  staged     nothing\n");
+    }
+    return r.board_ok ? 0 : 1;
+}
+
+int cmd_stage(int argc, char** argv) {
+    TargetConfig t;
+    config::load_target(t);
+    std::string url;
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i][0] != '-') url = argv[i];
+    }
+    if (url.empty() && t.manifest_url.empty()) {
+        std::printf("No manifest URL. Use: stage <url>, or set one with `target url <url>`.\n");
+        return 1;
+    }
+    if (t.board.empty()) {
+        std::printf("Set the target's board first (`target board <name>`, matched against manifest \"boards\").\n");
+        return 1;
+    }
+    if (!require_network()) return 1;
+    fetch::StageOptions o;
+    o.force = has_flag(argc, argv, "--force");
+    o.staged_at = net::unix_time();
+    fetch::StageReport r;
+    const Status s = fetch::stage(t, url, o, r);
+    if (!s.ok()) {
+        std::printf("STAGE FAILED: %s\n", s.str().c_str());
+        if (r.bytes) std::printf("The previous staged image was invalidated; stage again once this is fixed.\n");
+        return 1;
+    }
+    if (r.reused) {
+        std::printf("STAGE OK: \"%s\" was already staged and re-verified (%" PRIu32 " ms). Use --force to download "
+                    "anyway.\n",
+                    r.manifest.version.c_str(), r.ms);
+    } else {
+        std::printf("STAGE OK: \"%s\", %" PRIu32 " B in %" PRIu32 ".%" PRIu32 " s, verified. `flash --yes` when "
+                    "ready.\n",
+                    r.manifest.version.c_str(), r.bytes, r.ms / 1000, (r.ms % 1000) / 100);
+    }
     return 0;
 }
 
@@ -201,7 +347,7 @@ int cmd_staged(int, char**) {
         return 1;
     }
     if (img.header_status() != dfu::StagingHeaderError::Ok) {
-        std::printf("Nothing staged (%s). Write one with tools/dfu32_stage_image.py.\n",
+        std::printf("Nothing staged (%s). Use `stage`, or write one with tools/dfu32_stage_image.py.\n",
                     dfu::to_string(img.header_status()));
         return 1;
     }
@@ -440,12 +586,20 @@ void start_console() {
     esp_console_repl_t* repl = nullptr;
     esp_console_repl_config_t cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     cfg.prompt = "dfu32> ";
-    cfg.task_stack_size = 8192;
+    cfg.task_stack_size = 12288;  // HTTP client + manifest parsing run here
     cfg.max_cmdline_length = 256;
     ESP_ERROR_CHECK(esp_console_new_repl_stdio(&cfg, &repl));
     ESP_ERROR_CHECK(esp_console_register_help_command());
 
-    reg("target", "Show or set the target repeater's BLE MAC (app address).", "[MAC [random|public]]", &cmd_target);
+    reg("target", "Show or set the target: BLE MAC (app address), board, manifest URL, id, max app size.",
+        "[<MAC> [random|public] | board <name> | url <manifest-url> | id <slug> | maxapp <bytes> | clear]",
+        &cmd_target);
+    reg("wifi", "Show WiFi status, or join a network (stored for later boots).", "[<ssid> [password] | forget]",
+        &cmd_wifi);
+    reg("check", "Fetch the target's manifest and compare it with the board and the staged image (writes nothing).",
+        "[manifest-url]", &cmd_check);
+    reg("stage", "Download, verify and stage the target's image from its manifest.", "[manifest-url] [--force]",
+        &cmd_stage);
     reg("scan", "List BLE advertisers (address, type, RSSI, DFU service, name).", "[seconds]", &cmd_scan);
     reg("staged", "Show and verify the image in the staging partition.", nullptr, &cmd_staged);
     reg("probe",

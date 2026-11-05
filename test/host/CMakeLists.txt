@@ -19,6 +19,7 @@ FetchContent_MakeAvailable(Catch2)
 set(DFU32_ROOT ${CMAKE_CURRENT_LIST_DIR}/../..)
 add_subdirectory(${DFU32_ROOT}/components/dfu_proto ${CMAKE_BINARY_DIR}/dfu_proto)
 add_subdirectory(${DFU32_ROOT}/components/runlog ${CMAKE_BINARY_DIR}/runlog)
+add_subdirectory(${DFU32_ROOT}/components/dfu32_core ${CMAKE_BINARY_DIR}/dfu32_core)
 
 add_executable(dfu_proto_tests
     test_bootloader_info.cpp
@@ -26,13 +27,19 @@ add_executable(dfu_proto_tests
     test_crc16.cpp
     test_image.cpp
     test_init_packet.cpp
+    test_json.cpp
+    test_manifest.cpp
     test_protocol.cpp
     test_retry.cpp
     test_runlog.cpp
+    test_sha256.cpp
+    test_stage_writer.cpp
     test_staging_format.cpp
+    test_target_config.cpp
     test_transfer.cpp
+    test_url.cpp
 )
-target_link_libraries(dfu_proto_tests PRIVATE dfu_proto runlog Catch2::Catch2WithMain)
+target_link_libraries(dfu_proto_tests PRIVATE dfu_proto runlog dfu32_core Catch2::Catch2WithMain)
 target_compile_options(dfu_proto_tests PRIVATE -Wall -Wextra -Werror)
 target_compile_definitions(dfu_proto_tests PRIVATE
     DFU32_FIXTURES_DIR="${CMAKE_CURRENT_LIST_DIR}/fixtures")

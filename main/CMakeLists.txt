@@ -5,14 +5,18 @@ idf_component_register(
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         app_update
+        config
         console
         dfu_ble
         dfu_proto
+        dfu32_core
         esp_app_format
         esp_partition
         esp_psram
         mbedtls
         esp_timer
+        fetch
+        net
         nvs_flash
         runlog
         staging

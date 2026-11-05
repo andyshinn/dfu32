@@ -357,11 +357,15 @@ Header, little-endian, all fixed-size:
 ```
 
 Write sequence:
-1. Erase the header sector, which invalidates the old image.
-2. Erase the data range.
-3. Stream the HTTP body into `0x1000+`, hashing as it goes.
-4. Read back and re-hash. This catches flash write errors and costs about 1 s for 800 kB.
-5. Write the header.
+0. Fetch the manifest and the `.dat` and run every §7.2 check that needs only them. A failure here leaves the old image untouched.
+1. Erase the header sector, which invalidates the old image. This happens only once the `.bin` request has returned `200` with the expected `Content-Length`, so a 404 doesn't cost the staged image either.
+2. Stream the HTTP body into `0x1000+`, erasing each 4 KB sector just before it is written and hashing as it goes. Erasing as it goes keeps the connection from idling through a multi-second bulk erase.
+3. Read back and re-hash, plus CRC16 against the `.dat`. This catches flash write errors and costs about 1 s for 800 kB.
+4. Write the header, then read it back.
+
+If the manifest's `.bin` and `.dat` hashes equal the staged header's, the download is skipped: the staged image is re-checked against the target (board, size) and re-hashed instead (`stage --force` downloads anyway).
+
+Implemented as `dfu32::StagingWriter` (`components/dfu32_core`, host-tested against a NOR-flash model) over the partition and PSA SHA-256 adapters in `components/staging`.
 
 Before use (flash with `source=staged`), DFU32 re-verifies `header_crc32` and the bin SHA-256.
 
@@ -381,7 +385,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
-| `tgt.0.*` | — | Target 0 (v1 cap = 1): |
+| `tgt.0.*` | — | Target 0 (v1 cap = 1). NVS keys are limited to 15 characters, so these are stored as `tgt0_id`, `tgt0_name`, `tgt0_board`, `tgt0_mac`, `tgt0_type` (addr type), `tgt0_url`, `tgt0_maxapp` (M3a, `components/config`); the tuning knobs follow in M3b: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
 | ↳ `board` | str ≤ 31 | free-form, matched against `manifest.boards` |
@@ -393,7 +397,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
 
-- **Improv Serial** runs on the console port: USB-Serial-JTAG on S3, UART0 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
+- **Improv Serial** (M4, together with ESP Web Tools; until then the `wifi <ssid> <password>` console command stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
 - **Improv BLE** runs only while unprovisioned, or for 5 min after a 2 s button press. It uses a NimBLE GATT server and advertising. It is fully torn down when provisioning finishes or the window expires, and a DFU can't start while it is active.
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
@@ -511,11 +515,12 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - `boards` is required and non-empty. DFU32 refuses if `target.board` isn't in it.
 - `init` is optional. If present, it is cross-checked against the parsed `.dat` and a mismatch gives `DAT_INVALID`. This catches a server-side mix-up of `.dat` files.
 - Unknown keys are ignored. `schema > 1` is refused (`MANIFEST_UNSUPPORTED`).
+- Parsed by `dfu32::parse_manifest` (`components/dfu32_core`) with a small built-in JSON reader; ESP-IDF 6.1 no longer ships cJSON. Relative URLs follow RFC 3986 resolution against the manifest URL, and only `http://` is accepted.
 - Size limits: manifest ≤ 8 KB, `.dat` ≤ 64 B, `.bin` ≤ the staging capacity.
 - **Trust model (decided: HTTP + hashes).** Hashes catch corruption, not malicious substitution. Anyone who can spoof the artifact server on your LAN can flash an image that passes the board, `.dat` and CRC checks. This is accepted for v1. An Ed25519-signed manifest is a later, compatible addition (`"sig"` field plus a public key in NVS).
 
 **Server tooling** (`tools/`, Python, MIT):
-- `dfu32-pack <dfu.zip> --board rak4631 --version … --out dir/` reads the adafruit-nrfutil `manifest.json` in the zip, extracts `.bin` and `.dat`, validates them (word alignment, dev type, CRC16, max size), and writes `manifest.json`.
+- `dfu32-pack <dfu.zip> --board rak4631 --version … --out dir/` (`tools/dfu32_pack.py`, M3a) reads the adafruit-nrfutil `manifest.json` in the zip, extracts `.bin` and `.dat`, validates them (word alignment, dev type, CRC16, max size), and writes `manifest.json`.
 - `dfu32-meshcore-fetch --tag repeater-v1.18.0 --env RAK_4631_repeater` resolves the asset through the GitHub API, because asset names carry a SHA suffix and `releases/latest` is shared across firmware types. It then calls `dfu32-pack`. This is MeshCore-specific, so it stays in tooling.
 - `dfu32-stage-image` builds a raw staging-partition image for flashing with `parttool.py` (used by Milestone 1).
 
@@ -719,27 +724,25 @@ The setup:
 
 ---
 
-## 15. Repository layout (planned)
+## 15. Repository layout
 
 ```
 dfu32/
   CMakeLists.txt, sdkconfig.defaults, partitions/{4mb,8mb}.csv, boards/<profile>/sdkconfig.defaults
-  main/                  app_main, orchestrator, Kconfig.projbuild, idf_component.yml
+  main/                  app_main, bench console (orchestrator + API in M3b), Kconfig.projbuild
   components/
-    dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, client FSM (transport-agnostic)
-    dfu_ble/             IDfuTransport impl on esp-nimble-cpp; scanner
-    ble_mgr/             NimBLE lifecycle + role arbitration (scan / central / Improv peripheral)
-    staging/             raw partition format
-    fetcher/             esp_http_client → staging, SHA-256
-    manifest/            cJSON parse + validate
-    net_mgr/             WiFi STA, stop/restore, mDNS, SNTP, Improv Serial/BLE
-    api/                 esp_http_server routes, auth, embedded UI
-    config/              NVS schema + migration
+    dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, transfer engine, retry policy, staging format
+    dfu32_core/          pure C++: JSON reader, URLs, manifest, §7.2 prechecks, staging writer, target config
+    dfu_ble/             ITransport on esp-nimble-cpp; scan, probe, flash with retries
+    staging/             staging partition reader + partition / PSA SHA-256 adapters for the writer
+    fetch/               esp_http_client: manifest, .dat, .bin streamed into staging
+    net/                 WiFi STA, stop/restore, mDNS, SNTP
+    config/              NVS settings (targets now; device config in M3b)
     runlog/              log ring + run-record partition
-    indicator/           LED + button
-  web/                   UI source → gzipped into api/ at build time
-  tools/                 dfu32-pack, dfu32-meshcore-fetch, dfu32-stage-image
-  test/host/, test/fakeboot/
+    api/                 (M3b) esp_http_server routes, auth; embedded UI in M4
+    indicator/           (M4) LED + button
+  tools/                 dfu32_pack.py, dfu32_stage_image.py, layout and size checks
+  test/host/             Catch2 tests for the pure components
   docs/
 ```
 

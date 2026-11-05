@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "version": "v1.18.0-81dbae5",
+  "boards": [
+    "rak4631"
+  ],
+  "created": "2026-11-05T00:00:00Z",
+  "bin": {
+    "url": "firmware.bin",
+    "size": 64,
+    "sha256": "de95b3adcc1e44f19ae0b0018ac8c3ee57f233d5edc86970499a222be4b0c485"
+  },
+  "dat": {
+    "url": "firmware.dat",
+    "size": 14,
+    "sha256": "ef7f4f986953805c389487588c8b3d3d0f4765f519e8cda147430256b0e96e37"
+  },
+  "init": {
+    "device_type": 82,
+    "sd_req": [
+      182
+    ],
+    "crc16": 18911
+  },
+  "name": "MeshCore repeater"
+}

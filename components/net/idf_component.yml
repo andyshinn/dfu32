@@ -1,0 +1,4 @@
+## mDNS moved out of ESP-IDF into the component registry (esp-protocols).
+dependencies:
+  idf: "~6.1.0"
+  espressif/mdns: "^1.10.0"

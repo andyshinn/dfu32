@@ -69,7 +69,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
 ## M3: Networking & API (3–4 days)
 
-- `net_mgr`: WiFi STA, Improv Serial, mDNS, SNTP, stop/restore, and the run deadline + restore verification (§7.3).
+- `net_mgr`: WiFi STA, mDNS, SNTP, stop/restore, and the run deadline + restore verification (§7.3). Improv Serial moved to M4, next to ESP Web Tools: it shares the console port with the REPL and is only useful from the browser installer.
 - `fetcher` + `manifest`: HTTP fetch into staging with streaming SHA-256 and read-back verification.
 - Orchestrator job FSM (§7): check / stage / flash (arm, then wait) / abort.
 - `api`: claim, token auth, status, targets, runs, logs, staging, **BLE scan** endpoint, system reboot/rotate.
@@ -83,13 +83,22 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - an offline re-flash from staging with the AP off;
   - **WiFi on vs off during the transfer** (`wifi_off` per request): at least 5 runs each, comparing rate, PRN timeouts and failures in the run records. This sets the shipped `wifi_off_dfu` default.
 - **Done when:** a full flash is done end to end using only HTTP calls and `start ota` sent **remotely over LoRa** from a companion app.
+- **Split into two PRs:**
+  - **M3a, fetch and stage (implemented):**
+    - `components/net`: WiFi STA (credentials in the IDF WiFi NVS), reconnect with backoff, mDNS `dfu32-xxxx.local`, SNTP, and `stop()`/`restore()` for the handover;
+    - `components/fetch`: HTTP GET with redirects, manifest fetch, the `.dat` before anything is erased, then the `.bin` streamed into staging;
+    - `components/dfu32_core` (pure, host-tested): JSON reader, URL resolution, manifest parse and validation, §7.2 prechecks, the staging writer (lazy sector erase, read-back, header last) and target-config validation;
+    - `components/config`: target settings in NVS (`tgt0_*`, keeping the M1 keys);
+    - console: `wifi`, `target board|url|id|maxapp|clear`, `check`, `stage`;
+    - `tools/dfu32_pack.py`, with a golden manifest shared with the C++ tests.
+  - **M3b, orchestrator and API:** the job FSM (arm, then wait), WiFi handover with the run deadline and restore check, the HTTP API with token claim, the BLE scan endpoint, and the WiFi on/off bench comparison.
 
 ## M4: UI, provisioning & polish (3–4 days)
 
 - Web UI: status, target form with the **scan picker**, runs, logs, system.
 - Improv BLE (only while unprovisioned), the button (unclaim / factory reset), and the LED states.
 - DFU32 self-OTA upload with rollback (`esp_ota_mark_app_valid_cancel_rollback` once WiFi and HTTP are up).
-- ESP Web Tools manifest so DFU32 can be flashed from a browser, plus Improv Serial provisioning in the same session.
+- ESP Web Tools manifest so DFU32 can be flashed from a browser, plus Improv Serial provisioning in the same session (moved here from M3; until then, set WiFi with the `wifi` console command).
 - `docs/RECOVERY.md` and `docs/OPERATOR.md` (MeshCore walkthrough, including remote `start ota`).
 - **Done when:** someone else can go from a fresh Feather to a successful repeater flash using only the browser.
 
