@@ -107,35 +107,42 @@ std::string validate(const TargetConfig& t) {
 }
 
 std::string to_json(const TargetConfig& t) {
-    std::string o = "{\"id\":\"" + json::escape(t.id) + "\",\"name\":\"" + json::escape(t.name) +
-                    "\",\"board\":\"" + json::escape(t.board) + "\",\"mac\":\"" + json::escape(t.mac) +
-                    "\",\"addr_type\":" + std::to_string(t.addr_type) + ",\"manifest_url\":\"" +
-                    json::escape(t.manifest_url) + "\",\"max_app_size\":" + std::to_string(t.max_app_size) + "}";
-    return o;
+    json::ObjectWriter w;
+    w.add("id", t.id)
+        .add("name", t.name)
+        .add("board", t.board)
+        .add("mac", t.mac)
+        .add("addr_type", int64_t{t.addr_type})
+        .add("manifest_url", t.manifest_url)
+        .add("max_app_size", int64_t{t.max_app_size});
+    return w.str();
 }
 
 bool from_json(std::string_view text, TargetConfig& out) {
-    json::Value v;
-    if (!json::parse(text, v) || !v.is_object()) return false;
+    json::Doc doc;
+    if (!doc.parse(text)) return false;
+    const json::Node v = doc.root();
+    if (!v.is_object()) return false;
     TargetConfig t;
     const auto str = [&](const char* key, std::string& dst) {
-        const json::Value* f = v.find(key);
-        if (f == nullptr) return true;
-        if (!f->is_string()) return false;
-        dst = f->as_string();
+        const json::Node f = v.get(key);
+        if (f.missing()) return true;
+        if (!f.is_string()) return false;
+        dst = f.str();
         return true;
     };
     if (!str("id", t.id) || !str("name", t.name) || !str("board", t.board) || !str("mac", t.mac) ||
         !str("manifest_url", t.manifest_url)) {
         return false;
     }
-    if (const json::Value* f = v.find("addr_type"); f != nullptr) {
-        if (!f->is_integer() || f->as_int() < 0 || f->as_int() > 1) return false;
-        t.addr_type = static_cast<uint8_t>(f->as_int());
+    int64_t i = 0;
+    if (const json::Node f = v.get("addr_type"); !f.missing()) {
+        if (!f.integer(i) || i < 0 || i > 1) return false;
+        t.addr_type = static_cast<uint8_t>(i);
     }
-    if (const json::Value* f = v.find("max_app_size"); f != nullptr) {
-        if (!f->is_integer() || f->as_int() < 0 || f->as_int() > UINT32_MAX) return false;
-        t.max_app_size = static_cast<uint32_t>(f->as_int());
+    if (const json::Node f = v.get("max_app_size"); !f.missing()) {
+        if (!f.integer(i) || i < 0 || i > UINT32_MAX) return false;
+        t.max_app_size = static_cast<uint32_t>(i);
     }
     out = std::move(t);
     return true;

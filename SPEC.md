@@ -515,7 +515,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - `boards` is required and non-empty. DFU32 refuses if `target.board` isn't in it.
 - `init` is optional. If present, it is cross-checked against the parsed `.dat` and a mismatch gives `DAT_INVALID`. This catches a server-side mix-up of `.dat` files.
 - Unknown keys are ignored. `schema > 1` is refused (`MANIFEST_UNSUPPORTED`).
-- Parsed by `dfu32::parse_manifest` (`components/dfu32_core`) with a small built-in JSON reader; ESP-IDF 6.1 no longer ships cJSON. Relative URLs follow RFC 3986 resolution against the manifest URL, and only `http://` is accepted.
+- Parsed by `dfu32::parse_manifest` (`components/dfu32_core`) using cJSON from the component registry (`espressif/cjson`; ESP-IDF 6 no longer bundles it) behind a thin C++ wrapper (`dfu32_core/json.hpp`: ownership, case-sensitive lookup, exact-integer reads). The nesting limit is set to 16 (`CONFIG_CJSON_NESTING_LIMIT`) so a hostile document can't recurse through the task stack. Relative URLs follow RFC 3986 resolution against the manifest URL, and only `http://` is accepted.
 - Size limits: manifest ≤ 8 KB, `.dat` ≤ 64 B, `.bin` ≤ the staging capacity.
 - **Trust model (decided: HTTP + hashes).** Hashes catch corruption, not malicious substitution. Anyone who can spoof the artifact server on your LAN can flash an image that passes the board, `.dat` and CRC checks. This is accepted for v1. An Ed25519-signed manifest is a later, compatible addition (`"sig"` field plus a public key in NVS).
 
@@ -732,7 +732,7 @@ dfu32/
   main/                  app_main, bench console (orchestrator + API in M3b), Kconfig.projbuild
   components/
     dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, transfer engine, retry policy, staging format
-    dfu32_core/          pure C++: JSON reader, URLs, manifest, §7.2 prechecks, staging writer, target config
+    dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config
     dfu_ble/             ITransport on esp-nimble-cpp; scan, probe, flash with retries
     staging/             staging partition reader + partition / PSA SHA-256 adapters for the writer
     fetch/               esp_http_client: manifest, .dat, .bin streamed into staging

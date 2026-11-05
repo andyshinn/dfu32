@@ -188,10 +188,10 @@ TEST_CASE("Run record JSON escapes and reads back", "[runlog]") {
     CHECK(j.find("\"attempts\":[{\"n\":1,") != std::string::npos);
     CHECK(j.find("\"wifi_off\":true") != std::string::npos);
     // The whole record is valid JSON (the M3b API serves it as-is).
-    dfu32::json::Value v;
-    REQUIRE(dfu32::json::parse(j, v));
-    CHECK(v.find("error")->as_string() == r.error);
-    CHECK(v.find("attempts")->size() == 2);
+    dfu32::json::Doc doc;
+    REQUIRE(doc.parse(j));
+    CHECK(doc.root().get("error").str() == r.error);
+    CHECK(doc.root().get("attempts").size() == 2);
     CHECK(runlog::json_escape(std::string(1, '\x01')) == "\\u0001");
     CHECK(runlog::json_get_string("{\"k\":\"a\\u0001b\"}", "k") == std::string("a\x01" "b"));
 }

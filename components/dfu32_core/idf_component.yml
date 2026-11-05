@@ -1,0 +1,5 @@
+## cJSON left ESP-IDF in v6; it is now espressif/cjson in the component
+## registry. Host tests fetch the same upstream release (test/host).
+dependencies:
+  idf: "~6.1.0"
+  espressif/cjson: "^1.7.19"

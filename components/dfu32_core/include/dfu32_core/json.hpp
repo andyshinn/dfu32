@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
-// Small JSON reader for manifests (SPEC.md §11) and HTTP API request bodies.
-// Builds a tree; inputs are a few KB at most. Numbers keep an exact int64
-// when they are integers (the only kind DFU32's formats use); fractional or
-// exponent numbers parse but read back as non-integers.
+// Thin C++ wrapper over cJSON (espressif/cjson in the firmware, the same
+// upstream release fetched for host tests). It adds ownership (Doc frees the
+// tree), case-sensitive member lookup, exact-integer reads (cJSON keeps
+// numbers as double), whole-document parsing with an error offset, and a
+// small object writer. cJSON itself stays out of this header.
 #pragma once
 
 #include <cstddef>
@@ -12,53 +13,82 @@
 #include <string_view>
 #include <vector>
 
+struct cJSON;
+
 namespace dfu32::json {
 
-enum class Type : uint8_t { Null, Bool, Number, String, Array, Object };
+/// Maximum nesting accepted (CONFIG_CJSON_NESTING_LIMIT / CJSON_NESTING_LIMIT
+/// must be set to this; cJSON's default of 1000 could overflow a task stack).
+inline constexpr int kNestingLimit = 16;
 
-class Value {
+/// Non-owning view of a node inside a Doc. A default/absent Node is "missing".
+class Node {
 public:
-    Type type() const noexcept { return type_; }
-    bool is_null() const noexcept { return type_ == Type::Null; }
-    bool is_bool() const noexcept { return type_ == Type::Bool; }
-    bool is_number() const noexcept { return type_ == Type::Number; }
-    bool is_string() const noexcept { return type_ == Type::String; }
-    bool is_array() const noexcept { return type_ == Type::Array; }
-    bool is_object() const noexcept { return type_ == Type::Object; }
-    /// A number with no fraction or exponent that fits in int64.
-    bool is_integer() const noexcept { return type_ == Type::Number && integral_; }
+    Node() = default;
+    explicit Node(const cJSON* n) : n_(n) {}
 
-    bool as_bool(bool fallback = false) const noexcept { return is_bool() ? bool_ : fallback; }
-    int64_t as_int(int64_t fallback = 0) const noexcept { return is_integer() ? int_ : fallback; }
-    /// The string value; empty for non-strings.
-    const std::string& as_string() const noexcept { return str_; }
+    bool missing() const noexcept { return n_ == nullptr; }
+    bool is_null() const noexcept;
+    bool is_bool() const noexcept;
+    bool is_number() const noexcept;
+    bool is_string() const noexcept;
+    bool is_array() const noexcept;
+    bool is_object() const noexcept;
 
-    /// Array elements, or object member values (in document order).
-    const std::vector<Value>& items() const noexcept { return items_; }
-    /// Object member names, parallel to items(); empty for non-objects.
-    const std::vector<std::string>& keys() const noexcept { return keys_; }
-    size_t size() const noexcept { return items_.size(); }
+    /// Object member by exact (case-sensitive) name; missing if absent.
+    Node get(const char* key) const noexcept;
+    /// Array elements, or object member values, in document order.
+    std::vector<Node> items() const;
+    size_t size() const noexcept;
 
-    /// Object member by name (the last one if repeated), or nullptr.
-    const Value* find(std::string_view key) const noexcept;
+    /// String value; empty for non-strings.
+    std::string str() const;
+    bool boolean(bool fallback = false) const noexcept;
+    /// True if this is a number with an integral value within +-2^53 (the
+    /// range a double holds exactly); writes it to `out`.
+    bool integer(int64_t& out) const noexcept;
 
 private:
-    friend class Parser;
-    Type type_ = Type::Null;
-    bool bool_ = false;
-    bool integral_ = false;
-    int64_t int_ = 0;
-    std::string str_;
-    std::vector<Value> items_;
-    std::vector<std::string> keys_;
+    const cJSON* n_ = nullptr;
 };
 
-/// Escapes `s` for use inside a JSON string literal (no surrounding quotes).
-std::string escape(std::string_view s);
+/// Owns a parsed document.
+class Doc {
+public:
+    Doc() = default;
+    ~Doc();
+    Doc(Doc&& other) noexcept;
+    Doc& operator=(Doc&& other) noexcept;
+    Doc(const Doc&) = delete;
+    Doc& operator=(const Doc&) = delete;
 
-/// Parses one JSON document (RFC 8259) with nothing but whitespace after it.
-/// On failure returns false and, if `error` is given, describes the problem
-/// and its byte offset.
-bool parse(std::string_view text, Value& out, std::string* error = nullptr, unsigned max_depth = 16);
+    /// Parses one JSON document with nothing but whitespace after it. On
+    /// failure returns false and, if `error` is given, the byte offset.
+    bool parse(std::string_view text, std::string* error = nullptr);
+    Node root() const noexcept { return Node(root_); }
+
+private:
+    cJSON* root_ = nullptr;
+};
+
+/// Builds a flat JSON object.
+class ObjectWriter {
+public:
+    ObjectWriter();
+    ~ObjectWriter();
+    ObjectWriter(const ObjectWriter&) = delete;
+    ObjectWriter& operator=(const ObjectWriter&) = delete;
+
+    ObjectWriter& add(const char* key, std::string_view value);
+    /// Integers print exactly up to INT32_MAX (cJSON uses %d there, %g above).
+    ObjectWriter& add(const char* key, int64_t value);
+    ObjectWriter& add_bool(const char* key, bool value);
+    /// Compact JSON; empty if any allocation failed along the way.
+    std::string str() const;
+
+private:
+    cJSON* obj_;
+    bool ok_;
+};
 
 }  // namespace dfu32::json

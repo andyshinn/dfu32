@@ -43,6 +43,11 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 # v1 is HTTP-only (SPEC.md §2, §11).
 # CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS is not set
 
+# ---- JSON (espressif/cjson) ------------------------------------------------------
+# Manifests and API bodies are flat; a low limit keeps a hostile document from
+# recursing through the task stack. Must equal dfu32::json::kNestingLimit.
+CONFIG_CJSON_NESTING_LIMIT=16
+
 # ---- Logging -------------------------------------------------------------------
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y

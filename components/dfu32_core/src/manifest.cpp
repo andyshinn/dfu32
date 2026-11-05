@@ -20,41 +20,38 @@ int hexval(char c) {
     return -1;
 }
 
-// An optional string member: absent is fine, any other type is not.
-bool opt_string(const json::Value& obj, const char* key, std::string& out) {
-    const json::Value* v = obj.find(key);
-    if (v == nullptr || v->is_null()) return true;
-    if (!v->is_string()) return false;
-    out = v->as_string();
+// An optional string member: absent or null is fine, any other type is not.
+bool opt_string(json::Node obj, const char* key, std::string& out) {
+    const json::Node v = obj.get(key);
+    if (v.missing() || v.is_null()) return true;
+    if (!v.is_string()) return false;
+    out = v.str();
     return true;
 }
 
-bool get_u16(const json::Value& v, uint16_t& out) {
-    if (!v.is_integer() || v.as_int() < 0 || v.as_int() > 0xFFFF) return false;
-    out = static_cast<uint16_t>(v.as_int());
+bool get_u16(json::Node v, uint16_t& out) {
+    int64_t i = 0;
+    if (!v.integer(i) || i < 0 || i > 0xFFFF) return false;
+    out = static_cast<uint16_t>(i);
     return true;
 }
 
-Status parse_file(const json::Value& root, const char* key, std::string_view manifest_url, ManifestFile& out) {
+Status parse_file(json::Node root, const char* key, std::string_view manifest_url, ManifestFile& out) {
     const std::string k = key;
-    const json::Value* f = root.find(key);
-    if (f == nullptr || !f->is_object()) return invalid("'" + k + "' must be an object");
-    const json::Value* url = f->find("url");
-    if (url == nullptr || !url->is_string() || url->as_string().empty()) {
-        return invalid("'" + k + ".url' must be a non-empty string");
-    }
+    const json::Node f = root.get(key);
+    if (!f.is_object()) return invalid("'" + k + "' must be an object");
+    const json::Node url = f.get("url");
+    if (!url.is_string() || url.str().empty()) return invalid("'" + k + ".url' must be a non-empty string");
     std::string why;
-    if (!resolve_url(manifest_url, url->as_string(), out.url, &why)) {
-        return invalid("'" + k + ".url': " + why);
-    }
+    if (!resolve_url(manifest_url, url.str(), out.url, &why)) return invalid("'" + k + ".url': " + why);
     if (out.url.size() > kMaxUrlLen) return invalid("'" + k + ".url' resolves to more than 255 characters");
-    const json::Value* size = f->find("size");
-    if (size == nullptr || !size->is_integer() || size->as_int() <= 0 || size->as_int() > 0xFFFFFFFF) {
+    int64_t size = 0;
+    if (!f.get("size").integer(size) || size <= 0 || size > 0xFFFFFFFF) {
         return invalid("'" + k + ".size' must be a positive integer");
     }
-    out.size = static_cast<uint32_t>(size->as_int());
-    const json::Value* sha = f->find("sha256");
-    if (sha == nullptr || !sha->is_string() || !parse_sha256_hex(sha->as_string(), out.sha256)) {
+    out.size = static_cast<uint32_t>(size);
+    const json::Node sha = f.get("sha256");
+    if (!sha.is_string() || !parse_sha256_hex(sha.str(), out.sha256)) {
         return invalid("'" + k + ".sha256' must be 64 hex digits");
     }
     return {};
@@ -86,38 +83,34 @@ std::string sha256_hex(std::span<const uint8_t, 32> digest) {
 Status parse_manifest(std::string_view text, std::string_view manifest_url, Manifest& out) {
     out = Manifest{};
     if (text.size() > kMaxManifestBytes) return invalid("larger than 8 KB");
-    json::Value root;
+    json::Doc doc;
     std::string why;
-    if (!json::parse(text, root, &why)) return invalid("not JSON: " + why);
+    if (!doc.parse(text, &why)) return invalid("not JSON: " + why);
+    const json::Node root = doc.root();
     if (!root.is_object()) return invalid("top level must be an object");
 
-    const json::Value* schema = root.find("schema");
-    if (schema == nullptr || !schema->is_integer() || schema->as_int() < 1) {
-        return invalid("'schema' must be a positive integer");
+    int64_t schema = 0;
+    if (!root.get("schema").integer(schema) || schema < 1) return invalid("'schema' must be a positive integer");
+    if (schema > kManifestSchema) {
+        return Status::fail(Err::ManifestUnsupported, "schema " + std::to_string(schema) +
+                                                          " (this DFU32 understands up to " +
+                                                          std::to_string(kManifestSchema) + ")");
     }
-    if (schema->as_int() > kManifestSchema) {
-        return Status::fail(Err::ManifestUnsupported,
-                            "schema " + std::to_string(schema->as_int()) + " (this DFU32 understands up to " +
-                                std::to_string(kManifestSchema) + ")");
-    }
-    out.schema = static_cast<uint32_t>(schema->as_int());
+    out.schema = static_cast<uint32_t>(schema);
 
-    const json::Value* version = root.find("version");
-    if (version == nullptr || !version->is_string() || version->as_string().empty()) {
-        return invalid("'version' must be a non-empty string");
-    }
-    if (version->as_string().size() > kMaxVersionLen) return invalid("'version' longer than 63 characters");
-    out.version = version->as_string();
+    const json::Node version = root.get("version");
+    if (!version.is_string() || version.str().empty()) return invalid("'version' must be a non-empty string");
+    if (version.str().size() > kMaxVersionLen) return invalid("'version' longer than 63 characters");
+    out.version = version.str();
 
-    const json::Value* boards = root.find("boards");
-    if (boards == nullptr || !boards->is_array() || boards->size() == 0) {
-        return invalid("'boards' must be a non-empty array");
-    }
-    for (const auto& b : boards->items()) {
-        if (!b.is_string() || b.as_string().empty() || b.as_string().size() > kMaxBoardLen) {
+    const json::Node boards = root.get("boards");
+    if (!boards.is_array() || boards.size() == 0) return invalid("'boards' must be a non-empty array");
+    for (const json::Node b : boards.items()) {
+        const std::string name = b.str();
+        if (!b.is_string() || name.empty() || name.size() > kMaxBoardLen) {
             return invalid("'boards' entries must be strings of 1-31 characters");
         }
-        out.boards.push_back(b.as_string());
+        out.boards.push_back(name);
     }
 
     if (!opt_string(root, "name", out.name) || !opt_string(root, "created", out.created) ||
@@ -131,26 +124,26 @@ Status parse_manifest(std::string_view text, std::string_view manifest_url, Mani
         return Status::fail(Err::DatTooLong, "'dat.size' " + std::to_string(out.dat.size) + " > 64 bytes");
     }
 
-    if (const json::Value* init = root.find("init"); init != nullptr && !init->is_null()) {
-        if (!init->is_object()) return invalid("'init' must be an object");
+    if (const json::Node init = root.get("init"); !init.missing() && !init.is_null()) {
+        if (!init.is_object()) return invalid("'init' must be an object");
         out.init.present = true;
-        if (const json::Value* dt = init->find("device_type"); dt != nullptr) {
-            if (!get_u16(*dt, out.init.device_type)) return invalid("'init.device_type' must be 0-65535");
+        if (const json::Node dt = init.get("device_type"); !dt.missing()) {
+            if (!get_u16(dt, out.init.device_type)) return invalid("'init.device_type' must be 0-65535");
             out.init.has_device_type = true;
         }
-        if (const json::Value* sd = init->find("sd_req"); sd != nullptr) {
-            if (!sd->is_array() || sd->size() == 0 || sd->size() > dfu::kMaxSdReq) {
+        if (const json::Node sd = init.get("sd_req"); !sd.missing()) {
+            if (!sd.is_array() || sd.size() == 0 || sd.size() > dfu::kMaxSdReq) {
                 return invalid("'init.sd_req' must be an array of 1-16 integers");
             }
-            for (const auto& item : sd->items()) {
+            for (const json::Node item : sd.items()) {
                 uint16_t v = 0;
                 if (!get_u16(item, v)) return invalid("'init.sd_req' entries must be 0-65535");
                 out.init.sd_req.push_back(v);
             }
             out.init.has_sd_req = true;
         }
-        if (const json::Value* crc = init->find("crc16"); crc != nullptr) {
-            if (!get_u16(*crc, out.init.crc16)) return invalid("'init.crc16' must be 0-65535");
+        if (const json::Node crc = init.get("crc16"); !crc.missing()) {
+            if (!get_u16(crc, out.init.crc16)) return invalid("'init.crc16' must be 0-65535");
             out.init.has_crc16 = true;
         }
     }

@@ -1,7 +1,7 @@
 # Host unit tests for pure-C++ components. Run from the repo root:
 #   cmake -S test/host -B build-host -G Ninja && cmake --build build-host && ctest --test-dir build-host --output-on-failure
 cmake_minimum_required(VERSION 3.22)
-project(dfu32_host_tests LANGUAGES CXX)
+project(dfu32_host_tests LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

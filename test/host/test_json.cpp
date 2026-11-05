@@ -1,100 +1,132 @@
 // SPDX-License-Identifier: MIT
+//
+// The dfu32::json wrapper over cJSON: ownership, case-sensitive lookup,
+// exact-integer reads, whole-document parsing, the nesting limit, and the
+// writer. JSON grammar itself is cJSON's job; these pin the behaviour the
+// manifest and config code relies on.
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
 
 #include "dfu32_core/json.hpp"
 
-using dfu32::json::parse;
-using dfu32::json::Value;
+using dfu32::json::Doc;
+using dfu32::json::Node;
+using dfu32::json::ObjectWriter;
 
 TEST_CASE("JSON: objects, arrays and scalars", "[json]") {
-    Value v;
+    Doc d;
     std::string err;
-    REQUIRE(parse(R"( {"a": 1, "b": [true, false, null], "c": "x\ty", "d": {"e": -42}} )", v, &err));
-    REQUIRE(v.is_object());
-    CHECK(v.size() == 4);
-    CHECK(v.find("a")->as_int() == 1);
-    const Value* b = v.find("b");
-    REQUIRE(b->is_array());
-    REQUIRE(b->size() == 3);
-    CHECK(b->items()[0].as_bool() == true);
-    CHECK(b->items()[1].is_bool());
-    CHECK(b->items()[2].is_null());
-    CHECK(v.find("c")->as_string() == "x\ty");
-    CHECK(v.find("d")->find("e")->as_int() == -42);
-    CHECK(v.find("missing") == nullptr);
-    CHECK(v.keys()[3] == "d");
+    REQUIRE(d.parse(R"( {"a": 1, "b": [true, false, null], "c": "x\ty", "d": {"e": -42}} )", &err));
+    const Node r = d.root();
+    REQUIRE(r.is_object());
+    CHECK(r.size() == 4);
+    int64_t i = 0;
+    CHECK(r.get("a").integer(i));
+    CHECK(i == 1);
+    const Node b = r.get("b");
+    REQUIRE(b.is_array());
+    const auto items = b.items();
+    REQUIRE(items.size() == 3);
+    CHECK(items[0].boolean() == true);
+    CHECK(items[1].is_bool());
+    CHECK(items[2].is_null());
+    CHECK(r.get("c").str() == "x\ty");
+    CHECK(r.get("d").get("e").integer(i));
+    CHECK(i == -42);
+    CHECK(r.get("missing").missing());
+    CHECK(r.get("missing").get("deeper").missing());  // chaining through missing is safe
+    CHECK(r.get("a").str().empty());                   // wrong type reads as empty
+    CHECK(r.get("c").boolean(true) == true);           // fallback for non-bools
 }
 
-TEST_CASE("JSON: numbers", "[json]") {
-    Value v;
-    REQUIRE(parse("9223372036854775807", v));
-    CHECK(v.as_int() == INT64_MAX);
-    REQUIRE(parse("-9223372036854775808", v));
-    CHECK(v.as_int() == INT64_MIN);
-    REQUIRE(parse("9223372036854775808", v));  // too big: a number, not an integer
-    CHECK(v.is_number());
-    CHECK_FALSE(v.is_integer());
-    REQUIRE(parse("1.5", v));
-    CHECK_FALSE(v.is_integer());
-    CHECK(v.as_int(7) == 7);
-    REQUIRE(parse("1e3", v));
-    CHECK_FALSE(v.is_integer());
-    REQUIRE(parse("0", v));
-    CHECK(v.as_int(9) == 0);
-    CHECK_FALSE(parse("01", v));
-    CHECK_FALSE(parse("-", v));
-    CHECK_FALSE(parse("1.", v));
-    CHECK_FALSE(parse(".5", v));
-    CHECK_FALSE(parse("+1", v));
-    CHECK_FALSE(parse("1e", v));
+TEST_CASE("JSON: member lookup is case-sensitive", "[json]") {
+    Doc d;
+    REQUIRE(d.parse(R"({"Version":"x","version":"y"})"));
+    CHECK(d.root().get("version").str() == "y");
+    CHECK(d.root().get("Version").str() == "x");
+    CHECK(d.root().get("VERSION").missing());
 }
 
-TEST_CASE("JSON: string escapes and UTF-8", "[json]") {
-    Value v;
-    REQUIRE(parse(R"("\"\\\/\b\f\n\r\t")", v));
-    CHECK(v.as_string() == "\"\\/\b\f\n\r\t");
-    REQUIRE(parse(R"("\u00e9\u20ac\ud83d\ude00")", v));
-    CHECK(v.as_string() == "\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
-    REQUIRE(parse("\"caf\xC3\xA9\"", v));  // raw UTF-8 passes through
-    CHECK(v.as_string() == "caf\xC3\xA9");
-    CHECK_FALSE(parse(R"("\ud83d")", v));
-    CHECK_FALSE(parse(R"("\ude00")", v));
-    CHECK_FALSE(parse(R"("\x")", v));
-    CHECK_FALSE(parse(R"("\u12")", v));
-    CHECK_FALSE(parse("\"a\nb\"", v));
-    CHECK_FALSE(parse("\"abc", v));
+TEST_CASE("JSON: integers are exact or refused", "[json]") {
+    Doc d;
+    int64_t i = 0;
+    REQUIRE(d.parse("[0, 802816, -1, 9007199254740992, 9007199254740994, 1.5, 1e3, 4294967295]"));
+    const auto v = d.root().items();
+    CHECK(v[0].integer(i));
+    CHECK(i == 0);
+    CHECK(v[1].integer(i));
+    CHECK(i == 802816);
+    CHECK(v[2].integer(i));
+    CHECK(i == -1);
+    CHECK(v[3].integer(i));                // 2^53: still exact
+    CHECK_FALSE(v[4].integer(i));          // beyond 2^53: a double can't promise exactness
+    CHECK_FALSE(v[5].integer(i));          // fractional
+    CHECK(v[6].integer(i));                // 1e3 is the integer 1000
+    CHECK(i == 1000);
+    CHECK(v[7].integer(i));
+    CHECK(i == 4294967295);
+    CHECK_FALSE(Node().integer(i));
 }
 
-TEST_CASE("JSON: malformed documents are rejected with a position", "[json]") {
-    Value v;
+TEST_CASE("JSON: strings and escapes", "[json]") {
+    Doc d;
+    REQUIRE(d.parse(R"(["\"\\\/\b\f\n\r\t", "é€😀", "café"])"));
+    const auto v = d.root().items();
+    CHECK(v[0].str() == "\"\\/\b\f\n\r\t");
+    CHECK(v[1].str() == "\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
+    CHECK(v[2].str() == "caf\xC3\xA9");
+    CHECK_FALSE(d.parse(R"("\ude00")"));
+    CHECK_FALSE(d.parse(R"("\x")"));
+    CHECK_FALSE(d.parse(R"("abc)"));
+}
+
+TEST_CASE("JSON: malformed documents and trailing data are rejected", "[json]") {
+    Doc d;
     std::string err;
-    CHECK_FALSE(parse("", v, &err));
-    CHECK_FALSE(parse("{", v, &err));
-    CHECK_FALSE(parse("{\"a\" 1}", v, &err));
-    CHECK(err.find("':'") != std::string::npos);
-    CHECK_FALSE(parse("{\"a\":1,}", v, &err));
-    CHECK_FALSE(parse("[1,]", v, &err));
-    CHECK_FALSE(parse("[1 2]", v, &err));
-    CHECK_FALSE(parse("{a:1}", v, &err));
-    CHECK_FALSE(parse("tru", v, &err));
-    CHECK_FALSE(parse("{} x", v, &err));
+    CHECK_FALSE(d.parse("", &err));
+    CHECK_FALSE(d.parse("{", &err));
+    CHECK_FALSE(d.parse("{\"a\" 1}", &err));
+    CHECK_FALSE(d.parse("[1 2]", &err));
+    CHECK_FALSE(d.parse("{a:1}", &err));
+    CHECK_FALSE(d.parse("tru", &err));
+    CHECK_FALSE(d.parse("{} x", &err));
     CHECK(err.find("offset 3") != std::string::npos);
-    CHECK(v.is_null());  // output reset on failure
+    CHECK(d.root().missing());  // a failed parse leaves no tree
+    CHECK(d.parse(" {} \n"));    // trailing whitespace is fine
+    CHECK(d.root().is_object());
 }
 
-TEST_CASE("JSON: depth limit and duplicate keys", "[json]") {
-    Value v;
-    std::string deep(20, '[');
-    deep += std::string(20, ']');
-    CHECK_FALSE(parse(deep, v));
-    CHECK(parse(deep, v, nullptr, 32));
-    REQUIRE(parse(R"({"k":1,"k":2})", v));
-    CHECK(v.find("k")->as_int() == 2);  // last wins
-    REQUIRE(parse("[]", v));
-    CHECK(v.is_array());
-    CHECK(v.size() == 0);
-    REQUIRE(parse(" {} ", v));
-    CHECK(v.is_object());
+TEST_CASE("JSON: nesting limit stops deep documents", "[json]") {
+    Doc d;
+    const auto nested = [](int n) { return std::string(static_cast<size_t>(n), '[') + std::string(static_cast<size_t>(n), ']'); };
+    CHECK(d.parse(nested(dfu32::json::kNestingLimit - 1)));
+    CHECK_FALSE(d.parse(nested(dfu32::json::kNestingLimit + 1)));
+    CHECK_FALSE(d.parse(nested(4000)));  // e.g. an 8 KB hostile manifest: refused, no deep recursion
+}
+
+TEST_CASE("JSON: Doc owns and moves its tree", "[json]") {
+    Doc a;
+    REQUIRE(a.parse(R"({"k":"v"})"));
+    Doc b(std::move(a));
+    CHECK(b.root().get("k").str() == "v");
+    CHECK(a.root().missing());  // NOLINT(bugprone-use-after-move): moved-from is empty by contract
+    Doc c;
+    REQUIRE(c.parse("[1]"));
+    c = std::move(b);
+    CHECK(c.root().get("k").str() == "v");
+}
+
+TEST_CASE("JSON: object writer escapes and round-trips", "[json]") {
+    ObjectWriter w;
+    w.add("s", "a \"quoted\"\nline\x01").add("n", int64_t{802816}).add("neg", int64_t{-3}).add_bool("t", true);
+    const std::string out = w.str();
+    CHECK(out.find("\"n\":802816") != std::string::npos);  // integers print without exponent or fraction
+    Doc d;
+    REQUIRE(d.parse(out));
+    CHECK(d.root().get("s").str() == "a \"quoted\"\nline\x01");
+    int64_t i = 0;
+    CHECK(d.root().get("neg").integer(i));
+    CHECK(i == -3);
+    CHECK(d.root().get("t").boolean());
 }
