@@ -44,14 +44,53 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # idf.py passes -DCCACHE_ENABLE=1 to CMake, which wraps the compilers in
+      # ccache (preinstalled in the espressif/idf image). Set job-wide so the
+      # merge-bin invocation sees the same value and doesn't reconfigure.
+      IDF_CCACHE_ENABLE: 1
+      CCACHE_MAXSIZE: 500M
+      # Bump to invalidate every ccache entry (e.g. after an IDF image change).
+      CCACHE_KEY_PREFIX: ccache-v1-idf6.1-${{ matrix.board }}
     steps:
       - uses: actions/checkout@v7
+
+      # ${{ github.workspace }} is the host path in container jobs, so derive
+      # the container path from $GITHUB_WORKSPACE at runtime instead.
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+
+      # Each run saves under a unique key; restore-keys picks the most recent
+      # cache for this board (PRs can also read caches saved from main).
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: ${{ env.CCACHE_KEY_PREFIX }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ env.CCACHE_KEY_PREFIX }}-
 
       - name: Build
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
+          ccache --zero-stats
           idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
+
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+
+      # Save even when the build fails: a partially warm cache still helps
+      # the next attempt.
+      - name: Save ccache
+        if: always() && steps.ccache-restore.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
       - name: App size budget
         run: python3 tools/check_app_size.py "build/${{ matrix.board }}"
