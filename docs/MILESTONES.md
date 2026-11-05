@@ -60,7 +60,12 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - PRN cap of 8, stale-session recovery, target-gone detection;
     - `flash --attempts N`;
     - the retry policy is pure, host-tested logic (`dfu_proto/retry.hpp`).
-  - **M2b, observability:** run records in `runlog`, the log ring, `job_active` reboot detection, and `runs` console commands.
+  - **M2b, observability:**
+    - run records in `runlog`, the log ring, `job_active` reboot detection;
+    - `runs`, `run N` and `logs` console commands;
+    - the transfer wakes immediately on disconnect, instead of waiting out the receipt timeout (about 3 s saved per failed attempt).
+
+    The pure parts (`LogRing`, slot codec, ring rotation, JSON) are host-tested in `components/runlog`.
 
 ## M3: Networking & API (3–4 days)
 

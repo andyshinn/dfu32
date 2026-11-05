@@ -17,6 +17,8 @@
 #include "esp_psram.h"
 #include "nvs_flash.h"
 #include "psa/crypto.h"
+#include "runlog/run_record.hpp"
+#include "runlog/runlog_idf.hpp"
 #include "sdkconfig.h"
 
 namespace {
@@ -57,7 +59,36 @@ void init_nvs() {
 
 }  // namespace
 
+// SPEC.md §7.3: a job marker that survived a reboot means the previous flash
+// never finished. Record it so `runs` shows what happened.
+static void record_aborted_run() {
+    runlog::idf::JobMarker job;
+    if (!runlog::idf::job_pending(job)) return;
+    const bool maybe_erased = job.stage == runlog::idf::JobStage::Transferring;
+    ESP_LOGW(TAG, "previous flash of %s (\"%s\") was interrupted by a reboot (%s)%s", job.target, job.version,
+             runlog::idf::reset_reason_string(),
+             maybe_erased ? "; the target's app may be erased: run `flash --yes` again" : "");
+    runlog::RunLog* run_log = runlog::idf::open_run_log();
+    if (run_log != nullptr && job.seq < run_log->next_seq()) {
+        // The run was recorded; the reboot hit between append() and job_end().
+        ESP_LOGI(TAG, "interrupted run #%u was already recorded", static_cast<unsigned>(job.seq));
+    } else if (run_log != nullptr) {
+        runlog::RunRecord rec;
+        rec.seq = run_log->next_seq();
+        rec.result = "ABORTED_BY_REBOOT";
+        rec.error = "DFU32 rebooted during the run";
+        rec.target = job.target;
+        rec.image_version = job.version;
+        rec.started_uptime_s = job.started_uptime_s;
+        rec.target_erased = maybe_erased ? "possibly" : "no";
+        rec.reset_reason = runlog::idf::reset_reason_string();
+        run_log->append(runlog::to_json(rec), "");  // the interrupted boot's log is gone
+    }
+    runlog::idf::job_end();
+}
+
 extern "C" void app_main(void) {
+    runlog::idf::log_capture_start(static_cast<size_t>(CONFIG_DFU32_LOG_RING_KB) * 1024);
     const esp_app_desc_t* app = esp_app_get_description();
     ESP_LOGI(TAG, "DFU32 %s (ESP-IDF %s), board profile '%s'", app->version, app->idf_ver,
              CONFIG_DFU32_BOARD_NAME);
@@ -69,6 +100,9 @@ extern "C" void app_main(void) {
              static_cast<unsigned>(esp_psram_get_size()));
 
     init_nvs();
+    // Needs only NVS and the runlog partition, so do it before the self-check:
+    // a failing layout must not leave a stale marker for a later boot.
+    record_aborted_run();
 
     bool ok = true;
     ok &= check_data_partition("staging", kSubtypeStaging, kStagingHeaderSize + dfu::kMaxAppSizeS140v6);

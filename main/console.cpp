@@ -16,7 +16,10 @@
 #include "dfu_proto/retry.hpp"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs.h"
+#include "runlog/run_record.hpp"
+#include "runlog/runlog_idf.hpp"
 #include "staging/staging.hpp"
 
 namespace dfu32 {
@@ -101,6 +104,53 @@ void print_link(const ble::LinkInfo& l) {
     }
     std::printf("  timings           find %" PRIu32 " ms, jump %" PRIu32 " ms, connect %" PRIu32 " ms\n", l.find_ms,
                 l.jump_ms, l.connect_ms);
+}
+
+uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
+
+uint32_t stream_rate_x10(const dfu::TransferResult& t) {
+    const uint32_t ms = t.phase_ms[static_cast<size_t>(dfu::TransferPhase::Stream)];
+    return ms ? static_cast<uint32_t>(uint64_t{t.bytes_sent} * 10 / ms) : 0;
+}
+
+runlog::RunRecord make_record(uint32_t seq, const ble::Mac& mac, const StagedImage& img, const ble::FlashReport& r,
+                              uint32_t started_s) {
+    runlog::RunRecord rec;
+    rec.seq = seq;
+    rec.result = r.ok ? "SUCCEEDED" : "FAILED";
+    rec.error = r.error;
+    rec.failure_kind = dfu::to_string(r.failure);
+    rec.target = mac.str();
+    rec.image_version = img.header().version;
+    char sha[65] = {};
+    hex(img.header().bin_sha256.data(), 32, sha);
+    rec.image_sha256 = sha;
+    rec.image_size = img.header().bin_size;
+    rec.started_uptime_s = started_s;
+    rec.duration_ms = r.total_ms;
+    bool any_transfer = false;
+    for (const auto& a : r.attempts) any_transfer = any_transfer || a.ran_transfer;
+    if (any_transfer) rec.last_phase = dfu::to_string(r.transfer.phase);
+    rec.bytes_acked = r.transfer.bytes_acked;
+    rec.target_erased = r.target_erased ? "yes" : "no";
+    rec.sys_reset_after_failure = r.sys_reset_after_failure;
+    rec.bootloader = r.link.dis_fw_rev;
+    rec.bootloader_class = dfu::to_string(r.link.bootloader.cls);
+    rec.mtu = r.link.mtu;
+    rec.packet_size = r.link.packet_size;
+    rec.conn_interval_x125 = r.link.conn_interval;
+    rec.rate_x10_kBps = stream_rate_x10(r.transfer);
+    for (const auto& a : r.attempts) {
+        runlog::RunAttempt ra;
+        ra.number = a.number;
+        ra.interval_ms = a.params.interval_ms;
+        ra.prn = a.params.prn;
+        ra.outcome = a.failure == dfu::FailureKind::None ? "OK" : a.error;
+        ra.kind = dfu::to_string(a.failure);
+        ra.bytes_acked = a.transfer.bytes_acked;
+        rec.attempts.push_back(std::move(ra));
+    }
+    return rec;
 }
 
 // ---- commands -----------------------------------------------------------------
@@ -224,7 +274,29 @@ int cmd_flash(int argc, char** argv) {
                 " s for %s: run `start ota` on the repeater now. Up to %u attempt(s).\n",
                 img.header().bin_size, img.header().version.c_str(), o.scan_ms / 1000, mac.str().c_str(), o.attempts);
 
+    runlog::RunLog* run_log = runlog::idf::open_run_log();
+    const uint32_t seq = run_log ? run_log->next_seq() : 0;
+    const uint64_t log_mark = runlog::idf::log_position();
+    const uint32_t started_s = uptime_s();
+    if (run_log != nullptr) {  // without a run log an abort couldn't be recorded anyway
+        runlog::idf::JobMarker job;
+        job.seq = seq;
+        job.started_uptime_s = started_s;
+        std::snprintf(job.target, sizeof(job.target), "%s", mac.str().c_str());
+        std::snprintf(job.version, sizeof(job.version), "%s", img.header().version.c_str());
+        runlog::idf::job_begin(job);
+        o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
+    }
+
     const auto r = ble::flash(mac, img, img.header().bin_size, img.header().dat_bytes(), v.init, o);
+
+    uint32_t recorded = 0;
+    if (run_log != nullptr) {
+        const std::string json = runlog::to_json(make_record(seq, mac, img, r, started_s));
+        recorded = run_log->append(json, runlog::idf::log_since(log_mark, runlog::kSlotPayloadMax));
+        runlog::idf::job_end();
+    }
+
     if (r.link.mtu) print_link(r.link);
     const auto& t = r.transfer;
     for (size_t i = 0; i < dfu::kTransferPhaseCount; ++i) {
@@ -251,9 +323,13 @@ int cmd_flash(int argc, char** argv) {
         std::printf("FLASH OK in %" PRIu32 ".%" PRIu32 " s%s%s. Check the repeater with `ver`.\n", r.total_ms / 1000,
                     (r.total_ms % 1000) / 100, r.attempts.size() > 1 ? " (after retries)" : "",
                     t.activate_disconnect_seen ? "" : " (no disconnect seen after ACTIVATE)");
+        if (recorded) std::printf("Recorded as run #%" PRIu32 " (`run %" PRIu32 "` for details).\n", recorded, recorded);
+        if (run_log != nullptr && !recorded) std::printf("Warning: could not write the run record.\n");
         return 0;
     }
     std::printf("FLASH FAILED after %u attempt(s): %s\n", static_cast<unsigned>(r.attempts.size()), r.error.c_str());
+    if (recorded) std::printf("Recorded as run #%" PRIu32 " (`run %" PRIu32 "` for details and log).\n", recorded, recorded);
+    if (run_log != nullptr && !recorded) std::printf("Warning: could not write the run record.\n");
     if (r.target_erased) {
         const bool recoverable = r.failure == dfu::FailureKind::LinkOrOverrun ||
                                  r.failure == dfu::FailureKind::Transient ||
@@ -266,6 +342,62 @@ int cmd_flash(int argc, char** argv) {
         std::printf("The target was not erased.\n");
     }
     return 1;
+}
+
+int cmd_runs(int argc, char** argv) {
+    runlog::RunLog* run_log = runlog::idf::open_run_log();
+    if (run_log == nullptr) {
+        std::printf("No runlog partition.\n");
+        return 1;
+    }
+    long limit = argc >= 2 ? std::strtol(argv[1], nullptr, 0) : 20;
+    if (limit <= 0) limit = 20;
+    const auto runs = run_log->list();
+    if (runs.empty()) {
+        std::printf("No runs recorded yet.\n");
+        return 0;
+    }
+    std::printf("%5s  %-17s  %7s  %3s  %-6s  %s\n", "RUN", "RESULT", "TIME", "ATT", "ERASED", "VERSION / ERROR");
+    long shown = 0;
+    for (const auto& s : runs) {
+        if (shown++ >= limit) break;
+        const std::string result = runlog::json_get_string(s.json, "result");
+        const uint64_t ms = runlog::json_get_uint(s.json, "duration_ms");
+        size_t attempts = 0;
+        for (size_t at = s.json.find("{\"n\":"); at != std::string::npos; at = s.json.find("{\"n\":", at + 1)) {
+            ++attempts;
+        }
+        const std::string err = runlog::json_get_string(s.json, "error");
+        std::printf("%5" PRIu32 "  %-17s  %3u.%01us  %3u  %-6s  %s%s%s\n", s.seq, result.c_str(),
+                    static_cast<unsigned>(ms / 1000), static_cast<unsigned>((ms % 1000) / 100),
+                    static_cast<unsigned>(attempts), runlog::json_get_string(s.json, "target_erased").c_str(),
+                    runlog::json_get_string(s.json, "image_version").c_str(), err.empty() ? "" : " / ", err.c_str());
+    }
+    return 0;
+}
+
+int cmd_run(int argc, char** argv) {
+    runlog::RunLog* run_log = runlog::idf::open_run_log();
+    if (run_log == nullptr || argc < 2) {
+        std::printf("Usage: run <N>  (see `runs`)\n");
+        return 1;
+    }
+    runlog::RunSlot slot;
+    if (!run_log->get(static_cast<uint32_t>(std::strtoul(argv[1], nullptr, 0)), slot)) {
+        std::printf("Run %s not found (rotated out, or never recorded).\n", argv[1]);
+        return 1;
+    }
+    std::printf("run #%" PRIu32 "\n%s\n--- log (%u bytes) ---\n", slot.seq, slot.json.c_str(),
+                static_cast<unsigned>(slot.log.size()));
+    std::fwrite(slot.log.data(), 1, slot.log.size(), stdout);
+    return 0;
+}
+
+int cmd_logs(int argc, char** argv) {
+    const long bytes = argc >= 2 ? std::strtol(argv[1], nullptr, 0) : 4096;
+    const std::string tail = runlog::idf::log_tail(static_cast<size_t>(bytes > 0 ? bytes : 4096));
+    std::fwrite(tail.data(), 1, tail.size(), stdout);
+    return 0;
 }
 
 int cmd_blreset(int argc, char** argv) {
@@ -323,6 +455,9 @@ void start_console() {
     reg("flash", "Flash the staged image to the target (erases its app), retrying up to --attempts times.",
         "--yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS] [--settle MS] [--wait S]",
         &cmd_flash);
+    reg("runs", "List recorded flash runs (newest first).", "[count]", &cmd_runs);
+    reg("run", "Show one run record and its log tail.", "<N>", &cmd_run);
+    reg("logs", "Show recent captured log output.", "[bytes]", &cmd_logs);
     reg("blreset", "Send SYS_RESET to the target's bootloader (recover a stuck session).", "[--wait S]",
         &cmd_blreset);
 

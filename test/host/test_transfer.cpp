@@ -210,3 +210,26 @@ TEST_CASE("Image read failure aborts", "[transfer]") {
     CHECK(r.error == TransferError::ReadFailed);
     CHECK(r.phase == TransferPhase::Stream);
 }
+
+TEST_CASE("Disconnect during a receipt wait is reported immediately", "[transfer]") {
+    // Models the BLE transport's disconnect wake-up: wait_notification returns
+    // false at once and is_connected() is false. The engine must report
+    // LINK_LOST without waiting out the receipt timeout (review finding).
+    struct Vanishing : FakeBootloader {
+        bool vanished = false;
+        bool wait_notification(dfu::RawNotification& out, uint32_t timeout_ms) override {
+            if (!vanished && received.size() >= 244 * 16) {
+                vanished = true;
+                connected = false;
+                return false;  // no clock advance: woken, not timed out
+            }
+            return FakeBootloader::wait_notification(out, timeout_ms);
+        }
+    } bl;
+    const auto img = make_image(244 * 64);
+    VectorImage src(img);
+    const auto r = dfu::run_transfer(bl, src, static_cast<uint32_t>(img.size()), make_dat(img), params(244));
+    CHECK(r.error == TransferError::Disconnected);
+    CHECK(r.phase == TransferPhase::Stream);
+    CHECK(bl.clock_ms < 1000);  // settle delay only; no 5 s receipt timeout
+}

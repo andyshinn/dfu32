@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -90,6 +91,9 @@ struct FlashOptions {
     uint16_t max_packet = 0;     // 0 = automatic; else cap (e.g. 20 for testing)
     ConnParams conn{};           // interval for attempt 1; retries may lengthen it
     uint8_t attempts = 3;        // total attempts (SPEC.md §6.5)
+    /// Called right before each attempt's transfer starts, i.e. before START
+    /// may erase the target (used for the job marker, SPEC.md §7.3).
+    std::function<void(uint8_t try_number)> before_transfer;
 };
 
 struct AttemptSummary {
