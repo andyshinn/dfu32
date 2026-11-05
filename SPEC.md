@@ -69,12 +69,33 @@ DFU32 can also stage without arming: `POST /targets/{id}/stage`. This lets the o
 |---|---|
 | Framework | ESP-IDF **v6.1** (in service until about Feb 2029). C++ at IDF's default standard (gnu++2b); C where libraries are C. No exceptions, no RTTI. |
 | BLE | NimBLE via `h2zero/esp-nimble-cpp` **pinned `2.6.0`** (master is 3.0.0-dev). Central for DFU, observer for scanning, peripheral only for Improv BLE while unprovisioned. |
-| JSON | `espressif/cjson` managed component (IDF 6 removed the built-in `json` component). |
+| JSON | `espressif/cjson` managed component (IDF 6 removed the built-in `json` component), behind `dfu32_core/json.hpp`. |
 | Hashing | mbedTLS / PSA SHA-256 (built in). CRC16-CCITT implemented locally. |
 | Supported SoCs | ESP32-S3 (BLE 5: 2M PHY, DLE) and classic ESP32 (BLE 4.2: DLE, no 2M PHY). |
 | Min flash / PSRAM | 4 MB flash, **2 MB PSRAM required**. PSRAM holds the 64 KB log ring, HTTP and JSON buffers, and WiFi/LWIP buffers (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`). That leaves internal RAM for NimBLE, which stays on internal allocation. Staging stays in flash, for offline retry after a reboot. |
 | Bench boards | **Adafruit Feather ESP32-S3** (primary: native USB, NeoPixel, BOOT button) and **Adafruit Feather ESP32 V2** (secondary target, or the fake-bootloader test fixture, §14.3). |
 | Also supported | Generic ESP32-S3 N16R8 DevKitC (8/16 MB layout). |
+
+### 4.1 Third-party components (prefer these over writing our own)
+
+Registry components are declared in the `idf_component.yml` of the component that uses them, so CI fetches them. Versions are the latest at the time of writing; pin with `^` when adding.
+
+| Component | Version | Used for | Milestone |
+|---|---|---|---|
+| `h2zero/esp-nimble-cpp` | 2.6.0 (pinned) | BLE central, scanning, Improv BLE peripheral | M1 (in use) |
+| `espressif/mdns` | ^1.10 | `dfu32-xxxx.local` | M3a (in use) |
+| `espressif/cjson` | ^1.7.19 | Manifest, API bodies, target record | M3a (in use) |
+| `espressif/button` (esp-iot-solution) | 4.2.x | Debounce, long-press events for the 5 s unclaim and 15 s factory reset (§9.3) | M4 |
+| `espressif/led_indicator` (esp-iot-solution) on `espressif/led_strip` | 2.1.x / 3.1.x | NeoPixel and red-LED patterns with priorities (§13.4) | M4 |
+| `improv-wifi/sdk-cpp` (not in the registry; vendored or fetched) | 1.2.x | Improv packet parsing and checksums; DFU32 supplies the serial and BLE transports (§9.2) | M4 |
+| `espressif/mqtt` (esp-mqtt) | 1.x | MQTT + Home Assistant discovery (§10.3) | post-v1 |
+| `espressif/libsodium` | 1.0.x | Ed25519 verification for signed manifests (§11); PSA in IDF 6 has no Ed25519 | post-v1 |
+
+Considered and not used:
+- `espressif/network_provisioning`: Espressif's protobuf/protocomm provisioning, tied to the ESP provisioning apps. Improv fits the ESP Web Tools / Home Assistant flow and is much smaller.
+- ROM `esp_rom_crc16`/`esp_rom_crc32`: `dfu_proto` must also build on the host, and the local versions are a few lines each.
+- A filesystem (e.g. LittleFS) for run records: one 4 KB slot write per run doesn't need one.
+- URL resolution stays local: `esp_http_client` parses URLs but can't resolve a relative reference against a base.
 
 Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top of the root `sdkconfig.defaults`. Each profile sets flash size, the partition CSV, the console transport, PSRAM, and pins (LED, button).
 
@@ -398,6 +419,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
 
 - **Improv Serial** (M4, together with ESP Web Tools; until then the `wifi <ssid> <password>` console command stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
+- Both transports use the Improv project's C++ SDK (`improv-wifi/sdk-cpp`, §4.1) for packet parsing; DFU32 provides the UART/USB and NimBLE GATT plumbing.
 - **Improv BLE** runs only while unprovisioned, or for 5 min after a 2 s button press. It uses a NimBLE GATT server and advertising. It is fully torn down when provisioning finishes or the window expires, and a DFU can't start while it is active.
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
@@ -405,6 +427,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 - While unclaimed, `POST /api/v1/claim` returns a newly generated token **once**: 32 bytes from `esp_fill_random` with the radio on, encoded base64url. DFU32 stores its SHA-256.
 - While unclaimed, the mutating endpoints are disabled; only `GET /status`, `GET /`, and `/claim` work.
+- Button handling uses `espressif/button` long-press events (§4.1).
 - **Unclaim:** hold the button 5 s. The LED flashes amber. This clears `token_sha256` without touching anything else.
 - **Factory reset:** hold 15 s. This erases the `dfu32` namespace and WiFi credentials. The staging partition and run log are kept.
 - On boards with no button, use `POST /api/v1/system/token/rotate` while authenticated, or reflash with an NVS erase.
@@ -489,7 +512,7 @@ The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
 
 ### 10.3 Home Assistant
 
-v1 has no MQTT. HA can use `rest` sensors on `/api/v1/status` and `rest_command` for check, stage and flash. A later milestone adds MQTT with HA discovery: an `update` entity, a state sensor, a progress sensor, and a Flash button.
+v1 has no MQTT (the later milestone uses `espressif/mqtt`, §4.1). HA can use `rest` sensors on `/api/v1/status` and `rest_command` for check, stage and flash. A later milestone adds MQTT with HA discovery: an `update` entity, a state sensor, a progress sensor, and a Flash button.
 
 ---
 
@@ -517,7 +540,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - Unknown keys are ignored. `schema > 1` is refused (`MANIFEST_UNSUPPORTED`).
 - Parsed by `dfu32::parse_manifest` (`components/dfu32_core`) using cJSON from the component registry (`espressif/cjson`; ESP-IDF 6 no longer bundles it) behind a thin C++ wrapper (`dfu32_core/json.hpp`: ownership, case-sensitive lookup, exact-integer reads). The nesting limit is set to 16 (`CONFIG_CJSON_NESTING_LIMIT`) so a hostile document can't recurse through the task stack. Relative URLs follow RFC 3986 resolution against the manifest URL, and only `http://` is accepted.
 - Size limits: manifest ≤ 8 KB, `.dat` ≤ 64 B, `.bin` ≤ the staging capacity.
-- **Trust model (decided: HTTP + hashes).** Hashes catch corruption, not malicious substitution. Anyone who can spoof the artifact server on your LAN can flash an image that passes the board, `.dat` and CRC checks. This is accepted for v1. An Ed25519-signed manifest is a later, compatible addition (`"sig"` field plus a public key in NVS).
+- **Trust model (decided: HTTP + hashes).** Hashes catch corruption, not malicious substitution. Anyone who can spoof the artifact server on your LAN can flash an image that passes the board, `.dat` and CRC checks. This is accepted for v1. An Ed25519-signed manifest is a later, compatible addition (`"sig"` field plus a public key in NVS), verified with `espressif/libsodium` (§4.1).
 
 **Server tooling** (`tools/`, Python, MIT):
 - `dfu32-pack <dfu.zip> --board rak4631 --version … --out dir/` (`tools/dfu32_pack.py`, M3a) reads the adafruit-nrfutil `manifest.json` in the zip, extracts `.bin` and `.dat`, validates them (word alignment, dev type, CRC16, max size), and writes `manifest.json`.
@@ -666,6 +689,8 @@ Writes are rare (one sector per run), so wear isn't a concern.
 
 On the Feathers, the plain red LED (GPIO13) is the **attention** indicator, separate from the NeoPixel. It stays solid while the target is known to be erased and not yet reflashed, so the warning is visible even if the NeoPixel is dimmed or disabled. It blinks during the transfer.
 
+Implemented with `espressif/led_indicator` over `espressif/led_strip` (§4.1): each row is a blink pattern, and when several apply the highest-priority one shows (erased target > failure > transfer > awaiting > fetching > idle). The red LED uses the same component in GPIO mode.
+
 ---
 
 ## 14. Testing
@@ -757,3 +782,10 @@ dfu32/
 | lucidnx/nrf_dfu_py | **No license** | Behavioural reference only; **do not copy code** |
 | astronomer80/nrf52_bledfu_win | **No license** | Behavioural reference only |
 | esp-nimble-cpp | Apache-2.0 | Dependency |
+| espressif/mdns, espressif/mqtt (esp-protocols) | Apache-2.0 | Dependency |
+| espressif/cjson (cJSON) | MIT | Dependency |
+| espressif/button, espressif/led_indicator (esp-iot-solution), espressif/led_strip | Apache-2.0 | Dependency (M4) |
+| improv-wifi/sdk-cpp | Apache-2.0 | Dependency (M4); keep its LICENSE alongside if vendored |
+| espressif/libsodium (libsodium) | ISC | Dependency (post-v1) |
+
+Apache-2.0 dependencies are compatible with DFU32's MIT licence. Binary releases (the merged `.bin`, ESP Web Tools) should ship a `THIRD_PARTY_NOTICES` file listing these licences; generating it from the build's `dependencies.lock` is an M5 task.

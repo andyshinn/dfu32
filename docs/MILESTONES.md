@@ -96,7 +96,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 ## M4: UI, provisioning & polish (3–4 days)
 
 - Web UI: status, target form with the **scan picker**, runs, logs, system.
-- Improv BLE (only while unprovisioned), the button (unclaim / factory reset), and the LED states.
+- Improv BLE (only while unprovisioned), the button (unclaim / factory reset), and the LED states, built on `improv-wifi/sdk-cpp`, `espressif/button` and `espressif/led_indicator` + `led_strip` (SPEC §4.1) rather than local code.
 - DFU32 self-OTA upload with rollback (`esp_ota_mark_app_valid_cancel_rollback` once WiFi and HTTP are up).
 - ESP Web Tools manifest so DFU32 can be flashed from a browser, plus Improv Serial provisioning in the same session (moved here from M3; until then, set WiFi with the `wifi` console command).
 - `docs/RECOVERY.md` and `docs/OPERATOR.md` (MeshCore walkthrough, including remote `start ota`).
@@ -108,11 +108,12 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
 - `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API).
 - Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0.
+- `THIRD_PARTY_NOTICES` for binary releases, generated from `dependencies.lock` (SPEC §16).
 
 ## Later (post-v1, in rough priority order)
 
-1. MQTT + Home Assistant discovery (`update` entity, progress, Flash button).
-2. Ed25519-signed manifests (backward-compatible `sig` field).
+1. MQTT + Home Assistant discovery (`update` entity, progress, Flash button), with `espressif/mqtt`.
+2. Ed25519-signed manifests (backward-compatible `sig` field), verified with `espressif/libsodium`.
 3. More than one target per device (raise `DFU32_MAX_TARGETS`, add a per-target staging slot or a shared slot with re-fetch).
 4. On-device raw DFU `.zip` ingestion with miniz on 8 MB+ profiles.
 5. Optional wired trigger plugin (UART / USB host) for unattended updates.
