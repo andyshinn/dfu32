@@ -30,19 +30,27 @@ LogRing* s_ring = nullptr;
 SemaphoreHandle_t s_ring_mutex = nullptr;
 vprintf_like_t s_prev_vprintf = nullptr;
 
+char s_line[256];  // formatting buffer, guarded by s_ring_mutex (keeps it off small task stacks)
+
 int log_hook(const char* fmt, va_list ap) {
-    if (s_ring != nullptr) {
-        char line[256];
+    // ISR context can't take a mutex; such output only goes to the console.
+    // Otherwise never block a logging task for long: if a reader holds the
+    // ring, skip the capture (not the console output).
+    if (s_ring != nullptr && !xPortInIsrContext() && xSemaphoreTake(s_ring_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         va_list copy;
         va_copy(copy, ap);
-        const int n = std::vsnprintf(line, sizeof(line), fmt, copy);
+        const int n = std::vsnprintf(s_line, sizeof(s_line), fmt, copy);
         va_end(copy);
-        // Never block a logging task for long; drop the capture (not the
-        // console output) if a reader holds the ring.
-        if (n > 0 && xSemaphoreTake(s_ring_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            s_ring->append({line, std::min(static_cast<size_t>(n), sizeof(line) - 1)});
-            xSemaphoreGive(s_ring_mutex);
+        if (n > 0) {
+            if (static_cast<size_t>(n) >= sizeof(s_line)) {
+                // Truncated: keep the line structure intact for since().
+                s_line[sizeof(s_line) - 2] = '\n';
+                s_ring->append({s_line, sizeof(s_line) - 1});
+            } else {
+                s_ring->append({s_line, static_cast<size_t>(n)});
+            }
         }
+        xSemaphoreGive(s_ring_mutex);
     }
     return s_prev_vprintf != nullptr ? s_prev_vprintf(fmt, ap) : std::vprintf(fmt, ap);
 }

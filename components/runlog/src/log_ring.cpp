@@ -36,7 +36,11 @@ std::string LogRing::since(uint64_t from, size_t max_bytes) const {
     const size_t first = std::min(len, cap - at);
     out.append(buf_.data() + at, first);
     out.append(buf_.data(), len - first);
-    if (cut) {
+    // Trim a partial first line, unless `start` is known to be a line start:
+    // the byte before it is still held and is a newline. At oldest() after a
+    // wrap that byte is gone, so we can't know and trim.
+    const bool at_line_start = start > oldest() && buf_[static_cast<size_t>((start - 1) % cap)] == '\n';
+    if (cut && !at_line_start) {
         const size_t nl = out.find('\n');
         out.erase(0, nl == std::string::npos ? out.size() : nl + 1);
     }

@@ -370,7 +370,12 @@ public:
     void onDisconnect(NimBLEClient*, int reason) override {
         ESP_LOGI(TAG, "disconnected (reason 0x%02x)", reason);
         const dfu::RawNotification wake{};  // len 0
-        xQueueSend(queue_, &wake, 0);
+        if (xQueueSend(queue_, &wake, 0) != pdTRUE) {
+            // Queue full: pending notifications are moot once the link is
+            // gone; make room so the wake-up is never lost.
+            xQueueReset(queue_);
+            xQueueSend(queue_, &wake, 0);
+        }
     }
     void onMTUChange(NimBLEClient*, uint16_t mtu) override {
         ESP_LOGI(TAG, "MTU %u", mtu);

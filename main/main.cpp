@@ -69,7 +69,10 @@ static void record_aborted_run() {
              runlog::idf::reset_reason_string(),
              maybe_erased ? "; the target's app may be erased: run `flash --yes` again" : "");
     runlog::RunLog* run_log = runlog::idf::open_run_log();
-    if (run_log != nullptr) {
+    if (run_log != nullptr && job.seq < run_log->next_seq()) {
+        // The run was recorded; the reboot hit between append() and job_end().
+        ESP_LOGI(TAG, "interrupted run #%u was already recorded", static_cast<unsigned>(job.seq));
+    } else if (run_log != nullptr) {
         runlog::RunRecord rec;
         rec.seq = run_log->next_seq();
         rec.result = "ABORTED_BY_REBOOT";
@@ -97,6 +100,9 @@ extern "C" void app_main(void) {
              static_cast<unsigned>(esp_psram_get_size()));
 
     init_nvs();
+    // Needs only NVS and the runlog partition, so do it before the self-check:
+    // a failing layout must not leave a stale marker for a later boot.
+    record_aborted_run();
 
     bool ok = true;
     ok &= check_data_partition("staging", kSubtypeStaging, kStagingHeaderSize + dfu::kMaxAppSizeS140v6);
@@ -107,7 +113,6 @@ extern "C" void app_main(void) {
         return;
     }
     ESP_LOGI(TAG, "layout self-check OK");
-    record_aborted_run();
 
     if (psa_crypto_init() != PSA_SUCCESS) {
         ESP_LOGE(TAG, "psa_crypto_init failed");

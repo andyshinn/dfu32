@@ -68,6 +68,9 @@ TEST_CASE("Log ring limits by max bytes, aligned to a line", "[logring]") {
     for (int i = 0; i < 10; ++i) ring.append("0123456789\n");  // 11 bytes each
     // Last 25 bytes start mid-line; output starts at the next line boundary.
     CHECK(ring.tail(25) == "0123456789\n0123456789\n");
+    // Exactly two whole lines: nothing may be dropped (review finding).
+    CHECK(ring.tail(22) == "0123456789\n0123456789\n");
+    CHECK(ring.tail(11) == "0123456789\n");
 }
 
 TEST_CASE("Log ring handles a write larger than the buffer", "[logring]") {

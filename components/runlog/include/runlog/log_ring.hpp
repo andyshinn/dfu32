@@ -27,8 +27,8 @@ public:
     uint64_t oldest() const noexcept { return written_ > buf_.size() ? written_ - buf_.size() : 0; }
 
     /// The last `max_bytes` of everything appended since `from` (clamped to what
-    /// the ring still holds). If the result had to be cut, it starts after the
-    /// first newline so it never begins mid-line.
+    /// the ring still holds). If the result had to be cut mid-line, it starts
+    /// after the first newline so it never begins with a partial line.
     std::string since(uint64_t from, size_t max_bytes) const;
 
     std::string tail(size_t max_bytes) const { return since(0, max_bytes); }

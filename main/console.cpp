@@ -278,13 +278,15 @@ int cmd_flash(int argc, char** argv) {
     const uint32_t seq = run_log ? run_log->next_seq() : 0;
     const uint64_t log_mark = runlog::idf::log_position();
     const uint32_t started_s = uptime_s();
-    runlog::idf::JobMarker job;
-    job.seq = seq;
-    job.started_uptime_s = started_s;
-    std::snprintf(job.target, sizeof(job.target), "%s", mac.str().c_str());
-    std::snprintf(job.version, sizeof(job.version), "%s", img.header().version.c_str());
-    runlog::idf::job_begin(job);
-    o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
+    if (run_log != nullptr) {  // without a run log an abort couldn't be recorded anyway
+        runlog::idf::JobMarker job;
+        job.seq = seq;
+        job.started_uptime_s = started_s;
+        std::snprintf(job.target, sizeof(job.target), "%s", mac.str().c_str());
+        std::snprintf(job.version, sizeof(job.version), "%s", img.header().version.c_str());
+        runlog::idf::job_begin(job);
+        o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
+    }
 
     const auto r = ble::flash(mac, img, img.header().bin_size, img.header().dat_bytes(), v.init, o);
 
@@ -292,8 +294,8 @@ int cmd_flash(int argc, char** argv) {
     if (run_log != nullptr) {
         const std::string json = runlog::to_json(make_record(seq, mac, img, r, started_s));
         recorded = run_log->append(json, runlog::idf::log_since(log_mark, runlog::kSlotPayloadMax));
+        runlog::idf::job_end();
     }
-    runlog::idf::job_end();
 
     if (r.link.mtu) print_link(r.link);
     const auto& t = r.transfer;
@@ -322,10 +324,12 @@ int cmd_flash(int argc, char** argv) {
                     (r.total_ms % 1000) / 100, r.attempts.size() > 1 ? " (after retries)" : "",
                     t.activate_disconnect_seen ? "" : " (no disconnect seen after ACTIVATE)");
         if (recorded) std::printf("Recorded as run #%" PRIu32 " (`run %" PRIu32 "` for details).\n", recorded, recorded);
+        if (run_log != nullptr && !recorded) std::printf("Warning: could not write the run record.\n");
         return 0;
     }
     std::printf("FLASH FAILED after %u attempt(s): %s\n", static_cast<unsigned>(r.attempts.size()), r.error.c_str());
     if (recorded) std::printf("Recorded as run #%" PRIu32 " (`run %" PRIu32 "` for details and log).\n", recorded, recorded);
+    if (run_log != nullptr && !recorded) std::printf("Warning: could not write the run record.\n");
     if (r.target_erased) {
         const bool recoverable = r.failure == dfu::FailureKind::LinkOrOverrun ||
                                  r.failure == dfu::FailureKind::Transient ||
@@ -346,7 +350,8 @@ int cmd_runs(int argc, char** argv) {
         std::printf("No runlog partition.\n");
         return 1;
     }
-    const long limit = argc >= 2 ? std::strtol(argv[1], nullptr, 0) : 20;
+    long limit = argc >= 2 ? std::strtol(argv[1], nullptr, 0) : 20;
+    if (limit <= 0) limit = 20;
     const auto runs = run_log->list();
     if (runs.empty()) {
         std::printf("No runs recorded yet.\n");
