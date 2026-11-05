@@ -152,13 +152,20 @@ Tuning knobs:
 | 2026-11-04 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 30, default interval | 40.4 s (10.2 kB/s), 1,206 TX back-off retries | 49.4 s |
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 16, **interval 7.5 ms** | link lost after 2.3 s (bootloader reset) | **failed** |
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 (already in BL at MAC+1) | same | 244 B, PRN 16, **interval 7.5 ms** | 0.4 s at 29.5 kB/s, then `10 03 06` OPERATION_FAILED | **failed** |
+| 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 7.5 ms** | link lost about 4.5 s in | **failed** |
+| 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 11.25 ms** | link lost about 3.4 s in | **failed** |
 
 PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash.
 
 **At a 7.5 ms interval the radio outran the bootloader.**
 - OTAFIX sends a receipt when a packet *arrives*, not when it's written to flash. Its lazy-erase path holds only **8 pending packets**, and a page erase (about 85 ms) stalls writes.
 - With PRN 16, up to 16 unwritten packets can pile up, giving `10 03 06` OPERATION_FAILED or a bootloader reset.
-- **PRN must stay ≤ 8 at fast intervals** (the ESPHome comment about ">8 unacknowledged packets" agrees). The burst before the failure reached about 29.5 kB/s, so a fast interval with PRN 8 is the next test.
+- PRN 8 did **not** fix it at 7.5 or 11.25 ms. Receipts acknowledge *arrival*, so DFU32 keeps sending while earlier packets still wait behind a lazy page erase (about 85 ms per 4 KB page). The PRN window therefore does not bound OTAFIX's pending writes.
+- What bounds them is the arrival rate during an erase: at most about 8 packets per 85 ms, roughly 94 packets/s or about 23 kB/s (an estimate from the source, not measured). The default interval (about 41 packets/s observed) stays well inside that.
+- Options:
+  - an interval between the default and 11.25 ms;
+  - pacing around 4 KB page boundaries, an experimental `--page-pause` idea;
+  - M2 retries falling back to the default interval and PRN after a link loss or `06` in the stream.
 - The 2 s supervision timeout cut the buttonless jump from 4.5 s to 2.4 s.
 
 Next to test:
