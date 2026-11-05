@@ -29,6 +29,7 @@ constexpr uint16_t kPreferredMtu = 247;
 constexpr uint32_t kBootloaderScanMs = 30000;
 constexpr uint32_t kJumpDisconnectMs = 5000;
 constexpr uint32_t kMtuWaitMs = 1500;
+constexpr uint16_t kDefaultConnInterval = 16;  // x1.25 ms = 20 ms
 constexpr uint32_t kPacketRetryLimit = 200;  // x 1 tick of back-off on ENOMEM
 
 uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
@@ -214,7 +215,9 @@ public:
             return false;
         }
         client_->setClientCallbacks(this, false);
-        uint16_t itvl_min = 12, itvl_max = 24;  // 15-30 ms default
+        // Default 20 ms (bench: 30 ms 9.2 kB/s, 20 ms 12.4, 15 ms 14.8; 11.25 ms and
+        // faster overran OTAFIX's lazy-erase buffering). See docs/BENCH.md.
+        uint16_t itvl_min = kDefaultConnInterval, itvl_max = kDefaultConnInterval;
         if (conn.interval_ms != 0) {
             itvl_min = itvl_max = std::max<uint16_t>(6, static_cast<uint16_t>(conn.interval_ms * 4 / 5));
         }

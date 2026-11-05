@@ -139,7 +139,7 @@ Tuning knobs:
 |---|---|---|
 | `--prn N` | 8 | Packets per receipt. Try 4 if transfers stall. |
 | `--packet N` | automatic | Cap the packet size, e.g. `--packet 20` to compare throughput. |
-| `--interval MS` | 15–30 ms range | Request a fixed BLE connection interval, e.g. `--interval 8`. Shorter means more packets per second. `probe` takes it too, and both report the interval actually negotiated. |
+| `--interval MS` | 20 ms | Request a fixed BLE connection interval. Shorter means more packets per second, but **on OTAFIX, 11.25 ms and below overrun the bootloader** (see results). `probe` takes it too, and both report the interval actually negotiated. |
 | `--settle MS` | 500 | Delay between START and the size packet. |
 | `--wait S` | 600 | How long to wait for the target. |
 
@@ -156,6 +156,7 @@ Tuning knobs:
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 11.25 ms** | link lost about 3.4 s in | **failed** |
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, default range → **30 ms negotiated** | 44.8 s (9.2 kB/s) | 51.0 s |
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 20 ms** | **33.2 s (12.4 kB/s)** | **38.4 s** |
+| 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 15 ms** (2 runs, both OK) | 27.9 s (14.8 kB/s) | |
 
 PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash.
 
@@ -169,7 +170,7 @@ PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardles
   - 11.25 ms works out to about 89 packets/s, right at the ~94 packets/s OTAFIX erase limit, which fits it failing.
   - 20 ms works (+35% over the default). 15 ms (about 67 packets/s) is the next test.
 - Options:
-  - an interval between the default and 11.25 ms (**20 ms confirmed, 15 ms pending**);
+  - an interval between the old default and 11.25 ms. 20 ms and 15 ms both work. **20 ms is now the default**, roughly 2× under the erase limit; 15 ms is faster but has less margin;
   - pacing around 4 KB page boundaries, an experimental `--page-pause` idea;
   - M2 retries falling back to the default interval and PRN after a link loss or `06` in the stream.
 - The 2 s supervision timeout cut the buttonless jump from 4.5 s to 2.4 s.

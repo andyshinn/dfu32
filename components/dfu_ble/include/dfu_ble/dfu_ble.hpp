@@ -61,7 +61,7 @@ struct LinkInfo {
     uint16_t conn_timeout = 0;       // 10 ms units
 };
 
-/// Connection interval request. 0 = default range 15-30 ms; otherwise request
+/// Connection interval request. 0 = default 20 ms; otherwise request
 /// exactly this many milliseconds (rounded down to 1.25 ms steps, min 7.5 ms).
 struct ConnParams {
     uint16_t interval_ms = 0;
