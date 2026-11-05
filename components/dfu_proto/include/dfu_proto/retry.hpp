@@ -24,6 +24,7 @@ enum class FailureKind : uint8_t {
     StaleSession,   // START answered INVALID_STATE: SYS_RESET was sent, retry promptly
     Fatal,          // retrying cannot help (image/target mismatch, image too large, read error)
     TargetGone,     // target no longer reachable over BLE (e.g. old bootloader fell back to USB)
+    Aborted,        // the operator cancelled the run (console Ctrl+C); never retried
 };
 
 const char* to_string(FailureKind k) noexcept;
@@ -78,7 +79,7 @@ struct RetryResult {
 using AttemptFn = std::function<AttemptOutcome(uint8_t try_number, const AttemptParams& params)>;
 using SleepFn = std::function<void(uint32_t ms)>;
 
-/// Runs attempts until one succeeds, a failure is Fatal/TargetGone, or the
+/// Runs attempts until one succeeds, a failure is Fatal/TargetGone/Aborted, or the
 /// policy's attempt budget is spent. Sleeps between attempts (backoff, or the
 /// short stale-session delay) and degrades parameters after LinkOrOverrun.
 /// StaleSession failures are free (not counted) up to free_stale_retries.

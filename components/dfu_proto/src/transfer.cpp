@@ -33,6 +33,7 @@ const char* to_string(TransferError e) noexcept {
         case TransferError::PrnMismatch: return "PRN_MISMATCH";
         case TransferError::UnexpectedNotification: return "UNEXPECTED_NOTIFICATION";
         case TransferError::ReadFailed: return "IMAGE_READ_FAILED";
+        case TransferError::Aborted: return "ABORTED";
     }
     return "UNKNOWN";
 }
@@ -59,8 +60,13 @@ public:
         return false;
     }
 
+    /// An abort is honoured until the last packet is sent; after that,
+    /// finishing takes seconds and leaves the target with a working app.
+    bool aborting() const { return r_.phase <= TransferPhase::Stream && link_.cancelled(); }
+
     TransferError link_error() const {
-        return link_.is_connected() ? TransferError::WriteFailed : TransferError::Disconnected;
+        if (!link_.is_connected()) return TransferError::Disconnected;
+        return aborting() ? TransferError::Aborted : TransferError::WriteFailed;
     }
 
     bool control(std::span<const uint8_t> d) {
@@ -84,6 +90,7 @@ public:
                 if (!link_.is_connected()) {
                     return fail(TransferError::Disconnected);
                 }
+                if (aborting()) return fail(TransferError::Aborted);
                 continue;  // re-evaluate deadline
             }
             const Notification n = parse_notification(raw.bytes());
@@ -114,6 +121,7 @@ public:
                 if (!link_.is_connected()) {
                     return fail(TransferError::Disconnected);
                 }
+                if (aborting()) return fail(TransferError::Aborted);
                 continue;
             }
             const Notification n = parse_notification(raw.bytes());
@@ -157,6 +165,10 @@ TransferResult run_transfer(ITransport& link, IImageSource& image, uint32_t imag
 
     // START: CP 01 04, settle, 12-byte size triplet on Packet, wait for erase.
     run.enter(TransferPhase::Start);
+    if (run.aborting()) {  // nothing sent yet: the target is untouched
+        run.fail(TransferError::Aborted);
+        return r;
+    }
     if (!run.control(encode_start(ImageType::Application))) return r;
     link.delay_ms(params.start_settle_ms);
     const auto sizes = encode_start_sizes(image_size);
@@ -181,6 +193,10 @@ TransferResult run_transfer(ITransport& link, IImageSource& image, uint32_t imag
     std::vector<uint8_t> buf(params.packet_size);
     uint32_t offset = 0;
     for (uint32_t i = 0; i < plan.packet_count; ++i) {
+        if (run.aborting()) {
+            run.fail(TransferError::Aborted);
+            return r;
+        }
         const bool last = (i + 1 == plan.packet_count);
         const uint16_t len = last ? plan.last_packet_size : plan.packet_size;
         const std::span<uint8_t> chunk(buf.data(), len);

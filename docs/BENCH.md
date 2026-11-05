@@ -183,6 +183,14 @@ DFU32 waits up to 10 minutes for the target, enters the bootloader, checks the S
 
 Afterwards, run `ver` on the repeater.
 
+To cancel, press **Ctrl+C** (or Ctrl+D) in the console. `scan`, `probe` and `blreset` stop the same way, and so does an API job stopped with `POST /jobs/current/abort` or `job abort`.
+- While DFU32 is still waiting for the target, or anywhere before START, the repeater's app is left untouched. If the repeater has already jumped into its bootloader, DFU32 sends SYS_RESET so it restarts the app (after a jump that can take up to 5 s more). If that fails, the abort message says so; run `blreset`.
+- During the transfer, DFU32 stops before the next packet and sends SYS_RESET. The app is already erased by then; run `flash --yes` again (an OTAFIX bootloader waits in BLE OTA mode, usually at MAC+1).
+- Once the last packet is sent, the flash finishes instead (a few seconds).
+- A BLE connect already in progress finishes first (10 s at most).
+
+An aborted flash is recorded as `FAILED` with failure kind `ABORTED`. `idf.py monitor` passes Ctrl+C to the board; exit the monitor with Ctrl+].
+
 Tuning knobs:
 
 | Option | Default | Use |

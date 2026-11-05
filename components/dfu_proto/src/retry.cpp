@@ -13,6 +13,7 @@ const char* to_string(FailureKind k) noexcept {
         case FailureKind::StaleSession: return "STALE_SESSION";
         case FailureKind::Fatal: return "FATAL";
         case FailureKind::TargetGone: return "TARGET_GONE";
+        case FailureKind::Aborted: return "ABORTED";
     }
     return "UNKNOWN";
 }
@@ -22,6 +23,8 @@ FailureKind classify_transfer_failure(const TransferResult& r) noexcept {
     switch (r.error) {
         case TransferError::Ok:
             return FailureKind::None;
+        case TransferError::Aborted:
+            return FailureKind::Aborted;
         case TransferError::BadParams:
         case TransferError::ReadFailed:
             return FailureKind::Fatal;
@@ -85,7 +88,7 @@ RetryResult run_with_retries(const RetryPolicy& policy, AttemptParams initial, c
         result.last_params = params;
         result.last = attempt(result.tries, params);
         if (result.last.ok || result.last.failure == FailureKind::Fatal ||
-            result.last.failure == FailureKind::TargetGone) {
+            result.last.failure == FailureKind::TargetGone || result.last.failure == FailureKind::Aborted) {
             break;
         }
         const bool free_retry = result.last.failure == FailureKind::StaleSession && free_stale_left > 0;

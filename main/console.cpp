@@ -4,16 +4,20 @@
 // flash, runs, run, logs, blreset, job, token. The HTTP API and the web UI (M4)
 // cover the same ground; the console stays as a debug tool. Commands that use
 // BLE or the staging partition take the job lease, so they can't run while an
-// API job does (and vice versa).
+// API job does (and vice versa). Ctrl+C or Ctrl+D aborts the BLE commands
+// (scan, probe, flash, blreset); `job abort` stops an API job.
 #include "console.hpp"
 
 #include <array>
+#include <atomic>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 #include "api/api.hpp"
 #include "config/config.hpp"
@@ -26,6 +30,9 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "runlog/run_record.hpp"
 #include "runlog/runlog_idf.hpp"
 #include "staging/staging.hpp"
@@ -36,6 +43,81 @@ namespace {
 constexpr const char* TAG = "console";
 
 // ---- helpers ------------------------------------------------------------------
+
+// While a command runs, the REPL is not reading the console, so Ctrl+C would
+// just sit in the input buffer. This watcher polls stdin without blocking (the
+// same way linenoise probes the terminal) and turns Ctrl+C (0x03) or Ctrl+D
+// (0x04) into ble::request_abort(). An abort can leave the target erased, so a
+// read counts only if it holds nothing but those bytes: a paste or escape
+// sequence that happens to contain one doesn't abort. Other keys typed
+// meanwhile are discarded so they don't run as a command afterwards. Construct it on the command's
+// stack; the destructor stops the watcher before the REPL reads input again.
+class AbortOnCtrlC {
+public:
+    AbortOnCtrlC() {
+        ble::clear_abort();
+        fd_ = fileno(stdin);
+        flags_ = fcntl(fd_, F_GETFL);
+        if (flags_ < 0 || fcntl(fd_, F_SETFL, flags_ | O_NONBLOCK) < 0) {
+            ESP_LOGW(TAG, "console input can't be polled; Ctrl+C won't abort this command");
+            flags_ = -1;
+            return;
+        }
+        done_ = xSemaphoreCreateBinary();
+        if (done_ == nullptr || xTaskCreate(&AbortOnCtrlC::run, "ctrl_c", 3072, this, uxTaskPriorityGet(nullptr),
+                                            nullptr) != pdPASS) {
+            ESP_LOGW(TAG, "Ctrl+C watcher not started; Ctrl+C won't abort this command");
+            if (done_ != nullptr) vSemaphoreDelete(done_);
+            done_ = nullptr;
+            return;
+        }
+        std::printf("(Ctrl+C to abort)\n");
+        std::fflush(stdout);
+    }
+    ~AbortOnCtrlC() {
+        if (done_ != nullptr) {
+            stop_.store(true);
+            xSemaphoreTake(done_, portMAX_DELAY);
+            vSemaphoreDelete(done_);
+        }
+        if (flags_ >= 0) fcntl(fd_, F_SETFL, flags_);
+    }
+    AbortOnCtrlC(const AbortOnCtrlC&) = delete;
+    AbortOnCtrlC& operator=(const AbortOnCtrlC&) = delete;
+
+private:
+    static bool only_abort_keys(const char* p, size_t n) {
+        for (size_t i = 0; i < n; ++i) {
+            if (p[i] != 0x03 && p[i] != 0x04) return false;
+        }
+        return n > 0;
+    }
+
+    static void run(void* arg) {
+        auto* self = static_cast<AbortOnCtrlC*>(arg);
+        bool announced = false;
+        while (!self->stop_.load()) {
+            char buf[16];
+            const ssize_t n = read(self->fd_, buf, sizeof(buf));
+            if (n <= 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            if (!announced && only_abort_keys(buf, static_cast<size_t>(n))) {
+                ESP_LOGW(TAG, "abort requested from the console; stopping at the next safe point");
+                ble::request_abort();
+                announced = true;
+            }
+        }
+        xSemaphoreGive(self->done_);
+        vTaskDelete(nullptr);
+    }
+
+    int fd_ = -1;
+    int flags_ = -1;
+    SemaphoreHandle_t done_ = nullptr;
+    std::atomic<bool> stop_{false};
+};
 
 bool has_flag(int argc, char** argv, const char* flag) {
     for (int i = 1; i < argc; ++i) {
@@ -307,7 +389,11 @@ int cmd_scan(int argc, char** argv) {
     job::Lease lease("console");
     if (!acquire(lease)) return 1;
     std::printf("Scanning %ld s...\n", secs);
-    const auto list = ble::scan(static_cast<uint32_t>(secs > 0 ? secs : 8) * 1000);
+    std::vector<ble::Advert> list;
+    {
+        AbortOnCtrlC watch;
+        list = ble::scan(static_cast<uint32_t>(secs > 0 ? secs : 8) * 1000);
+    }
     std::printf("%-17s  %-6s  %4s  %-4s  %s\n", "ADDRESS", "TYPE", "RSSI", "DFU", "NAME");
     for (const auto& a : list) {
         std::printf("%-17s  %-6s  %4d  %-4s  %s\n", a.mac.str().c_str(), a.mac.type ? "random" : "public", a.rssi,
@@ -354,13 +440,16 @@ int cmd_probe(int argc, char** argv) {
     const long wait_s = opt_long(argc, argv, "--wait", 60);
     job::Lease lease("console");
     if (!acquire(lease)) return 1;
-    ble::clear_abort();
     std::printf("Probing %s (waiting up to %ld s; run `start ota` on the repeater now if you haven't).\n"
                 "Non-destructive: no START is sent%s.\n",
                 mac.str().c_str(), wait_s, reset ? "; SYS_RESET at the end reboots the target into its app" : "");
     ble::ConnParams conn;
     conn.interval_ms = static_cast<uint16_t>(opt_long(argc, argv, "--interval", 0));
-    const auto r = ble::probe(mac, static_cast<uint32_t>(wait_s) * 1000, reset, conn);
+    ble::ProbeReport r;
+    {
+        AbortOnCtrlC watch;
+        r = ble::probe(mac, static_cast<uint32_t>(wait_s) * 1000, reset, conn);
+    }
     if (!r.ok) {
         std::printf("PROBE FAILED: %s\n", r.error.c_str());
         return 1;
@@ -379,12 +468,12 @@ int cmd_flash(int argc, char** argv) {
     if (!has_flag(argc, argv, "--yes")) {
         std::printf("This ERASES the target's application and flashes the staged image.\n"
                     "Re-run as: flash --yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS]\n"
-                    "                       [--settle MS] [--wait S] [--wifi on|off]\n");
+                    "                       [--settle MS] [--wait S] [--wifi on|off]\n"
+                    "Ctrl+C or Ctrl+D aborts; before START the target is left untouched.\n");
         return 1;
     }
     job::Lease lease("console");
     if (!acquire(lease)) return 1;
-    ble::clear_abort();
     StagedImage img;
     if (!img.open()) return 1;
     const auto v = img.verify();
@@ -441,7 +530,11 @@ int cmd_flash(int argc, char** argv) {
         wifi_off = net::stop();
     }
 
-    const auto r = ble::flash(mac, img, img.header().bin_size, img.header().dat_bytes(), v.init, o);
+    ble::FlashReport r;
+    {
+        AbortOnCtrlC watch;
+        r = ble::flash(mac, img, img.header().bin_size, img.header().dat_bytes(), v.init, o);
+    }
 
     if (wifi_off) {
         const bool back = net::restore(30000);
@@ -486,13 +579,16 @@ int cmd_flash(int argc, char** argv) {
         if (run_log != nullptr && !recorded) std::printf("Warning: could not write the run record.\n");
         return 0;
     }
-    std::printf("FLASH FAILED after %u attempt(s): %s\n", static_cast<unsigned>(r.attempts.size()), r.error.c_str());
+    const bool aborted = r.aborted;
+    std::printf("FLASH %s after %u attempt(s): %s\n", aborted ? "ABORTED" : "FAILED",
+                static_cast<unsigned>(r.attempts.size()), r.error.c_str());
     if (recorded) std::printf("Recorded as run #%" PRIu32 " (`run %" PRIu32 "` for details and log).\n", recorded, recorded);
     if (run_log != nullptr && !recorded) std::printf("Warning: could not write the run record.\n");
     if (r.target_erased) {
         const bool recoverable = r.failure == dfu::FailureKind::LinkOrOverrun ||
                                  r.failure == dfu::FailureKind::Transient ||
-                                 r.failure == dfu::FailureKind::StaleSession;
+                                 r.failure == dfu::FailureKind::StaleSession ||
+                                 (aborted && r.sys_reset_after_failure);
         std::printf("The target's app was erased. The staged image is intact; run `flash --yes` again once the "
                     "cause is fixed.%s\n",
                     recoverable ? " OTAFIX waits in BLE OTA, usually at MAC+1."
@@ -565,9 +661,13 @@ int cmd_blreset(int argc, char** argv) {
     const long wait_s = opt_long(argc, argv, "--wait", 20);
     job::Lease lease("console");
     if (!acquire(lease)) return 1;
-    ble::clear_abort();
     std::string err;
-    if (!ble::reset_bootloader(mac, static_cast<uint32_t>(wait_s) * 1000, err)) {
+    bool ok = false;
+    {
+        AbortOnCtrlC watch;
+        ok = ble::reset_bootloader(mac, static_cast<uint32_t>(wait_s) * 1000, err);
+    }
+    if (!ok) {
         std::printf("blreset failed: %s\n", err.c_str());
         return 1;
     }

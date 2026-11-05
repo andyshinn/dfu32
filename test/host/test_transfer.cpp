@@ -233,3 +233,62 @@ TEST_CASE("Disconnect during a receipt wait is reported immediately", "[transfer
     CHECK(r.phase == TransferPhase::Stream);
     CHECK(bl.clock_ms < 1000);  // settle delay only; no 5 s receipt timeout
 }
+
+TEST_CASE("Abort before START leaves the target untouched", "[transfer][abort]") {
+    const auto img = make_image(244 * 20);
+    FakeBootloader bl;
+    bl.cancel = true;
+    VectorImage src(img);
+    const auto r = dfu::run_transfer(bl, src, static_cast<uint32_t>(img.size()), make_dat(img), params(244));
+    CHECK(r.error == TransferError::Aborted);
+    CHECK(r.phase == TransferPhase::Start);
+    CHECK_FALSE(r.target_erased);
+    CHECK_FALSE(bl.erased);
+    CHECK(r.bytes_sent == 0);
+}
+
+TEST_CASE("Abort while waiting for START stops without waiting out the erase", "[transfer][abort]") {
+    // The real transport's wait_notification() returns early once cancelled.
+    struct Hanging : FakeBootloader {
+        bool wait_notification(dfu::RawNotification& out, uint32_t timeout_ms) override {
+            if (erased) {  // START accepted: pretend the erase takes a long time
+                cancel = true;
+                clock_ms += 100;
+                return false;
+            }
+            return FakeBootloader::wait_notification(out, timeout_ms);
+        }
+    } bl;
+    const auto img = make_image(244 * 20);
+    VectorImage src(img);
+    const auto r = dfu::run_transfer(bl, src, static_cast<uint32_t>(img.size()), make_dat(img), params(244));
+    CHECK(r.error == TransferError::Aborted);
+    CHECK(r.phase == TransferPhase::Start);
+    CHECK(r.target_erased);
+    CHECK(bl.clock_ms < 1000);  // settle + one poll, not the 60 s START timeout
+}
+
+TEST_CASE("Abort mid-stream stops before the next packet", "[transfer][abort]") {
+    const auto img = make_image(244 * 100);
+    FakeBootloader bl;
+    bl.cancel_after_bytes = 244 * 37;
+    VectorImage src(img);
+    const auto r = dfu::run_transfer(bl, src, static_cast<uint32_t>(img.size()), make_dat(img), params(244));
+    CHECK(r.error == TransferError::Aborted);
+    CHECK(r.phase == TransferPhase::Stream);
+    CHECK(r.target_erased);
+    CHECK(r.bytes_sent == 244 * 37);
+    CHECK(bl.received.size() == 244 * 37);
+    CHECK(bl.connected);  // the caller still holds the link and can send SYS_RESET
+}
+
+TEST_CASE("Abort after the last packet is ignored: the transfer completes", "[transfer][abort]") {
+    const auto img = make_image(244 * 40 + 16);
+    FakeBootloader bl;
+    bl.cancel_after_bytes = static_cast<uint32_t>(img.size());
+    VectorImage src(img);
+    const auto r = dfu::run_transfer(bl, src, static_cast<uint32_t>(img.size()), make_dat(img), params(244));
+    INFO(dfu::to_string(r.error) << " in " << dfu::to_string(r.phase));
+    CHECK(r.ok());
+    CHECK(bl.activated);
+}

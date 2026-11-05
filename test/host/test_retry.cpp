@@ -49,6 +49,7 @@ TEST_CASE("Classifies transfer failures", "[retry]") {
           FailureKind::Fatal);
     CHECK(classify_transfer_failure(failed(TransferError::BadParams, TransferPhase::Start)) == FailureKind::Fatal);
     CHECK(classify_transfer_failure(failed(TransferError::ReadFailed, TransferPhase::Stream)) == FailureKind::Fatal);
+    CHECK(classify_transfer_failure(failed(TransferError::Aborted, TransferPhase::Stream)) == FailureKind::Aborted);
 
     CHECK(classify_transfer_failure(failed(TransferError::Disconnected, TransferPhase::Start)) ==
           FailureKind::Transient);
@@ -141,8 +142,8 @@ TEST_CASE("Transient failures retry with unchanged parameters", "[retry]") {
     }
 }
 
-TEST_CASE("Fatal and target-gone stop immediately", "[retry]") {
-    for (FailureKind stop : {FailureKind::Fatal, FailureKind::TargetGone}) {
+TEST_CASE("Fatal, target-gone and aborted stop immediately", "[retry]") {
+    for (FailureKind stop : {FailureKind::Fatal, FailureKind::TargetGone, FailureKind::Aborted}) {
         int calls = 0;
         int slept = 0;
         const auto r = dfu::run_with_retries(
@@ -156,6 +157,25 @@ TEST_CASE("Fatal and target-gone stop immediately", "[retry]") {
         CHECK(slept == 0);
         CHECK(r.last.failure == stop);
     }
+}
+
+TEST_CASE("An abort on a later attempt stops the retries there", "[retry]") {
+    // dfu_ble returns Aborted from the attempt after an aborted back-off.
+    int calls = 0;
+    std::vector<uint32_t> sleeps;
+    const auto r = dfu::run_with_retries(
+        dfu::RetryPolicy{}, AttemptParams{},
+        [&](uint8_t n, const AttemptParams&) {
+            ++calls;
+            return n == 1 ? AttemptOutcome{false, FailureKind::Transient} : AttemptOutcome{false, FailureKind::Aborted};
+        },
+        [&](uint32_t ms) { sleeps.push_back(ms); });
+    CHECK(calls == 2);
+    CHECK(sleeps == std::vector<uint32_t>{3000});  // one back-off, none after the abort
+    CHECK_FALSE(r.last.ok);
+    CHECK(r.last.failure == FailureKind::Aborted);
+    CHECK(r.attempts == 2);
+    CHECK(r.tries == 2);
 }
 
 TEST_CASE("Stale session retries after the short delay", "[retry]") {
