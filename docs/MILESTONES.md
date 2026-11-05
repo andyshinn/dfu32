@@ -23,16 +23,21 @@ Each milestone ends with something demonstrable on the bench.
 ## M1: Smallest end-to-end proof: flash one known-good image (2–3 days)
 
 The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, no UI.
-- `tools/dfu32-stage-image`: takes a MeshCore DFU `.zip` and writes a staging partition image (§8 header + bin). Flash it with `parttool.py write_partition --partition-name staging`.
-- Firmware: NimBLE central, plus the target MAC and timeouts from Kconfig/menuconfig. On a BOOT button press:
-  1. load the staged image and verify it (SHA-256, `.dat`, CRC16);
-  2. scan for app MAC / MAC+1 with the DFU UUID;
-  3. do the buttonless jump (`01 04`) and re-scan;
-  4. read the Version and DIS characteristics and log them;
-  5. run START → INIT → PRN → RECEIVE → stream → VALIDATE → ACTIVATE with fixed PRN 8.
-- Everything is logged to the console, including MTU, chunk size, DIS string, timings per phase, and throughput.
-- **Done when:** on the XIAO you run `start ota`, press BOOT on the Feather, the repeater reboots, and `ver` shows the flashed version. Done three times in a row.
-- **Also answers:** open questions 1, 7 and 8, and an initial throughput number. Based on these, update SPEC §5/§6 defaults.
+- `tools/dfu32_stage_image.py`: takes a MeshCore DFU `.zip` (or `.bin` + `.dat`), validates it, and writes a staging-partition image (§8 header + bin). Flash it with esptool or `parttool.py`.
+- Firmware: NimBLE central plus a **USB-serial bench console**. This replaces the planned BOOT-button trigger, because it gives a safer and more useful test tool. Commands:
+  - `target <MAC>`: store the repeater's app MAC.
+  - `scan`: list advertisers.
+  - `staged`: show and verify the staged image (SHA-256, `.dat`, CRC16, prechecks).
+  - `probe`: the non-destructive link test. It finds the target (MAC or MAC+1), does the buttonless jump, and reads Version, DIS, MTU and PHY. It reports the packet size, then sends SYS_RESET. It never sends START.
+  - `flash --yes`: one full attempt. The SD requirement is checked before START. The transfer runs START → INIT → PRN → RECEIVE → stream → VALIDATE → ACTIVATE (PRN 8 by default; `--prn`, `--packet` and `--settle` are tunable). It sends SYS_RESET after a failure.
+  - `blreset`: send SYS_RESET to a bootloader left mid-session.
+- Transfer logic lives in `dfu_proto::run_transfer()` behind an `ITransport` interface. It is host-tested against a simulated bootloader (`test/host/fake_bootloader.hpp`).
+- Everything is logged, including MTU, packet size, DIS string, per-phase timings and throughput.
+- **Done when:** on the XIAO you run `start ota`, run `flash --yes` on the Feather, the repeater reboots, and `ver` shows the flashed version. Done three times in a row.
+- **Also answers:** open questions 1, 7 and 8 (run `probe` first), and an initial throughput number. Based on these, update SPEC §5/§6 defaults.
+- **Status:** **first end-to-end flash succeeded on 2026-11-04.** A Feather V2 flashed a Heltec T096 on OTAFIX 2.3 with a 413,680 B MeshCore repeater image in 53 s (stream 9.2 kB/s), and `ver` confirmed it. Runs 2 and 3 (PRN 16 and 30) also succeeded, so the **"three in a row" criterion is met**. Throughput was 9.2 / 9.8 / 10.2 kB/s. Connection-interval tuning continues into M2. See [BENCH.md](BENCH.md).
+  - Host tests pass (48 C++ tests, 10 Python), including the transfer engine against the simulated bootloader.
+  - The firmware build is verified by CI.
 
 ## M2: Robust DFU client (3–4 days)
 

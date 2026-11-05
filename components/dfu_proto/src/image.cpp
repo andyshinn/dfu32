@@ -16,8 +16,12 @@ const char* to_string(ImageError e) noexcept {
     return "UNKNOWN";
 }
 
+uint32_t default_max_app_size(uint16_t device_type) noexcept {
+    return device_type == kNrf54DeviceType ? UINT32_MAX : kDefaultMaxAppSize;
+}
+
 ImageError check_app_image(const InitPacket& init, uint32_t bin_size, uint16_t bin_crc16,
-                           uint32_t max_app_size) noexcept {
+                           uint32_t max_app_size, uint16_t expected_device_type) noexcept {
     if (bin_size == 0) {
         return ImageError::Empty;
     }
@@ -27,7 +31,8 @@ ImageError check_app_image(const InitPacket& init, uint32_t bin_size, uint16_t b
     if (bin_size > max_app_size) {
         return ImageError::TooLarge;
     }
-    if (init.device_type != kAdafruitDeviceType) {
+    const bool known = init.device_type == kAdafruitDeviceType || init.device_type == kNrf54DeviceType;
+    if (expected_device_type == kAnyKnownDeviceType ? !known : init.device_type != expected_device_type) {
         return ImageError::WrongDeviceType;
     }
     if (init.sd_req_count == 0) {

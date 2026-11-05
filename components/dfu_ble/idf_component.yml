@@ -1,0 +1,4 @@
+## esp-nimble-cpp is pinned: its master branch is already 3.0.0-dev.
+dependencies:
+  idf: "~6.1.0"
+  h2zero/esp-nimble-cpp: "2.6.0"

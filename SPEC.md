@@ -109,12 +109,16 @@ A UART/USB-host trigger may come later as an optional `trigger` plugin. The data
 | Path | How the target got there | Advertises as | Address | Bootloader GATT | DFU32 action |
 |---|---|---|---|---|---|
 | **A. Buttonless (app)** | App started Bluefruit `BLEDfu` (MeshCore `start ota`) | `<BOARD>_OTA` (`RAK4631_OTA`, `RAK3401_OTA`, `XIAO_NRF52_OTA`) | **App MAC** | DFU service in the app; Version char = `0x0001` | Connect, enable CP CCCD, write `01 04`, expect disconnect. The app saves peer data, sets GPREGRET=`0xB1`, and **jumps** to the bootloader with no reset. |
-| **B1. Bootloader after app jump** | Path A completed | `AdaDFU` (upstream) or `4631_DFU`/`3401_DFU`/`XIAO_DFU` (OTAFIX) | **Same as app MAC** (peer data handed over) | Version = `0x0008` | Legacy DFU transfer (§6). |
+| **B1. Bootloader after app jump** | Path A completed | `AdaDFU` (upstream) or `4631_DFU`/`3401_DFU`/`XIAO_DFU`/`T096_DFU` (OTAFIX) | **App MAC if the peer data is accepted, else MAC+1.** Bench: OTAFIX on a Heltec T096 came up at **MAC+1**; the nRF54 port on a XIAO nRF54LM20A at the same MAC. | Version = `0x0008` | Legacy DFU transfer (§6). |
 | **B2. Bootloader after reset** | GPREGRET=`0xA8` reset, e.g. OTAFIX after a failed transfer or `SYS_RESET`, or another firmware's own OTA command | as B1 | **App MAC with LSB + 1** (uint8 wrap, no carry) | Version = `0x0008` | Legacy DFU transfer (§6). |
 
 What this means for discovery:
 - The configured identity is the **app MAC** plus its address type. Usually that is random static; it is captured from the scan.
-- When looking for a target, DFU32 accepts an advertiser if **(addr == app_mac OR addr == app_mac_lsb_plus_1) AND** it advertises service `00001530-1212-EFDE-1523-785FEABCD123`. Names are logged but never used for matching, because they differ by bootloader variant and board.
+- When looking for a target, DFU32 accepts an advertiser **by address alone**: the app MAC, or app MAC LSB + 1. What the advertising contains is informational only:
+  - the MeshCore app's `start ota` advertising carries only flags, TX power and the name **[verified: `NRF52Board::startOTAUpdate`]**;
+  - on the bench, a Heltec T096's bootloader was not found when the DFU UUID was required.
+
+  After connecting, the DFU service is confirmed by GATT discovery, and the Version characteristic proves which stage it is: `0x0001` is the app, `0x0008` the bootloader. If the re-scan after a buttonless jump fails, DFU32 logs any DFU-looking advertisers it did see: a name containing "DFU", the legacy UUID, or the Secure DFU UUID `FE59`, which is unsupported. Names are never used for matching, because they differ by bootloader variant and board.
 - After connecting, DFU32 reads the Version char (`0x1534`). `0x0001` means take path A. `0x0008` means skip straight to the transfer.
 - **Bonded-peer whitelist:** if the app handed over a non-zero IRK, the bootloader whitelists only that peer **[verified]**. DFU32 never bonds, so this doesn't arise. If DFU32 sees the target advertising but can't connect, it reports `TARGET_WHITELISTED?` as a hint.
 
@@ -132,10 +136,16 @@ It then classifies the bootloader:
 | `upstream_ge_0_10` | semver ≥ 0.10.0 | `SYS_RESET` mid-transfer returns to BLE OTA. 360 s inactivity timeout. A power cut with no app gives **USB DFU** (BLE lost). | proceed, warn on power-cut risk |
 | `upstream_le_0_9` | semver ≤ 0.9.x, no OTAFIX | Any reset with no app gives **USB-only DFU**. A failed transfer needs a cable to recover. | **warn** (`BOOTLOADER_RECOVERY_REQUIRES_USB`) and proceed |
 | `unknown` | DIS missing or unparsable | unknown | warn and proceed |
+| `nrf54` | SoftDevice `s145` in the firmware revision ([meshtastic/nRF54_Bootloader](https://github.com/meshtastic/nRF54_Bootloader), e.g. `v0.5.0-dev2 s145 10.0.1` on a XIAO nRF54LM20A) | Same legacy DFU, MTU 247, 244-byte packets. The `.dat` **device type must be 0x0054**. RRAM is written without erasing, so the old app **stays bootable until the init packet is accepted**. MAC+1 after a reset. | proceed |
 
 The SoftDevice version is parsed from the same string. If `.dat` `sd_req` contains neither `0xFFFE` nor the FWID of the installed SoftDevice (6.1.1 → `0x00B6`, 7.3.0 → `0x0123`, from a built-in table), DFU32 **aborts before START** with `SD_REQ_MISMATCH`. Otherwise the bootloader would reject INIT *after* erasing the app **[verified]**.
 
 The classification also sets transfer parameters: `upstream_le_0_9` has a 20-byte Packet characteristic and MTU 23 **[verified]**.
+
+It also sets the `.dat` device type the bootloader requires: 0x0052 for every nRF52 variant, 0x0054 for `nrf54`.
+- At staging time DFU32 accepts either known type.
+- Once the bootloader is identified, still before START, a mismatch aborts with `DEVICE_TYPE_MISMATCH` and sends SYS_RESET.
+- The nRF52840 size ceiling (§7.2) applies only to 0x0052 images. The nRF54 bootloader checks the size at START itself.
 
 ---
 
@@ -175,7 +185,10 @@ Status codes: `01` SUCCESS, `02` INVALID_STATE, `03` NOT_SUPPORTED, `04` DATA_SI
   - Every data write **must be a multiple of 4**, or the bootloader returns `10 03 03` **[verified]**. A non-4n+3 MTU such as 185 must be rounded down.
   - Never pass `len > mtu−3` to esp-nimble-cpp `writeValue(…, false)`. It **silently turns into a long write with response** **[verified]**. The client asserts this.
 - **App size** must be a multiple of 4. This is a precheck; DFU32 never pads, because padding would change the CRC.
-- **PRN:** default **8** (configurable 1–16).
+- **Connection interval:** DFU32 requests a fixed **20 ms** by default (`--interval` overrides it).
+  - Bench throughput on OTAFIX with ~1 packet per event: 30 ms 9.2 kB/s, 20 ms 12.4 kB/s, 15 ms 14.8 kB/s.
+  - 11.25 ms and 7.5 ms overran the bootloader's lazy-erase buffering.
+- **PRN:** default **8** (configurable 1–16). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. M2 caps PRN at 8 for OTAFIX-class targets. After a stream-phase `06`, the next attempt backs off: PRN halved, interval doubled.
   - ESPHome documents that the bootloader runs out of memory beyond 8 unacknowledged packets.
   - The bootloader RX pool is 16 buffers (OTAFIX/upstream ≥0.10) or 8 (older).
 - Flow:

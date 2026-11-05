@@ -20,11 +20,14 @@ set(DFU32_ROOT ${CMAKE_CURRENT_LIST_DIR}/../..)
 add_subdirectory(${DFU32_ROOT}/components/dfu_proto ${CMAKE_BINARY_DIR}/dfu_proto)
 
 add_executable(dfu_proto_tests
+    test_bootloader_info.cpp
     test_chunk.cpp
     test_crc16.cpp
     test_image.cpp
     test_init_packet.cpp
     test_protocol.cpp
+    test_staging_format.cpp
+    test_transfer.cpp
 )
 target_link_libraries(dfu_proto_tests PRIVATE dfu_proto Catch2::Catch2WithMain)
 target_compile_options(dfu_proto_tests PRIVATE -Wall -Wextra -Werror)

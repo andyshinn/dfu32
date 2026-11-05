@@ -4,7 +4,7 @@
 // `adafruit-nrfutil dfu genpkg` and checked by the Adafruit bootloader
 // (src/dfu_init.c). All fields little-endian:
 //
-//   0       u16  device_type      (Adafruit bootloader requires 0x0052)
+//   0       u16  device_type      (Adafruit nRF52 bootloader: 0x0052; nRF54 port: 0x0054)
 //   2       u16  device_rev       (only checked for SD/BL updates)
 //   4       u32  app_version      (not checked)
 //   8       u16  sd_req_count N   (must be >= 1)
@@ -21,7 +21,8 @@
 
 namespace dfu {
 
-inline constexpr uint16_t kAdafruitDeviceType = 0x0052;
+inline constexpr uint16_t kAdafruitDeviceType = 0x0052;  // Adafruit nRF52 bootloader
+inline constexpr uint16_t kNrf54DeviceType = 0x0054;     // meshtastic/nRF54_Bootloader
 inline constexpr uint16_t kSdReqAny = 0xFFFE;
 inline constexpr size_t kMaxSdReq = 16;
 inline constexpr size_t kInitPacketMinSize = 14;                       // N = 1

@@ -4,12 +4,13 @@ DFU32 is ESP32 firmware that flashes nRF52 boards over BLE using Nordic **legacy
 
 DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
-**Status:** Milestone M0, the project skeleton. The firmware boots and checks its own flash layout; it can't flash anything yet. See [docs/MILESTONES.md](docs/MILESTONES.md).
+**Status:** Milestone M1, the bench proof. A USB-serial console can scan for the repeater, probe its bootloader without erasing anything (a frame-size test), and flash an image staged from your computer. See [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
 
 - [SPEC.md](SPEC.md): the full specification
 - [docs/MILESTONES.md](docs/MILESTONES.md): phased plan
 - [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md): open questions and assumptions
 - [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md): verified protocol facts, with source citations
+- [docs/BENCH.md](docs/BENCH.md): bench guide for staging, probing and flashing a repeater
 
 ## Building the firmware
 
@@ -55,6 +56,12 @@ To also check the CRC16 against a real image, point two environment variables at
 
 ```bash
 DFU32_TEST_BIN=path/to/firmware.bin DFU32_TEST_DAT=path/to/firmware.dat ctest --test-dir build-host --output-on-failure
+```
+
+Test the Python staging tool:
+
+```bash
+python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
 Check the partition tables:
