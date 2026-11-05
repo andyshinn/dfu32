@@ -354,7 +354,11 @@ public:
     bool wait_notification(dfu::RawNotification& out, uint32_t timeout_ms) override {
         TickType_t t = pdMS_TO_TICKS(timeout_ms);
         if (t == 0 && timeout_ms > 0) t = 1;
-        return xQueueReceive(queue_, &out, t) == pdTRUE;
+        if (xQueueReceive(queue_, &out, t) != pdTRUE) return false;
+        // A zero-length entry is the disconnect wake-up from onDisconnect():
+        // report "no notification" so the caller checks is_connected() now
+        // instead of waiting out its timeout.
+        return out.len != 0;
     }
 
     void flush_notifications() override { xQueueReset(queue_); }
@@ -365,6 +369,8 @@ public:
     // ---- NimBLEClientCallbacks ----
     void onDisconnect(NimBLEClient*, int reason) override {
         ESP_LOGI(TAG, "disconnected (reason 0x%02x)", reason);
+        const dfu::RawNotification wake{};  // len 0
+        xQueueSend(queue_, &wake, 0);
     }
     void onMTUChange(NimBLEClient*, uint16_t mtu) override {
         ESP_LOGI(TAG, "MTU %u", mtu);
@@ -636,6 +642,7 @@ dfu::FailureKind flash_attempt(const Mac& app, dfu::IImageSource& image, uint32_
     ESP_LOGI(TAG, "attempt %u: %" PRIu32 " B in %u-byte packets, PRN %u, conn interval %u x1.25 ms, latency %u",
              s.number, image_size, params.packet_size, params.prn, r.link.conn_interval, r.link.conn_latency);
     uint32_t next_pct = 0;
+    if (opts.before_transfer) opts.before_transfer(s.number);
     s.ran_transfer = true;
     s.transfer = dfu::run_transfer(*link, image, image_size, init_packet, params,
                                    [&](uint32_t acked, uint32_t total) {

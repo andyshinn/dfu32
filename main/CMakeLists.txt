@@ -12,6 +12,8 @@ idf_component_register(
         esp_partition
         esp_psram
         mbedtls
+        esp_timer
         nvs_flash
+        runlog
         staging
 )

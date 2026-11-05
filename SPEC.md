@@ -618,14 +618,27 @@ For Improv, a small local implementation of the Improv Serial and BLE protocols 
 ### 13.1 Logging
 
 - Every module logs through `ESP_LOGx` with a stable tag (`dfu`, `ble`, `fetch`, `stage`, `api`, `net`, `job`).
-- An `esp_log_set_vprintf` hook tees output to the console and to a **64 KB ring in PSRAM**. Each line gets a monotonically increasing sequence number and an uptime timestamp.
+- An `esp_log_set_vprintf` hook tees output to the console and to a **64 KB ring in PSRAM** (`CONFIG_DFU32_LOG_RING_KB`).
+  - Positions are absolute byte offsets, so a run remembers where it started and stores everything logged since. Lines carry esp_log's own uptime timestamp.
+  - A logging task never waits more than 5 ms for the ring; if it would, that line is skipped in the ring (it still reaches the console).
+  - Implemented in `components/runlog` (`LogRing`, host-tested; glue in `runlog_idf`).
 - DFU phase transitions are logged as one-line `key=value` events, so they can be parsed: `evt=phase run=42 attempt=1 from=START to=INIT dt_ms=17234`.
 
 ### 13.2 Run records (persisted)
 
 The `runlog` partition is a ring of 4 KB slots: 14 slots on 4 MB, 16 on 8 MB. A slot is erased and written once per run, at the end of the run or when an abort-by-reboot is detected at boot. Each slot holds:
-- A JSON header (≤ 1 KB): `seq`, `target`, `trigger` (`api`/`ui`), `source` (`manifest`/`staged`), `version`, `bin_sha256`, `started_at`, `duration_ms`, `result` (`SUCCEEDED`/`FAILED`/`ABORTED`/`ABORTED_BY_REBOOT`), `error` (code from §13.3), `last_phase`, `attempts`, `target_erased`, `bootloader` (class + DIS string), `wifi_off`, `mtu`, `chunk`, `prn`, `bytes_acked`, `rate_bps`, `warnings[]`.
-- The last **≤ 3 KB of log lines** from the run.
+- A JSON summary (`runlog::RunRecord`, implemented in M2b):
+  - `seq`, `result` (`SUCCEEDED` / `FAILED` / `ABORTED_BY_REBOOT`), `error`, `failure_kind`;
+  - `target`, `image_version`, `image_sha256`, `image_size`, `started_uptime_s`, `duration_ms`;
+  - `last_phase`, `bytes_acked`, `target_erased` (`yes` / `no` / `possibly`), `sys_reset_after_failure`;
+  - `bootloader`, `bootloader_class`, `mtu`, `packet_size`, `conn_interval_x125`, `rate_x10_kBps`, `reset_reason`;
+  - `attempts[]` (interval, PRN, outcome, kind, bytes acknowledged).
+
+  Fields still to come in M3: trigger and source, wall-clock time once SNTP exists, and `wifi_off`.
+- The log since the run started, trimmed from the front to fit the 4 KB slot (normally about 3 KB).
+- Slot layout: magic `DF32RUN1`, seq, lengths and a CRC32 over the payload (`components/runlog/include/runlog/run_log.hpp`). A torn or corrupted slot is ignored, and the next record goes into the slot after the newest valid one.
+- Console: `runs` lists records, `run N` shows one with its log, and `logs [bytes]` shows recent captured output.
+- **Abort detection (§7.3):** a `job_active` marker in NVS is set when a flash starts. It's raised to "transferring" right before each attempt's transfer, since START may erase the target, and cleared when the run is recorded. If it's still there at boot, an `ABORTED_BY_REBOOT` record is written with the reset reason; `target_erased: possibly` if the transfer had begun.
 
 Writes are rare (one sector per run), so wear isn't a concern.
 

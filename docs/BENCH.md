@@ -197,6 +197,16 @@ Next to test:
 - whether data length extension is actually active;
 - 2M PHY (Feather S3).
 
+## Run history
+
+Every `flash` is recorded in the `runlog` partition (14 slots on 4 MB flash, 16 on 8 MB; the oldest is overwritten):
+
+- `runs`: one line per run (result, duration, attempts, whether the target was erased, version or error).
+- `run N`: that run's full JSON summary and its log.
+- `logs [bytes]`: recent captured log output (default 4 KB).
+
+If DFU32 reboots in the middle of a flash, the next boot logs a warning and records `ABORTED_BY_REBOOT`. When the transfer had begun, the record has `target_erased: possibly`; run `flash --yes` again.
+
 ## If `probe` can't find the bootloader after the jump
 
 DFU32 logs every DFU-looking advertiser it saw, by name, legacy DFU UUID or Secure DFU UUID. Then:
