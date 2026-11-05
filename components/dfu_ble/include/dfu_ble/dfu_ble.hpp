@@ -44,6 +44,7 @@ struct Advert {
 bool init();
 
 /// Scans for `duration_ms` and returns every advertiser seen, strongest first.
+/// Returns early, with what it has seen so far, on request_abort().
 std::vector<Advert> scan(uint32_t duration_ms);
 
 struct LinkInfo {
@@ -134,11 +135,19 @@ struct FlashReport {
     uint32_t total_ms = 0;
 };
 
-/// Run control (SPEC.md §7.3). request_abort() may be called from any task or
-/// timer: the scan stops, a connected link is dropped, and flash() / probe()
-/// return within about a quarter of a second (or once a blocking NimBLE call
-/// such as connect returns). The flag stays set until clear_abort(), which
-/// the caller does before the next run.
+/// Run control (SPEC.md §7.3; console Ctrl+C, API abort, run deadline).
+/// request_abort() may be called from any task or timer. scan / probe / flash /
+/// reset_bootloader stop at their next wait point: target scan, retry
+/// back-off, notification wait or the next packet, each checked at least every
+/// 250 ms. Exceptions:
+///  - a blocking NimBLE call such as connect (10 s timeout) finishes first;
+///  - a transfer whose last packet is already sent completes;
+///  - once connected to the bootloader, an aborted probe/flash still sends
+///    SYS_RESET so the session is cleared and the target isn't left in DFU
+///    mode; an abort while looking for the bootloader right after the
+///    buttonless jump spends up to 5 s more finding it to send SYS_RESET.
+/// The flag stays set until clear_abort(), which the caller does before the
+/// next run.
 void request_abort();
 void clear_abort();
 bool abort_requested();
@@ -154,7 +163,9 @@ int64_t last_activity_us();
 /// START; mismatches stop immediately and SYS_RESET returns an untouched target
 /// to its app. After any failure with the bootloader still connected, SYS_RESET
 /// clears the session so the next attempt can START. A stream overrun or link
-/// loss makes the next attempt more conservative (dfu::degrade).
+/// loss makes the next attempt more conservative (dfu::degrade). On
+/// request_abort() it stops with dfu::FailureKind::Aborted and does not retry;
+/// an abort noticed before START never erases the target.
 FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
                   std::span<const uint8_t> init_packet, const dfu::InitPacket& init,
                   const FlashOptions& opts);

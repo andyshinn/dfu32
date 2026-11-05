@@ -36,6 +36,12 @@ public:
     /// Drops any queued notifications.
     virtual void flush_notifications() = 0;
     virtual bool is_connected() const = 0;
+    /// True once the operator has asked to abort. run_transfer() then stops
+    /// with TransferError::Aborted at its next check while the image is still
+    /// being sent (before START through the last packet); once every byte is
+    /// out it finishes instead. wait_notification() may return early (false)
+    /// while this is true, so the abort is noticed promptly.
+    virtual bool cancelled() const { return false; }
     virtual void delay_ms(uint32_t ms) = 0;
     virtual uint32_t now_ms() = 0;
 };
@@ -82,6 +88,7 @@ enum class TransferError : uint8_t {
     PrnMismatch,        // receipt byte count != bytes sent
     UnexpectedNotification,
     ReadFailed,         // image source failed
+    Aborted,            // ITransport::cancelled() while the image was being sent
 };
 
 const char* to_string(TransferPhase p) noexcept;

@@ -31,6 +31,8 @@ public:
     bool respond_no_mem_at_packet = false;           // first data packet -> 10 03 06
     uint32_t max_app_size = 802816;
     bool require_settle = true;                      // drop size packet if no delay after START
+    bool cancel = false;                             // ITransport::cancelled()
+    std::optional<uint32_t> cancel_after_bytes;      // ...or once this many image bytes were received
 
     // ---- observable state ----
     bool connected = true;
@@ -166,6 +168,9 @@ public:
 
     void flush_notifications() override { queue_.clear(); }
     bool is_connected() const override { return connected; }
+    bool cancelled() const override {
+        return cancel || (cancel_after_bytes && received.size() >= *cancel_after_bytes);
+    }
     void delay_ms(uint32_t ms) override {
         clock_ms += ms;
         delayed_since_start_ = true;
