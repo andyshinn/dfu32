@@ -29,6 +29,7 @@ constexpr uint16_t kPreferredMtu = 247;
 constexpr uint32_t kBootloaderScanMs = 30000;
 constexpr uint32_t kJumpDisconnectMs = 5000;
 constexpr uint32_t kMtuWaitMs = 1500;
+constexpr uint32_t kRetryScanMs = 30000;  // target is already in its bootloader on retries
 constexpr uint16_t kDefaultConnInterval = 16;  // x1.25 ms = 20 ms
 constexpr uint32_t kPacketRetryLimit = 200;  // x 1 tick of back-off on ENOMEM
 
@@ -401,12 +402,14 @@ private:
 /// Finds the target and returns a connected Link to its bootloader, performing
 /// the buttonless jump if the target is still in its app.
 std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, const ConnParams& conn, LinkInfo& info,
-                                      std::string& err) {
+                                      std::string& err, bool* not_found = nullptr) {
     Advert adv;
     bool plus_one = false;
     uint32_t t0 = now_ms();
+    if (not_found) *not_found = false;
     if (!find_target(app, scan_ms, "app or bootloader", adv, plus_one)) {
         err = "target not found: run `start ota` on the repeater (or check the MAC)";
+        if (not_found) *not_found = true;
         return nullptr;
     }
     info.find_ms = now_ms() - t0;
@@ -568,61 +571,71 @@ ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after, ConnParams
     return r;
 }
 
-FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
-                  std::span<const uint8_t> init_packet, const dfu::InitPacket& init, const FlashOptions& opts) {
-    FlashReport r;
-    const uint32_t t0 = now_ms();
-    auto link = open_bootloader(app, opts.scan_ms, opts.conn, r.link, r.error);
-    if (!link) {
-        r.total_ms = now_ms() - t0;
-        return r;
-    }
+namespace {
 
-    const uint16_t want_type = r.link.bootloader.device_type;
+/// One attempt: find the target, enter/identify the bootloader, check the
+/// image against it, transfer. Fills `s` and returns its failure kind.
+dfu::FailureKind flash_attempt(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
+                               std::span<const uint8_t> init_packet, const dfu::InitPacket& init,
+                               const FlashOptions& opts, uint32_t scan_ms, AttemptSummary& s, FlashReport& r,
+                               dfu::BootloaderClass& seen_class) {
+    LinkInfo info;
+    bool not_found = false;
+    auto link = open_bootloader(app, scan_ms, ConnParams{s.params.interval_ms}, info, s.error, &not_found);
+    if (!link) {
+        if (!not_found) return dfu::FailureKind::Transient;
+        if (s.number == 1) return dfu::FailureKind::Fatal;  // the arm timeout already elapsed
+        if (r.target_erased && seen_class == dfu::BootloaderClass::UpstreamLe0_9) {
+            s.error = "TARGET_LOST_USB_RECOVERY_REQUIRED: old bootloader fell back to USB DFU; "
+                      "double-tap reset and copy the .uf2";
+        } else {
+            s.error = "target not seen again after the failed attempt (powered off, out of range, or in USB DFU)";
+        }
+        return dfu::FailureKind::TargetGone;
+    }
+    s.reached_bootloader = true;
+    r.link = info;
+    seen_class = info.bootloader.cls;
+
+    char buf[128];
+    const uint16_t want_type = info.bootloader.device_type;
     if (want_type != 0 && init.device_type != want_type) {
-        char buf[112];
         std::snprintf(buf, sizeof(buf), "DEVICE_TYPE_MISMATCH: image is for device type 0x%04X, bootloader wants 0x%04X",
                       init.device_type, want_type);
-        r.error = buf;
+        s.error = buf;
         send_sys_reset(*link);  // nothing erased; let the app boot again
-        link->close();
-        r.total_ms = now_ms() - t0;
-        return r;
+        return dfu::FailureKind::Fatal;
     }
-
-    const uint16_t fwid = r.link.bootloader.sd_fwid;
+    const uint16_t fwid = info.bootloader.sd_fwid;
     if (fwid != 0 && !init.accepts_softdevice(fwid)) {
-        char buf[96];
         std::snprintf(buf, sizeof(buf), "SD_REQ_MISMATCH: target SoftDevice 0x%04X not in .dat sd_req", fwid);
-        r.error = buf;
-        send_sys_reset(*link);  // nothing erased; let the app boot again
-        link->close();
-        r.total_ms = now_ms() - t0;
-        return r;
-    }
-
-    std::string err;
-    if (!link->enable_notifications(err)) {
-        r.error = err;
+        s.error = buf;
         send_sys_reset(*link);
-        link->close();
-        r.total_ms = now_ms() - t0;
-        return r;
+        return dfu::FailureKind::Fatal;
+    }
+    if (!link->enable_notifications(s.error)) {
+        send_sys_reset(*link);
+        return dfu::FailureKind::Transient;
     }
 
     dfu::TransferParams params;
-    params.packet_size = r.link.packet_size;
+    params.packet_size = info.packet_size;
     if (opts.max_packet != 0) {
         params.packet_size = std::min<uint16_t>(params.packet_size, static_cast<uint16_t>(opts.max_packet & ~3u));
     }
-    params.prn = opts.prn;
+    params.prn = opts.force_prn ? s.params.prn : dfu::cap_prn(s.params.prn);
+    if (params.prn != s.params.prn) {
+        ESP_LOGW(TAG, "PRN %u capped to %u (receipts acknowledge arrival, not flash writes; use --force-prn to override)",
+                 s.params.prn, params.prn);
+        s.params.prn = params.prn;
+    }
     params.start_settle_ms = opts.start_settle_ms;
 
     link->read_conn(r.link.conn_interval, r.link.conn_latency, r.link.conn_timeout);
-    ESP_LOGI(TAG, "transfer: %" PRIu32 " B in %u-byte packets, PRN %u, conn interval %u x1.25 ms, latency %u",
-             image_size, params.packet_size, params.prn, r.link.conn_interval, r.link.conn_latency);
+    ESP_LOGI(TAG, "attempt %u: %" PRIu32 " B in %u-byte packets, PRN %u, conn interval %u x1.25 ms, latency %u",
+             s.number, image_size, params.packet_size, params.prn, r.link.conn_interval, r.link.conn_latency);
     uint32_t next_pct = 0;
-    r.transfer = dfu::run_transfer(*link, image, image_size, init_packet, params,
+    s.transfer = dfu::run_transfer(*link, image, image_size, init_packet, params,
                                    [&](uint32_t acked, uint32_t total) {
                                        const uint32_t pct = static_cast<uint32_t>(uint64_t{acked} * 100 / total);
                                        if (pct >= next_pct) {
@@ -631,26 +644,67 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
                                            next_pct = pct + 10;
                                        }
                                    });
+    r.target_erased = r.target_erased || s.transfer.target_erased;
     if (link->enomem_retries() || link->dropped_notifications()) {
         ESP_LOGI(TAG, "tx back-off retries %" PRIu32 ", dropped notifications %" PRIu32, link->enomem_retries(),
                  link->dropped_notifications());
     }
+    if (s.transfer.ok()) return dfu::FailureKind::None;
 
-    if (r.transfer.ok()) {
-        r.ok = true;
-    } else {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "%s in %s (status 0x%02x)", dfu::to_string(r.transfer.error),
-                      dfu::to_string(r.transfer.phase), r.transfer.status);
-        r.error = buf;
-        if (link->is_connected()) {
-            // Clear the half-finished session so the next attempt can START
-            // (OTAFIX / upstream >= 0.10 come back in BLE OTA, possibly at MAC+1).
-            send_sys_reset(*link);
-            r.sys_reset_after_failure = true;
-        }
+    std::snprintf(buf, sizeof(buf), "%s in %s (status 0x%02x)", dfu::to_string(s.transfer.error),
+                  dfu::to_string(s.transfer.phase), s.transfer.status);
+    s.error = buf;
+    r.sys_reset_after_failure = false;
+    if (link->is_connected()) {
+        // Clear the half-finished session so the next attempt can START
+        // (OTAFIX / upstream >= 0.10 come back in BLE OTA, possibly at MAC+1).
+        send_sys_reset(*link);
+        r.sys_reset_after_failure = true;
     }
-    link->close();
+    return dfu::classify_transfer_failure(s.transfer);
+}
+
+}  // namespace
+
+FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
+                  std::span<const uint8_t> init_packet, const dfu::InitPacket& init, const FlashOptions& opts) {
+    FlashReport r;
+    const uint32_t t0 = now_ms();
+    dfu::RetryPolicy policy;
+    policy.max_attempts = opts.attempts;
+    dfu::AttemptParams initial;
+    initial.prn = opts.prn;
+    initial.interval_ms = opts.conn.interval_ms != 0 ? opts.conn.interval_ms
+                                                     : static_cast<uint16_t>(kDefaultConnInterval * 5 / 4);
+    dfu::BootloaderClass seen_class = dfu::BootloaderClass::Unknown;
+
+    const auto result = dfu::run_with_retries(
+        policy, initial,
+        [&](uint8_t n, const dfu::AttemptParams& p) {
+            AttemptSummary s;
+            s.number = n;
+            s.params = p;
+            const uint32_t scan_ms = n == 1 ? opts.scan_ms : kRetryScanMs;
+            if (n > 1) {
+                ESP_LOGI(TAG, "attempt %u of %u (interval %u ms, PRN %u)", n, policy.max_attempts, p.interval_ms,
+                         p.prn);
+            }
+            s.failure = flash_attempt(app, image, image_size, init_packet, init, opts, scan_ms, s, r, seen_class);
+            if (s.failure != dfu::FailureKind::None) {
+                ESP_LOGW(TAG, "attempt %u failed: %s [%s]", n, s.error.c_str(), dfu::to_string(s.failure));
+            }
+            r.transfer = s.transfer;
+            r.attempts.push_back(s);
+            return dfu::AttemptOutcome{s.failure == dfu::FailureKind::None, s.failure};
+        },
+        [](uint32_t ms) {
+            ESP_LOGI(TAG, "retrying in %" PRIu32 " ms", ms);
+            sleep_ms(ms);
+        });
+
+    r.ok = result.last.ok;
+    r.failure = result.last.failure;
+    if (!r.attempts.empty()) r.error = r.attempts.back().error;
     r.total_ms = now_ms() - t0;
     return r;
 }

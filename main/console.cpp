@@ -13,6 +13,7 @@
 
 #include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/protocol.hpp"
+#include "dfu_proto/retry.hpp"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "nvs.h"
@@ -199,7 +200,8 @@ int cmd_flash(int argc, char** argv) {
     if (!require_target(mac)) return 1;
     if (!has_flag(argc, argv, "--yes")) {
         std::printf("This ERASES the target's application and flashes the staged image.\n"
-                    "Re-run as: flash --yes [--prn N] [--packet N] [--interval MS] [--settle MS] [--wait S]\n");
+                    "Re-run as: flash --yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS]\n"
+                    "                       [--settle MS] [--wait S]\n");
         return 1;
     }
     StagedImage img;
@@ -211,13 +213,16 @@ int cmd_flash(int argc, char** argv) {
     }
     ble::FlashOptions o;
     o.prn = static_cast<uint16_t>(opt_long(argc, argv, "--prn", 8));
+    o.force_prn = has_flag(argc, argv, "--force-prn");
     o.max_packet = static_cast<uint16_t>(opt_long(argc, argv, "--packet", 0));
     o.start_settle_ms = static_cast<uint32_t>(opt_long(argc, argv, "--settle", 500));
     o.scan_ms = static_cast<uint32_t>(opt_long(argc, argv, "--wait", 600)) * 1000;
     o.conn.interval_ms = static_cast<uint16_t>(opt_long(argc, argv, "--interval", 0));
+    const long attempts = opt_long(argc, argv, "--attempts", 3);
+    o.attempts = static_cast<uint8_t>(attempts < 1 ? 1 : attempts > 10 ? 10 : attempts);
     std::printf("Staged image OK (%" PRIu32 " B, \"%s\"). Waiting up to %" PRIu32
-                " s for %s: run `start ota` on the repeater now.\n",
-                img.header().bin_size, img.header().version.c_str(), o.scan_ms / 1000, mac.str().c_str());
+                " s for %s: run `start ota` on the repeater now. Up to %u attempt(s).\n",
+                img.header().bin_size, img.header().version.c_str(), o.scan_ms / 1000, mac.str().c_str(), o.attempts);
 
     const auto r = ble::flash(mac, img, img.header().bin_size, img.header().dat_bytes(), v.init, o);
     if (r.link.mtu) print_link(r.link);
@@ -232,17 +237,27 @@ int cmd_flash(int argc, char** argv) {
         const uint32_t tenths = static_cast<uint32_t>(uint64_t{t.bytes_sent} * 10 / stream_ms);  // 0.1 kB/s
         std::printf("  throughput        %" PRIu32 ".%" PRIu32 " kB/s\n", tenths / 10, tenths % 10);
     }
+    if (r.attempts.size() > 1 || !r.ok) {
+        for (const auto& a : r.attempts) {
+            std::printf("  attempt %u         interval %u ms, PRN %u: %s", a.number, a.params.interval_ms, a.params.prn,
+                        a.failure == dfu::FailureKind::None ? "OK" : a.error.c_str());
+            if (a.failure != dfu::FailureKind::None) {
+                std::printf(" [%s, %" PRIu32 " B acked]", dfu::to_string(a.failure), a.transfer.bytes_acked);
+            }
+            std::printf("\n");
+        }
+    }
     if (r.ok) {
-        std::printf("FLASH OK in %" PRIu32 ".%" PRIu32 " s%s. Check the repeater with `ver`.\n", r.total_ms / 1000,
-                    (r.total_ms % 1000) / 100,
+        std::printf("FLASH OK in %" PRIu32 ".%" PRIu32 " s%s%s. Check the repeater with `ver`.\n", r.total_ms / 1000,
+                    (r.total_ms % 1000) / 100, r.attempts.size() > 1 ? " (after retries)" : "",
                     t.activate_disconnect_seen ? "" : " (no disconnect seen after ACTIVATE)");
         return 0;
     }
-    std::printf("FLASH FAILED: %s\n", r.error.c_str());
-    if (t.target_erased) {
-        std::printf("The target's app was erased. The staged image is intact: run `flash --yes` again%s.\n",
-                    r.sys_reset_after_failure ? " (SYS_RESET sent; OTAFIX returns to BLE OTA, possibly at MAC+1)"
-                                              : "; if START reports INVALID_STATE, run `blreset` first");
+    std::printf("FLASH FAILED after %u attempt(s): %s\n", static_cast<unsigned>(r.attempts.size()), r.error.c_str());
+    if (r.target_erased) {
+        std::printf("The target's app was erased. The staged image is intact; run `flash --yes` again once the "
+                    "cause is fixed%s.\n",
+                    r.failure == dfu::FailureKind::TargetGone ? "" : " (OTAFIX waits in BLE OTA, usually at MAC+1)");
     } else {
         std::printf("The target was not erased.\n");
     }
@@ -301,8 +316,9 @@ void start_console() {
         "Non-destructive link test: enter the bootloader, report MTU / packet size / PHY / bootloader version, "
         "then SYS_RESET back to the app.",
         "[--no-reset] [--interval MS] [--wait S]", &cmd_probe);
-    reg("flash", "Flash the staged image to the target (erases its app).",
-        "--yes [--prn N] [--packet N] [--interval MS] [--settle MS] [--wait S]", &cmd_flash);
+    reg("flash", "Flash the staged image to the target (erases its app), retrying up to --attempts times.",
+        "--yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS] [--settle MS] [--wait S]",
+        &cmd_flash);
     reg("blreset", "Send SYS_RESET to the target's bootloader (recover a stuck session).", "[--wait S]",
         &cmd_blreset);
 

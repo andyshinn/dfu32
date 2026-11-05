@@ -141,6 +141,8 @@ Tuning knobs:
 | `--packet N` | automatic | Cap the packet size, e.g. `--packet 20` to compare throughput. |
 | `--interval MS` | 20 ms | Request a fixed BLE connection interval. Shorter means more packets per second, but **on OTAFIX, 11.25 ms and below overrun the bootloader** (see results). `probe` takes it too, and both report the interval actually negotiated. |
 | `--settle MS` | 500 | Delay between START and the size packet. |
+| `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval, then halves PRN. |
+| `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
 
 ## Bench results so far

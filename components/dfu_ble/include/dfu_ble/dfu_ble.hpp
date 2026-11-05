@@ -13,6 +13,7 @@
 
 #include "dfu_proto/bootloader_info.hpp"
 #include "dfu_proto/init_packet.hpp"
+#include "dfu_proto/retry.hpp"
 #include "dfu_proto/transfer.hpp"
 
 namespace dfu32::ble {
@@ -82,25 +83,42 @@ struct ProbeReport {
 ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after = true, ConnParams conn = {});
 
 struct FlashOptions {
-    uint32_t scan_ms = 600000;   // how long to wait for the target (arm timeout)
-    uint16_t prn = 8;
+    uint32_t scan_ms = 600000;   // how long to wait for the target on attempt 1 (arm timeout)
+    uint16_t prn = 8;            // capped at dfu::kMaxSafePrn unless force_prn
+    bool force_prn = false;
     uint32_t start_settle_ms = 500;
     uint16_t max_packet = 0;     // 0 = automatic; else cap (e.g. 20 for testing)
-    ConnParams conn{};
+    ConnParams conn{};           // interval for attempt 1; retries may lengthen it
+    uint8_t attempts = 3;        // total attempts (SPEC.md §6.5)
+};
+
+struct AttemptSummary {
+    uint8_t number = 0;
+    dfu::AttemptParams params;   // as used (PRN after the cap)
+    dfu::FailureKind failure = dfu::FailureKind::None;
+    std::string error;           // empty on success
+    dfu::TransferResult transfer;
+    bool reached_bootloader = false;
 };
 
 struct FlashReport {
     bool ok = false;
-    std::string error;
-    LinkInfo link;
-    dfu::TransferResult transfer;
+    std::string error;                 // from the last attempt
+    dfu::FailureKind failure = dfu::FailureKind::None;
+    LinkInfo link;                     // last attempt that reached the bootloader
+    dfu::TransferResult transfer;      // last attempt's transfer
+    std::vector<AttemptSummary> attempts;
+    bool target_erased = false;        // any attempt got as far as START
     bool sys_reset_after_failure = false;
     uint32_t total_ms = 0;
 };
 
-/// One flash attempt (M1: no automatic retries). Checks the SoftDevice
-/// requirement against the bootloader before START; on failure before START it
-/// sends SYS_RESET so an untouched target returns to its app.
+/// Flashes the image with automatic retries (SPEC.md §6.5). Each attempt checks
+/// the device type and SoftDevice requirement against the bootloader before
+/// START; mismatches stop immediately and SYS_RESET returns an untouched target
+/// to its app. After any failure with the bootloader still connected, SYS_RESET
+/// clears the session so the next attempt can START. A stream overrun or link
+/// loss makes the next attempt more conservative (dfu::degrade).
 FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
                   std::span<const uint8_t> init_packet, const dfu::InitPacket& init,
                   const FlashOptions& opts);

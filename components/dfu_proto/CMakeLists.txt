@@ -7,6 +7,7 @@ set(DFU_PROTO_SRCS
     src/image.cpp
     src/init_packet.cpp
     src/protocol.cpp
+    src/retry.cpp
     src/staging_format.cpp
     src/transfer.cpp
 )

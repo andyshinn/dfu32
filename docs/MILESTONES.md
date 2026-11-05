@@ -53,6 +53,14 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - bad `.dat` / SD mismatch is refused before START;
   - the throughput matrix (PRN × MTU × PHY). WiFi on vs off is compared in M3, once WiFi exists.
 - **Done when:** the §14.4 failure rows that don't need networking all pass, and the run records show the right error codes.
+- **Split into two PRs:**
+  - **M2a, robust flashing:**
+    - retries with SYS_RESET between attempts;
+    - backoff that degrades after overruns (from the M1 bench findings);
+    - PRN cap of 8, stale-session recovery, target-gone detection;
+    - `flash --attempts N`;
+    - the retry policy is pure, host-tested logic (`dfu_proto/retry.hpp`).
+  - **M2b, observability:** run records in `runlog`, the log ring, `job_active` reboot detection, and `runs` console commands.
 
 ## M3: Networking & API (3–4 days)
 
