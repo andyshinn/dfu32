@@ -188,7 +188,7 @@ Status codes: `01` SUCCESS, `02` INVALID_STATE, `03` NOT_SUPPORTED, `04` DATA_SI
 - **Connection interval:** DFU32 requests a fixed **20 ms** by default (`--interval` overrides it).
   - Bench throughput on OTAFIX with ~1 packet per event: 30 ms 9.2 kB/s, 20 ms 12.4 kB/s, 15 ms 14.8 kB/s.
   - 11.25 ms and 7.5 ms overran the bootloader's lazy-erase buffering.
-- **PRN:** default **8** (configurable 1–16). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. M2 caps PRN at 8 for OTAFIX-class targets. After a stream-phase `06`, the next attempt backs off: PRN halved, interval doubled.
+- **PRN:** default **8** (configurable 1–16). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. DFU32 caps PRN at 8 for every bootloader (`--force-prn` overrides). A stream-phase `06` or link loss makes the next attempt more conservative (§6.5).
   - ESPHome documents that the bootloader runs out of memory beyond 8 unacknowledged packets.
   - The bootloader RX pool is 16 buffers (OTAFIX/upstream ≥0.10) or 8 (older).
 - Flow:
@@ -246,7 +246,18 @@ The bootloader keeps its half-finished state across a disconnect and keeps re-ad
 2. What happens next depends on the bootloader:
    - OTAFIX and upstream ≥0.10 reboot back into BLE OTA. The address may now be **MAC+1** (path B2).
    - `upstream_le_0_9` with no app lands in **USB DFU** and disappears from BLE. DFU32 records `TARGET_LOST_USB_RECOVERY_REQUIRED` and stops retrying.
-3. Back off 3 s → 6 s → 12 s, then go back to SCAN.
+3. Back off 3 s → 6 s → 12 s, then go back to SCAN. A retry scans for 30 s, not the full arm timeout, because the target is already in its bootloader.
+
+How each failure is classified (`dfu::classify_transfer_failure`, host-tested):
+
+| Failure | Kind | Next attempt |
+|---|---|---|
+| Link lost, `06`, receipt timeout or mismatch **while streaming** | LinkOrOverrun | Backoff, then **one step more conservative**: interval up to 30 ms, then PRN halved (min 2). This answers the bench finding that fast intervals overrun OTAFIX's lazy-erase buffer. |
+| START → `02` INVALID_STATE (stale session) | StaleSession | SYS_RESET already sent; retry after 1 s. |
+| Connect or discovery failure; timeout outside the stream; CRC error at VALIDATE | Transient | Backoff, same parameters. |
+| START → `04` too large, INIT → `06` (init packet rejected), stream → `03` (bad length), image read error, device-type or SD mismatch | Fatal | Stop; nothing gets better by retrying. |
+| Target not found on attempt 1 (arm timeout) | Fatal | Stop. |
+| Target not found on a retry | TargetGone | Stop. With an `upstream_le_0_9` bootloader after START: `TARGET_LOST_USB_RECOVERY_REQUIRED`. |
 
 After `max_attempts` (default 3, range 1–10) the run is **FAILED**. The staged image is kept and WiFi is restored. The record names the last phase reached and the last error. If the target was erased, the UI shows **"target has no application — retry flash"** prominently.
 

@@ -26,6 +26,7 @@ add_executable(dfu_proto_tests
     test_image.cpp
     test_init_packet.cpp
     test_protocol.cpp
+    test_retry.cpp
     test_staging_format.cpp
     test_transfer.cpp
 )
