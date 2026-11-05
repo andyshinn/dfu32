@@ -50,27 +50,36 @@ jobs:
       # merge-bin invocation sees the same value and doesn't reconfigure.
       IDF_CCACHE_ENABLE: 1
       CCACHE_MAXSIZE: 500M
-      # Bump to invalidate every ccache entry (e.g. after an IDF image change).
-      CCACHE_KEY_PREFIX: ccache-v1-idf6.1-${{ matrix.board }}
+      # Hash the compiler binary rather than its mtime, which can change when
+      # the image tag is rebuilt even though the toolchain is identical.
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v7
 
       # ${{ github.workspace }} is the host path in container jobs, so derive
-      # the container path from $GITHUB_WORKSPACE at runtime instead.
+      # container paths from $GITHUB_WORKSPACE at runtime instead. The cache
+      # key embeds the IDF version read from the image itself, so it can't
+      # drift from the container tag above; bump "v1" to drop all caches.
       - name: Configure ccache
+        id: ccache-config
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          idf_ver=$(sed -n 's/^set(IDF_VERSION_\(MAJOR\|MINOR\|PATCH\) \([0-9]*\))$/\2/p' \
+            "$IDF_PATH/tools/cmake/version.cmake" | paste -sd.)
+          test -n "$idf_ver" || { echo "::error::could not read IDF version"; exit 1; }
+          echo "key-prefix=ccache-v1-idf${idf_ver}-${{ matrix.board }}" >> "$GITHUB_OUTPUT"
 
-      # Each run saves under a unique key; restore-keys picks the most recent
-      # cache for this board (PRs can also read caches saved from main).
+      # Caches are saved only from main (see "Save ccache"); PR runs restore
+      # the most recent main cache for this board via restore-keys.
       - name: Restore ccache
         id: ccache-restore
         uses: actions/cache/restore@v5
         with:
           path: .ccache
-          key: ${{ env.CCACHE_KEY_PREFIX }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ steps.ccache-config.outputs.key-prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ env.CCACHE_KEY_PREFIX }}-
+            ${{ steps.ccache-config.outputs.key-prefix }}-
 
       - name: Build
         run: |
@@ -83,10 +92,11 @@ jobs:
         if: always()
         run: ccache --show-stats || true
 
-      # Save even when the build fails: a partially warm cache still helps
-      # the next attempt.
+      # Save only on pushes to main so PR runs don't fill the repo's 10 GB
+      # cache quota and evict the main caches PRs restore from. Saved even
+      # when the build fails: a partially warm cache still helps next time.
       - name: Save ccache
-        if: always() && steps.ccache-restore.outcome == 'success'
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ccache-restore.outcome == 'success'
         uses: actions/cache/save@v5
         with:
           path: .ccache
