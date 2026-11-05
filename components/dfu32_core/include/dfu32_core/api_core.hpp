@@ -67,24 +67,29 @@ bool ct_equal(std::span<const uint8_t> a, std::span<const uint8_t> b) noexcept;
 /// The token from an "Authorization: Bearer <token>" header value, or "".
 std::string_view bearer_token(std::string_view header) noexcept;
 
-/// SPEC.md §10.1: after 5 failed attempts within a minute, every
-/// authenticated response is delayed 1 s for the next 60 s.
+/// SPEC.md §10.1: after 5 failed attempts within a minute, for the next
+/// 60 s at most one token is checked per second; other authenticated
+/// requests are refused (429, Retry-After: 1) without sleeping, so the
+/// single server thread never stalls.
 class AuthThrottle {
 public:
     static constexpr uint32_t kMaxFailures = 5;
     static constexpr uint64_t kWindowMs = 60000;
     static constexpr uint64_t kPenaltyMs = 60000;
-    static constexpr uint32_t kDelayMs = 1000;
+    static constexpr uint64_t kSlotMs = 1000;
 
     void record_failure(uint64_t now_ms) noexcept;
-    /// How long to stall a response sent at `now_ms`.
-    uint32_t delay_ms(uint64_t now_ms) const noexcept;
+    /// Whether a token may be checked at `now_ms`. Outside a penalty always
+    /// true; during one, true once per kSlotMs (and that slot is used up).
+    bool try_attempt(uint64_t now_ms) noexcept;
+    bool penalised(uint64_t now_ms) const noexcept { return now_ms < penalty_until_; }
     uint32_t failures() const noexcept { return failures_; }
 
 private:
     uint32_t failures_ = 0;
     uint64_t window_start_ = 0;
     uint64_t penalty_until_ = 0;
+    uint64_t next_slot_ = 0;
 };
 
 // ---- device settings (SPEC.md §9.1) -----------------------------------------------

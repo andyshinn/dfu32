@@ -50,6 +50,9 @@ bool load_target(TargetConfig& out) {
     }
     nvs_close(h);
     out.mac = normalize_mac(out.mac);
+    if (const unsigned n = sanitize(out); n != 0) {
+        ESP_LOGW(TAG, "stored target had %u invalid field(s); using defaults for them", n);
+    }
     return true;
 }
 

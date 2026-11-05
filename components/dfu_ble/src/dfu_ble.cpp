@@ -46,6 +46,13 @@ uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 void beat() { g_last_beat_us.store(esp_timer_get_time()); }
 
+// Deadlines in now_ms() units, safe across the 32-bit wrap (~49.7 days).
+bool before(uint32_t deadline) { return static_cast<int32_t>(now_ms() - deadline) < 0; }
+uint32_t remaining(uint32_t deadline) {
+    const int32_t left = static_cast<int32_t>(deadline - now_ms());
+    return left > 0 ? static_cast<uint32_t>(left) : 0;
+}
+
 void sleep_ms(uint32_t ms) {
     while (ms > 0) {
         const uint32_t step = std::min(ms, kBeatMs);
@@ -186,7 +193,7 @@ bool find_target(const Mac& app, uint32_t timeout_ms, const char* what, Advert& 
     if (scan->start(timeout_ms, false, true)) {
         // Wait in slices so an abort stops the scan promptly.
         const uint32_t until = now_ms() + timeout_ms + 1000;
-        while (now_ms() < until && !g_abort.load()) {
+        while (before(until) && !g_abort.load()) {
             beat();
             if (xSemaphoreTake(done, pdMS_TO_TICKS(kBeatMs)) == pdTRUE) break;
         }
@@ -274,7 +281,7 @@ public:
         }
         // MTU exchange is asynchronous; give it a moment to land.
         const uint32_t until = now_ms() + kMtuWaitMs;
-        while (!mtu_changed_ && client_->getMTU() <= dfu::kAttMtuMin && now_ms() < until) {
+        while (!mtu_changed_ && client_->getMTU() <= dfu::kAttMtuMin && before(until)) {
             sleep_ms(20);
         }
         return true;
@@ -328,7 +335,7 @@ public:
 
     bool wait_disconnect(uint32_t ms) {
         const uint32_t until = now_ms() + ms;
-        while (is_connected() && now_ms() < until) {
+        while (is_connected() && before(until)) {
             sleep_ms(20);
             beat();
         }
@@ -388,8 +395,7 @@ public:
                 }
                 return false;
             }
-            const uint32_t now = now_ms();
-            const uint32_t left = until > now ? until - now : 0;
+            const uint32_t left = remaining(until);
             TickType_t t = pdMS_TO_TICKS(std::min(left, kBeatMs));
             if (t == 0 && left > 0) t = 1;
             if (xQueueReceive(queue_, &out, t) == pdTRUE) {

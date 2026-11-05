@@ -131,6 +131,32 @@ void write_json(json::ObjectWriter& w, const TargetConfig& t) {
         .add("last_ok_at", static_cast<int64_t>(t.last_ok_at));
 }
 
+unsigned sanitize(TargetConfig& t) {
+    const TargetConfig d;
+    unsigned n = 0;
+    const auto fix = [&](bool bad, auto& field, const auto& def) {
+        if (bad) {
+            field = def;
+            ++n;
+        }
+    };
+    fix(!validate_target_id(t.id).empty(), t.id, d.id);
+    fix(t.name.size() > 63, t.name, d.name);
+    fix(!validate_board(t.board).empty(), t.board, d.board);
+    fix(!validate_mac(t.mac).empty(), t.mac, d.mac);
+    fix(t.addr_type > 1, t.addr_type, d.addr_type);
+    fix(!validate_manifest_url(t.manifest_url).empty(), t.manifest_url, d.manifest_url);
+    fix(!validate_max_app_size(t.max_app_size).empty(), t.max_app_size, d.max_app_size);
+    fix(t.prn < 1 || t.prn > kDefaultPrn, t.prn, d.prn);
+    fix(t.max_attempts < 1 || t.max_attempts > kMaxAttemptsLimit, t.max_attempts, d.max_attempts);
+    fix(t.arm_timeout_s < kMinArmTimeoutS || t.arm_timeout_s > kMaxArmTimeoutS, t.arm_timeout_s, d.arm_timeout_s);
+    fix(t.start_settle_ms > kMaxStartSettleMs, t.start_settle_ms, d.start_settle_ms);
+    fix(t.prn_timeout_ms < kMinPrnTimeoutMs || t.prn_timeout_ms > kMaxPrnTimeoutMs, t.prn_timeout_ms,
+        d.prn_timeout_ms);
+    fix(t.last_ok_version.size() > kMaxVersionLen, t.last_ok_version, d.last_ok_version);
+    return n;
+}
+
 std::string to_json(const TargetConfig& t) {
     json::ObjectWriter w;
     write_json(w, t);
@@ -228,7 +254,10 @@ std::string apply_json(std::string_view body, const std::string& id, TargetConfi
         for (const FieldDef& d : kFields) known = known || item.key() == d.key;
         if (!known) return "unknown field '" + std::string(item.key()) + "'";
     }
+    // Start from a clean copy: a stored field that breaks a newer rule falls
+    // back to its default instead of making every PUT fail.
     TargetConfig next = t;
+    sanitize(next);
     for (const FieldDef& d : kFields) {
         const json::Node f = v.get(d.key);
         if (f.missing() || !d.writable) continue;

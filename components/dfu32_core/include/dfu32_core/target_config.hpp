@@ -69,6 +69,12 @@ std::string normalize_mac(const std::string& mac);
 /// All fields at once; the first problem, or "".
 std::string validate(const TargetConfig& t);
 
+/// Resets every field that fails validation to its default (an invalid MAC
+/// or URL becomes unset) and returns how many were reset. Used when loading
+/// a stored record and before a PUT merge, so a record that breaks a newer
+/// rule can still be loaded and repaired.
+unsigned sanitize(TargetConfig& t);
+
 namespace json {
 class ObjectWriter;
 }

@@ -114,12 +114,25 @@ TEST_CASE("API: constant-time compare and bearer header", "[api]") {
 TEST_CASE("API: auth throttle", "[api]") {
     AuthThrottle t;
     uint64_t now = 1000;
-    for (int i = 0; i < 4; ++i) t.record_failure(now += 100);
-    CHECK(t.delay_ms(now) == 0);  // 4 failures: no penalty yet
-    t.record_failure(now += 100);
-    CHECK(t.delay_ms(now) == AuthThrottle::kDelayMs);
-    CHECK(t.delay_ms(now + AuthThrottle::kPenaltyMs - 1) == AuthThrottle::kDelayMs);
-    CHECK(t.delay_ms(now + AuthThrottle::kPenaltyMs) == 0);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(t.try_attempt(now += 100));
+        t.record_failure(now);
+    }
+    CHECK_FALSE(t.penalised(now));
+    CHECK(t.try_attempt(now));  // no penalty yet: every attempt is checked
+    CHECK(t.try_attempt(now));
+    t.record_failure(now += 100);  // 5th failure
+    const uint64_t start = now;
+    CHECK(t.penalised(now));
+    CHECK(t.try_attempt(now));         // one check per second...
+    CHECK_FALSE(t.try_attempt(now));   // ...the rest are refused, not delayed
+    CHECK_FALSE(t.try_attempt(now + 999));
+    CHECK(t.try_attempt(now + 1000));
+    CHECK_FALSE(t.try_attempt(now + 1500));
+    CHECK(t.penalised(start + AuthThrottle::kPenaltyMs - 1));
+    CHECK_FALSE(t.penalised(start + AuthThrottle::kPenaltyMs));
+    CHECK(t.try_attempt(start + AuthThrottle::kPenaltyMs));
+    CHECK(t.try_attempt(start + AuthThrottle::kPenaltyMs));
 
     // Failures spread over more than a minute don't add up.
     AuthThrottle slow;
@@ -129,7 +142,7 @@ TEST_CASE("API: auth throttle", "[api]") {
         at += 20000;
         if (i % 3 == 2) at += 60000;
     }
-    CHECK(slow.delay_ms(at) == 0);
+    CHECK_FALSE(slow.penalised(at));
 }
 
 TEST_CASE("API: device config", "[api]") {

@@ -174,7 +174,12 @@ void AuthThrottle::record_failure(uint64_t now_ms) noexcept {
     if (failures_ >= kMaxFailures) penalty_until_ = now_ms + kPenaltyMs;
 }
 
-uint32_t AuthThrottle::delay_ms(uint64_t now_ms) const noexcept { return now_ms < penalty_until_ ? kDelayMs : 0; }
+bool AuthThrottle::try_attempt(uint64_t now_ms) noexcept {
+    if (!penalised(now_ms)) return true;
+    if (now_ms < next_slot_) return false;
+    next_slot_ = now_ms + kSlotMs;
+    return true;
+}
 
 // ---- device settings --------------------------------------------------------------
 

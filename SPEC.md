@@ -450,10 +450,13 @@ The API is served by `esp_http_server` on port 80, with an mDNS name of `dfu32-X
 
 **Authenticated:** everything else.
 
-After 5 failed auth attempts within a minute, authenticated responses are delayed 1 s for 60 s.
+After 5 failed auth attempts within a minute, for the next 60 s DFU32 checks at most one token per second; other authenticated requests get `429` with `Retry-After: 1` at once. Nothing sleeps on the server's single worker thread, so `/status` stays responsive.
 
 Conventions (M3b):
-- Errors are `{"error":"<CODE>","detail":"…"}` with `400` (bad body: unknown fields are refused), `401` (missing or wrong token), `403 UNCLAIMED`, `404`, `405`, `409` (`BUSY`, `TARGET_LIMIT`, `ALREADY_CLAIMED`, `NO_JOB`), `413` (bodies are capped at 4 KB), `422` / `502` (a `check` that fails: §13.3 code, `502` for `HTTP_ERROR`).
+- Errors are `{"error":"<CODE>","detail":"…"}` with `400` (bad body: unknown fields are refused), `401` (missing or wrong token), `403 UNCLAIMED`, `404`, `405`, `408` (body stalled for more than about 10 s), `409` (`BUSY`, `TARGET_LIMIT`, `ALREADY_CLAIMED`, `NO_JOB`), `411` (chunked bodies aren't supported: send `Content-Length`), `413` (bodies are capped at 4 KB), `429 RATE_LIMITED`, `422` / `502` (a `check` that fails: §13.3 code, `502` for `HTTP_ERROR`), `503` (`check` without WiFi).
+- Bodies are optional: no body means all defaults.
+- `check` and `ble/scan` can take seconds, so they run on a separate task (httpd async requests), one at a time (`409` while one is running); the server keeps answering `/status` and `abort`. Both hold the device-wide lease while they work, so `check` never compares against a staging header a stage job is rewriting.
+- Target `PUT`/`DELETE` hold the lease too: `409` while a job, a console flash/probe or a scan is running.
 - `PUT /targets/{id}` merges the fields present into the stored record (a new target starts from defaults), so a `GET` result can be sent back: `last_ok_*` are read-only and ignored. A target created on the console has no id and adopts the first id it is `PUT` under.
 - `POST /stage` takes `{"force":bool,"url":"…"}`; `url` overrides the manifest URL for that job only.
 - `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.

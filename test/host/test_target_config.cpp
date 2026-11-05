@@ -174,3 +174,29 @@ TEST_CASE("Target config: PUT merge", "[target]") {
     CHECK_FALSE(apply_json("{}", "Bad Id", t).empty());
     CHECK(to_json(t) == to_json(before));  // refused updates change nothing
 }
+
+TEST_CASE("Target config: a stored record that breaks the rules can be repaired", "[target]") {
+    // e.g. hand-edited NVS, or a rule added after the record was saved.
+    TargetConfig t;
+    REQUIRE(from_json(R"({"id":"attic","board":"rak4631","prn":20,"max_attempts":0,"mac":"nope",)"
+                      R"("manifest_url":"https://x/m.json","last_ok_version":"v1"})",
+                      t));
+    CHECK_FALSE(validate(t).empty());
+
+    TargetConfig fixed = t;
+    CHECK(sanitize(fixed) == 4);
+    CHECK(validate(fixed).empty());
+    CHECK(fixed.prn == kDefaultPrn);
+    CHECK(fixed.max_attempts == kDefaultMaxAttempts);
+    CHECK(fixed.mac.empty());
+    CHECK(fixed.manifest_url.empty());
+    CHECK(fixed.board == "rak4631");          // valid fields are kept
+    CHECK(fixed.last_ok_version == "v1");
+    CHECK(sanitize(fixed) == 0);
+
+    // A PUT touching one field succeeds; the broken ones fall back to defaults.
+    CHECK(apply_json(R"({"name":"Attic"})", "attic", t).empty());
+    CHECK(t.name == "Attic");
+    CHECK(t.prn == kDefaultPrn);
+    CHECK(t.board == "rak4631");
+}

@@ -2,9 +2,11 @@
 #include "api/api.hpp"
 
 #include <array>
+#include <atomic>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -23,6 +25,7 @@
 #include "esp_timer.h"
 #include "fetch/fetch.hpp"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "job/job.hpp"
 #include "net/net.hpp"
@@ -38,6 +41,8 @@ namespace {
 constexpr const char* TAG = "api";
 constexpr size_t kMaxBody = 4096;
 constexpr size_t kLogChunk = 8192;
+constexpr int kMaxRecvTimeouts = 2;       // x recv_wait_timeout (5 s)
+constexpr uint32_t kSlowTaskStack = 12288;  // check runs the HTTP client + manifest parser
 constexpr const char* kDfuUuid = "00001530-1212-efde-1523-785feabcd123";
 
 httpd_handle_t g_server = nullptr;
@@ -84,20 +89,6 @@ esp_err_t send_status_error(httpd_req_t* req, const Status& s) {
     return send_error(req, http, to_string(s.code), s.detail);
 }
 
-bool read_body(httpd_req_t* req, std::string& out) {
-    out.clear();
-    if (req->content_len > kMaxBody) return false;
-    out.resize(req->content_len);
-    size_t got = 0;
-    while (got < out.size()) {
-        const int n = httpd_req_recv(req, out.data() + got, out.size() - got);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) return false;
-        got += static_cast<size_t>(n);
-    }
-    return true;
-}
-
 std::string header(httpd_req_t* req, const char* name) {
     const size_t len = httpd_req_get_hdr_value_len(req, name);
     if (len == 0) return {};
@@ -105,6 +96,37 @@ std::string header(httpd_req_t* req, const char* name) {
     if (httpd_req_get_hdr_value_str(req, name, v.data(), v.size()) != ESP_OK) return {};
     v.resize(len);
     return v;
+}
+
+/// Reads the request body (bodies are optional: none means "defaults").
+/// Sends the error response itself and returns false when it can't.
+bool read_body(httpd_req_t* req, std::string& out, esp_err_t& sent) {
+    out.clear();
+    // esp_http_server doesn't decode chunked request bodies (content_len
+    // stays 0), so refuse them rather than silently using the defaults.
+    if (httpd_req_get_hdr_value_len(req, "Transfer-Encoding") != 0) {
+        sent = send_error(req, "411 Length Required", "BAD_REQUEST", "send the body with Content-Length, not chunked");
+        return false;
+    }
+    if (req->content_len > kMaxBody) {
+        sent = send_error(req, "413 Content Too Large", "BAD_REQUEST", "bodies are limited to 4 KB");
+        return false;
+    }
+    out.resize(req->content_len);
+    size_t got = 0;
+    int timeouts = 0;
+    while (got < out.size()) {
+        const int n = httpd_req_recv(req, out.data() + got, out.size() - got);
+        // Each timeout is recv_wait_timeout (5 s); a client that stalls longer
+        // must not hold the server's only worker thread.
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < kMaxRecvTimeouts) continue;
+        if (n <= 0) {
+            sent = send_error(req, "408 Request Timeout", "BAD_REQUEST", "incomplete request body");
+            return false;
+        }
+        got += static_cast<size_t>(n);
+    }
+    return true;
 }
 
 // ---- auth ----------------------------------------------------------------------------
@@ -141,17 +163,19 @@ std::string issue_token() {
 
 /// Checks the bearer token; sends the error response itself when refusing.
 bool authorize(httpd_req_t* req, esp_err_t& sent) {
-    uint32_t delay = 0;
-    {
-        std::lock_guard<std::mutex> lk(g_auth_mu);
-        delay = g_throttle.delay_ms(now_ms());
-    }
-    if (delay) vTaskDelay(pdMS_TO_TICKS(delay));
     std::array<uint8_t, 32> want{};
     {
         std::lock_guard<std::mutex> lk(g_auth_mu);
         if (!g_claimed) {
             sent = send_error(req, "403 Forbidden", "UNCLAIMED", "claim the device first: POST /api/v1/claim");
+            return false;
+        }
+        // After repeated failures, check at most one token per second and
+        // refuse the rest at once (never sleep on the server thread).
+        if (!g_throttle.try_attempt(now_ms())) {
+            httpd_resp_set_hdr(req, "Retry-After", "1");
+            sent = send_error(req, "429 Too Many Requests", "RATE_LIMITED",
+                              "too many failed token attempts; retry in a second");
             return false;
         }
         want = g_token_hash;
@@ -171,6 +195,11 @@ bool authorize(httpd_req_t* req, esp_err_t& sent) {
 }
 
 // ---- shared views --------------------------------------------------------------------
+
+std::string busy_detail() {
+    const char* h = job::holder();
+    return std::string("busy: ") + (h != nullptr ? h : "another operation") + " is using BLE/staging";
+}
 
 bool target_exists(const TargetConfig& t) {
     return !(t.id.empty() && t.mac.empty() && t.board.empty() && t.manifest_url.empty());
@@ -305,7 +334,11 @@ esp_err_t h_target(httpd_req_t* req, const RouteMatch& m) {
         return send_obj(req, "200 OK", w);
     }
 
-    if (job::busy()) return send_error(req, "409 Conflict", "BUSY", "a job is running");
+    // Hold the device-wide lease while editing, so the target can't change
+    // under a job, a console flash/probe or a scan (and a flash can't start
+    // between this check and the save).
+    job::Lease lease("config");
+    if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
     TargetConfig t;
     if (!config::load_target(t)) return send_error(req, "500 Internal Server Error", "INTERNAL");
     const bool exists = target_exists(t);
@@ -323,7 +356,8 @@ esp_err_t h_target(httpd_req_t* req, const RouteMatch& m) {
                           "v1 supports one target ('" + t.id + "'); DELETE it first or PUT to its id");
     }
     std::string body;
-    if (!read_body(req, body)) return send_error(req, "413 Content Too Large", "BAD_REQUEST", "body too large");
+    esp_err_t body_err = ESP_OK;
+    if (!read_body(req, body, body_err)) return body_err;
     if (!exists) t = TargetConfig{};
     if (auto e = apply_json(body, m.id, t); !e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
     if (!config::save_target(t)) return send_error(req, "500 Internal Server Error", "INTERNAL", "NVS write failed");
@@ -337,8 +371,16 @@ esp_err_t h_check(httpd_req_t* req, const RouteMatch& m) {
     TargetConfig t;
     if (!load_target_for(req, m.id, t, sent)) return sent;
     if (t.manifest_url.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", "target has no manifest_url");
+    if (!net::status().connected) return send_error(req, "503 Service Unavailable", "HTTP_ERROR", "WiFi is not connected");
     fetch::CheckReport r;
-    const Status s = fetch::check(t.manifest_url, t.board, r);
+    Status s;
+    {
+        // The lease keeps a stage job from rewriting the staging header while
+        // check compares against it.
+        job::Lease lease("check");
+        if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
+        s = fetch::check(t.manifest_url, t.board, r);
+    }
     if (!s.ok()) return send_status_error(req, s);
     const Manifest& mf = r.manifest;
     json::ObjectWriter w;
@@ -373,7 +415,8 @@ esp_err_t h_stage(httpd_req_t* req, const RouteMatch& m) {
     TargetConfig t;
     if (!load_target_for(req, m.id, t, sent)) return sent;
     std::string body;
-    if (!read_body(req, body)) return send_error(req, "413 Content Too Large", "BAD_REQUEST", "body too large");
+    esp_err_t body_err = ESP_OK;
+    if (!read_body(req, body, body_err)) return body_err;
     job::StageRequest sr;
     if (auto e = job::parse_stage_request(body, sr); !e.empty()) {
         return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
@@ -389,7 +432,8 @@ esp_err_t h_flash(httpd_req_t* req, const RouteMatch& m) {
     TargetConfig t;
     if (!load_target_for(req, m.id, t, sent)) return sent;
     std::string body;
-    if (!read_body(req, body)) return send_error(req, "413 Content Too Large", "BAD_REQUEST", "body too large");
+    esp_err_t body_err = ESP_OK;
+    if (!read_body(req, body, body_err)) return body_err;
     DeviceConfig dev;
     config::load_device(dev);
     job::FlashRequest def;
@@ -448,7 +492,7 @@ esp_err_t h_run(httpd_req_t* req, const RouteMatch& m) {
 esp_err_t h_staging(httpd_req_t* req) {
     if (req->method == HTTP_DELETE) {
         job::Lease lease("staging");
-        if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", "a job is running");
+        if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
         if (!invalidate_staging()) return send_error(req, "500 Internal Server Error", "STAGING_IO");
         return send_no_content(req);
     }
@@ -470,7 +514,7 @@ esp_err_t h_staging(httpd_req_t* req) {
             .add("manifest_sha256", sha256_hex(h.manifest_sha256));
         if (query_param(req->uri, "verify") == "1") {
             job::Lease lease("verify");  // don't re-read while a job rewrites it
-            if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", "a job is running");
+            if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
             const StagingVerify v = img.verify();
             w.add_bool("verified", v.ok).add("verify_error", v.error);
         }
@@ -478,17 +522,13 @@ esp_err_t h_staging(httpd_req_t* req) {
     return send_obj(req, "200 OK", w);
 }
 
-esp_err_t h_scan(httpd_req_t* req) {
-    std::string body;
-    if (!read_body(req, body)) return send_error(req, "413 Content Too Large", "BAD_REQUEST", "body too large");
-    ScanRequest sr;
-    if (auto e = parse_scan_request(body, sr); !e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
+esp_err_t h_scan(httpd_req_t* req, const ScanRequest& sr) {
     TargetConfig t;
     config::load_target(t);
     std::vector<ble::Advert> list;
     {
         job::Lease lease("scan");
-        if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", "a job is running");
+        if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
         list = ble::scan(sr.duration_s * 1000);
     }
     json::ArrayWriter arr;
@@ -548,7 +588,8 @@ esp_err_t h_config(httpd_req_t* req) {
     bool reboot = false;
     if (req->method == HTTP_PUT) {
         std::string body;
-        if (!read_body(req, body)) return send_error(req, "413 Content Too Large", "BAD_REQUEST", "body too large");
+        esp_err_t body_err = ESP_OK;
+        if (!read_body(req, body, body_err)) return body_err;
         const DeviceConfig before = c;
         if (auto e = apply_json(body, c); !e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
         if (!config::save_device(c)) return send_error(req, "500 Internal Server Error", "INTERNAL");
@@ -592,7 +633,8 @@ esp_err_t h_rotate(httpd_req_t* req) {
 esp_err_t h_fault(httpd_req_t* req) {
 #if CONFIG_DFU32_DEBUG_ENDPOINTS
     std::string body;
-    if (!read_body(req, body)) return send_error(req, "413 Content Too Large", "BAD_REQUEST", "body too large");
+    esp_err_t body_err = ESP_OK;
+    if (!read_body(req, body, body_err)) return body_err;
     FaultRequest fr;
     if (auto e = parse_fault_request(body, fr); !e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
     job::Faults f;
@@ -609,6 +651,76 @@ esp_err_t h_fault(httpd_req_t* req) {
 #else
     return send_error(req, "404 Not Found", "NOT_FOUND", "debug endpoints are not built in (CONFIG_DFU32_DEBUG_ENDPOINTS)");
 #endif
+}
+
+// ---- slow requests (check, scan) on their own task --------------------------------
+// esp_http_server has one worker thread. A manifest fetch or a BLE scan can
+// take many seconds, so those requests are handed to this task through
+// httpd's async-request API and the server keeps answering /status and
+// /jobs/current/abort meanwhile. One slow request at a time.
+
+struct SlowRequest {
+    httpd_req_t* req = nullptr;  // async copy; must be completed
+    Route route = Route::NotFound;
+    RouteMatch match;
+    ScanRequest scan;
+};
+
+QueueHandle_t g_slow_q = nullptr;
+std::atomic<bool> g_slow_busy{false};
+
+void slow_task(void*) {
+    for (;;) {
+        SlowRequest* raw = nullptr;
+        if (xQueueReceive(g_slow_q, &raw, portMAX_DELAY) != pdTRUE || raw == nullptr) continue;
+        std::unique_ptr<SlowRequest> r(raw);
+        if (r->route == Route::TargetCheck) {
+            h_check(r->req, r->match);
+        } else {
+            h_scan(r->req, r->scan);
+        }
+        httpd_req_async_handler_complete(r->req);
+        g_slow_busy = false;
+    }
+}
+
+esp_err_t start_slow(httpd_req_t* req, std::unique_ptr<SlowRequest> r) {
+    if (g_slow_q == nullptr) return send_error(req, "500 Internal Server Error", "INTERNAL", "worker not running");
+    if (g_slow_busy.exchange(true)) {
+        return send_error(req, "409 Conflict", "BUSY", "another check or scan is still running");
+    }
+    if (httpd_req_async_handler_begin(req, &r->req) != ESP_OK) {
+        g_slow_busy = false;
+        return send_error(req, "500 Internal Server Error", "INTERNAL", "cannot start async request");
+    }
+    SlowRequest* raw = r.release();
+    if (xQueueSend(g_slow_q, &raw, 0) != pdTRUE) {  // can't happen: one at a time
+        httpd_req_t* copy = raw->req;
+        delete raw;
+        send_error(copy, "500 Internal Server Error", "INTERNAL", "worker queue full");
+        httpd_req_async_handler_complete(copy);
+        g_slow_busy = false;
+    }
+    return ESP_OK;
+}
+
+esp_err_t queue_check(httpd_req_t* req, const RouteMatch& m) {
+    auto r = std::make_unique<SlowRequest>();
+    r->route = Route::TargetCheck;
+    r->match = m;
+    return start_slow(req, std::move(r));
+}
+
+esp_err_t queue_scan(httpd_req_t* req) {
+    std::string body;
+    esp_err_t body_err = ESP_OK;
+    if (!read_body(req, body, body_err)) return body_err;
+    auto r = std::make_unique<SlowRequest>();
+    r->route = Route::BleScan;
+    if (auto e = parse_scan_request(body, r->scan); !e.empty()) {
+        return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
+    }
+    return start_slow(req, std::move(r));
 }
 
 Method method_of(httpd_req_t* req) {
@@ -636,14 +748,14 @@ esp_err_t dispatch(httpd_req_t* req) {
         case Route::Claim: return h_claim(req);
         case Route::Targets: return h_targets(req);
         case Route::Target: return h_target(req, m);
-        case Route::TargetCheck: return h_check(req, m);
+        case Route::TargetCheck: return queue_check(req, m);
         case Route::TargetStage: return h_stage(req, m);
         case Route::TargetFlash: return h_flash(req, m);
         case Route::TargetRuns: return h_target_runs(req, m);
         case Route::JobAbort: return h_abort(req);
         case Route::Run: return h_run(req, m);
         case Route::Staging: return h_staging(req);
-        case Route::BleScan: return h_scan(req);
+        case Route::BleScan: return queue_scan(req);
         case Route::Logs: return h_logs(req);
         case Route::Config: return h_config(req);
         case Route::Reboot: return h_reboot(req);
@@ -679,8 +791,13 @@ bool unclaim() {
 bool start() {
     if (g_server != nullptr) return true;
     load_token();
+    g_slow_q = xQueueCreate(1, sizeof(SlowRequest*));
+    if (g_slow_q == nullptr || xTaskCreate(&slow_task, "api_slow", kSlowTaskStack, nullptr, 4, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "api worker task create failed");
+        return false;
+    }
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size = 12288;  // check runs the HTTP client and manifest parser on this task
+    cfg.stack_size = 8192;  // JSON building; the slow requests run on api_slow
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;
     cfg.max_uri_handlers = 8;

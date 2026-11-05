@@ -55,6 +55,7 @@ esp_timer_handle_t g_stall_timer = nullptr;
 std::atomic<bool> g_abort_req{false};
 std::atomic<bool> g_deadline_hit{false};
 std::atomic<int64_t> g_watch_since_us{0};
+std::atomic<int64_t> g_job_beat_us{0};   // heartbeats from the job's own waits (restore)
 
 uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
 
@@ -109,6 +110,8 @@ void fail(const std::string& error) {
 
 bool aborted() { return g_abort_req.load(); }
 
+void job_beat() { g_job_beat_us.store(esp_timer_get_time()); }
+
 // ---- timers (SPEC.md §7.3 layers 2 and 3) -------------------------------------------
 
 void deadline_cb(void*) {
@@ -118,7 +121,7 @@ void deadline_cb(void*) {
 }
 
 void stall_cb(void*) {
-    const int64_t last = std::max(ble::last_activity_us(), g_watch_since_us.load());
+    const int64_t last = std::max({ble::last_activity_us(), g_watch_since_us.load(), g_job_beat_us.load()});
     const int64_t idle = esp_timer_get_time() - last;
     if (idle > kStallUs) {
         ESP_LOGE(TAG, "DFU task shows no sign of life for %" PRId64 " s: rebooting", idle / 1000000);
@@ -131,16 +134,27 @@ void start_stall_watch() {
     esp_timer_start_periodic(g_stall_timer, kStallCheckUs);
 }
 
-void stop_timers() {
-    esp_timer_stop(g_stall_timer);
-    esp_timer_stop(g_deadline_timer);
-}
+void stop_stall_watch() { esp_timer_stop(g_stall_timer); }
+void stop_deadline() { esp_timer_stop(g_deadline_timer); }
 
 // ---- WiFi restore with verification (SPEC.md §7.3 layer 4) ---------------------------
 
+/// net::restore() and wait for an IP in 1 s slices, beating for the stall
+/// watchdog (which stays armed until the job ends).
+bool restart_and_wait(bool fault) {
+    job_beat();
+    bool ok = net::restore(0);
+    for (uint32_t waited = 0; !ok && waited < kRestoreWaitMs; waited += 1000) {
+        job_beat();
+        ok = net::wait_connected(1000);
+    }
+    job_beat();
+    return ok && !fault;
+}
+
 void restore_wifi(bool expect_connect, bool fault) {
     if (fault) ESP_LOGW(TAG, "fault injection: treating WiFi restore as failed");
-    bool ok = net::restore(kRestoreWaitMs) && !fault;
+    bool ok = restart_and_wait(fault);
     if (ok) {
         ESP_LOGI(TAG, "WiFi restored");
         return;
@@ -151,7 +165,7 @@ void restore_wifi(bool expect_connect, bool fault) {
     }
     ESP_LOGW(TAG, "WiFi not connected %" PRIu32 " s after restore; retrying once", kRestoreWaitMs / 1000);
     net::stop();
-    ok = net::restore(kRestoreWaitMs) && !fault;
+    ok = restart_and_wait(fault);
     if (ok) {
         ESP_LOGI(TAG, "WiFi restored on the second try");
         return;
@@ -209,20 +223,31 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
         update([](Snapshot& s) { s.target_erased = true; });  // START may erase from here on
     };
     o.on_found = [&] {
-        set_state(State::RadioHandover);
+        // Only this task changes the job state (abort just raises flags), so
+        // AWAITING_TARGET -> RADIO_HANDOVER is legal here; a failure would be
+        // a bug, and then the radio is left alone.
+        if (!set_state(State::RadioHandover)) return;
         set_phase("HANDOVER");
+        // The deadline covers everything from here on, including stopping WiFi.
+        const uint32_t deadline =
+            q.faults.deadline_s ? q.faults.deadline_s
+                                : run_deadline_s(o.attempts, bin_size, q.device.dfu_deadline_max_s);
+        esp_timer_start_once(g_deadline_timer, uint64_t{deadline} * 1000000);
+        if (aborted()) {
+            // Abort raced with the sighting: keep WiFi up. ble::flash() sees
+            // the abort right after this returns, and the job goes RESTORING
+            // (nothing to restore) -> FAILED.
+            ESP_LOGW(TAG, "target seen, but an abort is pending; not stopping WiFi");
+            return;
+        }
         const net::Status ns = net::status();
         if (q.flash.wifi_off && ns.initialised && !ns.stopped) {
             wifi_was_connected = ns.connected;
             wifi_stopped = net::stop();
         }
         update([&](Snapshot& s) { s.wifi_off = wifi_stopped; });
-        const uint32_t deadline =
-            q.faults.deadline_s ? q.faults.deadline_s
-                                : run_deadline_s(o.attempts, bin_size, q.device.dfu_deadline_max_s);
         ESP_LOGI(TAG, "target seen; WiFi %s, run deadline %" PRIu32 " s", wifi_stopped ? "stopped" : "kept up",
                  deadline);
-        esp_timer_start_once(g_deadline_timer, uint64_t{deadline} * 1000000);
         if (q.faults.stall_s) {
             ESP_LOGW(TAG, "fault injection: blocking the DFU task %" PRIu32 " s without a heartbeat", q.faults.stall_s);
             vTaskDelay(pdMS_TO_TICKS(q.faults.stall_s * 1000));
@@ -245,9 +270,12 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
         }
     };
 
+    // The stall watchdog stays armed until the job ends: the run record, the
+    // last_ok save and the WiFi restore below are covered too.
     start_stall_watch();
     const ble::FlashReport r = ble::flash(mac, img, bin_size, img.header().dat_bytes(), v.init, o);
-    stop_timers();
+    stop_deadline();
+    job_beat();
 
     bool handover;
     {
@@ -296,6 +324,7 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
     }
 
     if (wifi_stopped) restore_wifi(wifi_was_connected, q.faults.restore_fail);
+    stop_stall_watch();
 
     if (r.ok) {
         ESP_LOGI(TAG, "flash of \"%s\" succeeded in %" PRIu32 " ms (run #%" PRIu32 ")", img.header().version.c_str(),
@@ -437,10 +466,12 @@ SubmitResult submit(std::unique_ptr<Request> q, std::string& why, uint32_t& job_
         g_snap.wifi_off = q->kind == Kind::Flash && q->flash.wifi_off;
         g_stream_t0_us = 0;
         job_id = g_snap.id;
+        // Clear the abort flags before the job becomes visible, so an abort
+        // that sees it active is never wiped (abort() sets them under g_mu).
+        g_abort_req = false;
+        g_deadline_hit = false;
+        ble::clear_abort();
     }
-    g_abort_req = false;
-    g_deadline_hit = false;
-    ble::clear_abort();
     ESP_LOGI(TAG, "evt=job id=%" PRIu32 " start kind=%s source=%s target=%s", job_id, to_string(q->kind),
              to_string(q->source), q->target.effective_id().c_str());
     Request* raw = q.release();
@@ -538,12 +569,12 @@ AbortResult abort() {
         r.state = g_snap.state;
         r.was_active = is_active(g_snap.state);
         r.target_erased = g_snap.target_erased;
+        if (r.was_active) {
+            g_abort_req = true;
+            ble::request_abort();
+        }
     }
-    if (r.was_active) {
-        ESP_LOGW(TAG, "abort requested in %s", to_string(r.state));
-        g_abort_req = true;
-        ble::request_abort();
-    }
+    if (r.was_active) ESP_LOGW(TAG, "abort requested in %s", to_string(r.state));
     return r;
 }
 
