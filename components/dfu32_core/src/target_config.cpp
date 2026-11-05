@@ -103,20 +103,103 @@ std::string validate(const TargetConfig& t) {
     if (t.addr_type > 1) return "addr_type must be 0 (public) or 1 (random)";
     if (auto e = validate_manifest_url(t.manifest_url); !e.empty()) return e;
     if (auto e = validate_max_app_size(t.max_app_size); !e.empty()) return e;
+    if (t.prn < 1 || t.prn > kDefaultPrn) return "prn must be 1-8";
+    if (t.max_attempts < 1 || t.max_attempts > kMaxAttemptsLimit) return "max_attempts must be 1-10";
+    if (t.arm_timeout_s < kMinArmTimeoutS || t.arm_timeout_s > kMaxArmTimeoutS) return "arm_timeout_s must be 10-3600";
+    if (t.start_settle_ms > kMaxStartSettleMs) return "start_settle_ms must be 0-5000";
+    if (t.prn_timeout_ms < kMinPrnTimeoutMs || t.prn_timeout_ms > kMaxPrnTimeoutMs) {
+        return "prn_timeout_ms must be 500-60000";
+    }
+    if (t.last_ok_version.size() > kMaxVersionLen) return "last_ok_version longer than 63 characters";
     return {};
 }
 
-std::string to_json(const TargetConfig& t) {
-    json::ObjectWriter w;
+void write_json(json::ObjectWriter& w, const TargetConfig& t) {
     w.add("id", t.id)
         .add("name", t.name)
         .add("board", t.board)
         .add("mac", t.mac)
         .add("addr_type", int64_t{t.addr_type})
         .add("manifest_url", t.manifest_url)
-        .add("max_app_size", int64_t{t.max_app_size});
+        .add("max_app_size", int64_t{t.max_app_size})
+        .add("prn", int64_t{t.prn})
+        .add("max_attempts", int64_t{t.max_attempts})
+        .add("arm_timeout_s", int64_t{t.arm_timeout_s})
+        .add("start_settle_ms", int64_t{t.start_settle_ms})
+        .add("prn_timeout_ms", int64_t{t.prn_timeout_ms})
+        .add("last_ok_version", t.last_ok_version)
+        .add("last_ok_at", static_cast<int64_t>(t.last_ok_at));
+}
+
+std::string to_json(const TargetConfig& t) {
+    json::ObjectWriter w;
+    write_json(w, t);
     return w.str();
 }
+
+namespace {
+
+enum class Field : uint8_t { Str, U8, U16, U32, U64 };
+
+struct FieldDef {
+    const char* key;
+    Field type;
+    bool writable;  // settable through apply_json()
+    int64_t max;
+};
+
+constexpr FieldDef kFields[] = {
+    {"id", Field::Str, true, 0},
+    {"name", Field::Str, true, 0},
+    {"board", Field::Str, true, 0},
+    {"mac", Field::Str, true, 0},
+    {"addr_type", Field::U8, true, 1},
+    {"manifest_url", Field::Str, true, 0},
+    {"max_app_size", Field::U32, true, UINT32_MAX},
+    {"prn", Field::U16, true, UINT16_MAX},
+    {"max_attempts", Field::U16, true, UINT16_MAX},
+    {"arm_timeout_s", Field::U16, true, UINT16_MAX},
+    {"start_settle_ms", Field::U16, true, UINT16_MAX},
+    {"prn_timeout_ms", Field::U16, true, UINT16_MAX},
+    {"last_ok_version", Field::Str, false, 0},
+    {"last_ok_at", Field::U64, false, INT64_MAX},
+};
+
+std::string* str_field(TargetConfig& t, std::string_view key) {
+    if (key == "id") return &t.id;
+    if (key == "name") return &t.name;
+    if (key == "board") return &t.board;
+    if (key == "mac") return &t.mac;
+    if (key == "manifest_url") return &t.manifest_url;
+    if (key == "last_ok_version") return &t.last_ok_version;
+    return nullptr;
+}
+
+void set_int(TargetConfig& t, std::string_view key, int64_t v) {
+    if (key == "addr_type") t.addr_type = static_cast<uint8_t>(v);
+    else if (key == "max_app_size") t.max_app_size = static_cast<uint32_t>(v);
+    else if (key == "prn") t.prn = static_cast<uint16_t>(v);
+    else if (key == "max_attempts") t.max_attempts = static_cast<uint16_t>(v);
+    else if (key == "arm_timeout_s") t.arm_timeout_s = static_cast<uint16_t>(v);
+    else if (key == "start_settle_ms") t.start_settle_ms = static_cast<uint16_t>(v);
+    else if (key == "prn_timeout_ms") t.prn_timeout_ms = static_cast<uint16_t>(v);
+    else if (key == "last_ok_at") t.last_ok_at = static_cast<uint64_t>(v);
+}
+
+// Reads one field from `f` into `t`; "" or the reason it is wrongly typed.
+std::string read_field(const FieldDef& d, const json::Node& f, TargetConfig& t) {
+    if (d.type == Field::Str) {
+        if (!f.is_string()) return std::string(d.key) + " must be a string";
+        *str_field(t, d.key) = f.str();
+        return {};
+    }
+    int64_t i = 0;
+    if (!f.integer(i) || i < 0 || i > d.max) return std::string(d.key) + " must be an integer 0-" + std::to_string(d.max);
+    set_int(t, d.key, i);
+    return {};
+}
+
+}  // namespace
 
 bool from_json(std::string_view text, TargetConfig& out) {
     json::Doc doc;
@@ -124,28 +207,42 @@ bool from_json(std::string_view text, TargetConfig& out) {
     const json::Node v = doc.root();
     if (!v.is_object()) return false;
     TargetConfig t;
-    const auto str = [&](const char* key, std::string& dst) {
-        const json::Node f = v.get(key);
-        if (f.missing()) return true;
-        if (!f.is_string()) return false;
-        dst = f.str();
-        return true;
-    };
-    if (!str("id", t.id) || !str("name", t.name) || !str("board", t.board) || !str("mac", t.mac) ||
-        !str("manifest_url", t.manifest_url)) {
-        return false;
-    }
-    int64_t i = 0;
-    if (const json::Node f = v.get("addr_type"); !f.missing()) {
-        if (!f.integer(i) || i < 0 || i > 1) return false;
-        t.addr_type = static_cast<uint8_t>(i);
-    }
-    if (const json::Node f = v.get("max_app_size"); !f.missing()) {
-        if (!f.integer(i) || i < 0 || i > UINT32_MAX) return false;
-        t.max_app_size = static_cast<uint32_t>(i);
+    for (const FieldDef& d : kFields) {
+        const json::Node f = v.get(d.key);
+        if (f.missing()) continue;
+        if (!read_field(d, f, t).empty()) return false;
     }
     out = std::move(t);
     return true;
+}
+
+std::string apply_json(std::string_view body, const std::string& id, TargetConfig& t) {
+    json::Doc doc;
+    std::string err;
+    if (!doc.parse(body, &err)) return err;
+    const json::Node v = doc.root();
+    if (!v.is_object()) return "body must be a JSON object";
+    // Refuse unknown keys first, so a typo doesn't silently do nothing.
+    for (const json::Node& item : v.items()) {
+        bool known = false;
+        for (const FieldDef& d : kFields) known = known || item.key() == d.key;
+        if (!known) return "unknown field '" + std::string(item.key()) + "'";
+    }
+    TargetConfig next = t;
+    for (const FieldDef& d : kFields) {
+        const json::Node f = v.get(d.key);
+        if (f.missing() || !d.writable) continue;
+        if (auto e = read_field(d, f, next); !e.empty()) return e;
+    }
+    if (!v.get("id").missing() && next.id != id) return "body id does not match the URL";
+    next.id = id;
+    if (!next.mac.empty()) {
+        const std::string m = normalize_mac(next.mac);
+        if (!m.empty()) next.mac = m;
+    }
+    if (auto e = validate(next); !e.empty()) return e;
+    t = std::move(next);
+    return {};
 }
 
 }  // namespace dfu32

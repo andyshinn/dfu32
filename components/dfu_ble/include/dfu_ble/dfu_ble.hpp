@@ -83,17 +83,31 @@ struct ProbeReport {
 /// Never sends START, so nothing is erased.
 ProbeReport probe(const Mac& app, uint32_t scan_ms, bool reset_after = true, ConnParams conn = {});
 
+/// Live progress for the orchestrator (GET /api/v1/status).
+struct FlashProgress {
+    uint8_t attempt = 0;
+    const char* phase = "";      // SCAN, CONNECT, START, STREAM, RETRY
+    uint32_t bytes_acked = 0;
+    uint32_t bytes_total = 0;
+};
+
 struct FlashOptions {
     uint32_t scan_ms = 600000;   // how long to wait for the target on attempt 1 (arm timeout)
     uint16_t prn = 8;            // capped at dfu::kMaxSafePrn unless force_prn
     bool force_prn = false;
     uint32_t start_settle_ms = 500;
+    uint32_t prn_timeout_ms = 5000;
     uint16_t max_packet = 0;     // 0 = automatic; else cap (e.g. 20 for testing)
     ConnParams conn{};           // interval for attempt 1; retries may lengthen it
     uint8_t attempts = 3;        // total attempts (SPEC.md §6.5)
     /// Called right before each attempt's transfer starts, i.e. before START
     /// may erase the target (used for the job marker, SPEC.md §7.3).
     std::function<void(uint8_t try_number)> before_transfer;
+    /// Called once per flash(), when the target is first seen and before
+    /// connecting: the radio-handover point (SPEC.md §7.1).
+    std::function<void()> on_found;
+    /// Phase changes and stream progress. Runs on the flashing task.
+    std::function<void(const FlashProgress&)> on_progress;
 };
 
 struct AttemptSummary {
@@ -116,8 +130,24 @@ struct FlashReport {
     std::vector<AttemptSummary> attempts;
     bool target_erased = false;        // any attempt got as far as START
     bool sys_reset_after_failure = false;  // the last attempt sent SYS_RESET after failing
+    bool aborted = false;              // request_abort() ended the run
     uint32_t total_ms = 0;
 };
+
+/// Run control (SPEC.md §7.3). request_abort() may be called from any task or
+/// timer: the scan stops, a connected link is dropped, and flash() / probe()
+/// return within about a quarter of a second (or once a blocking NimBLE call
+/// such as connect returns). The flag stays set until clear_abort(), which
+/// the caller does before the next run.
+void request_abort();
+void clear_abort();
+bool abort_requested();
+
+/// esp_timer time (us) of the last sign of life from a blocking wait inside
+/// flash()/probe()/scan(): waits beat at least every 250 ms, so a value that
+/// stops moving for long means the task is wedged (the orchestrator's stall
+/// watchdog, SPEC.md §7.3).
+int64_t last_activity_us();
 
 /// Flashes the image with automatic retries (SPEC.md §6.5). Each attempt checks
 /// the device type and SoftDevice requirement against the bootloader before

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
 // Bench console (USB serial): target, wifi, check, stage, scan, staged, probe,
-// flash, runs, run, logs, blreset. The HTTP API (M3b) and web UI (M4) cover the
-// same ground; the console stays as a debug tool.
+// flash, runs, run, logs, blreset, job, token. The HTTP API and the web UI (M4)
+// cover the same ground; the console stays as a debug tool. Commands that use
+// BLE or the staging partition take the job lease, so they can't run while an
+// API job does (and vice versa).
 #include "console.hpp"
 
+#include <array>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -12,9 +15,11 @@
 #include <string>
 #include <unistd.h>
 
+#include "api/api.hpp"
 #include "config/config.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "fetch/fetch.hpp"
+#include "job/job.hpp"
 #include "net/net.hpp"
 #include "dfu_proto/protocol.hpp"
 #include "dfu_proto/retry.hpp"
@@ -92,50 +97,12 @@ void print_link(const ble::LinkInfo& l) {
 
 uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
 
-uint32_t stream_rate_x10(const dfu::TransferResult& t) {
-    const uint32_t ms = t.phase_ms[static_cast<size_t>(dfu::TransferPhase::Stream)];
-    return ms ? static_cast<uint32_t>(uint64_t{t.bytes_sent} * 10 / ms) : 0;
-}
-
-runlog::RunRecord make_record(uint32_t seq, const ble::Mac& mac, const StagedImage& img, const ble::FlashReport& r,
-                              uint32_t started_s, bool wifi_off) {
-    runlog::RunRecord rec;
-    rec.seq = seq;
-    rec.result = r.ok ? "SUCCEEDED" : "FAILED";
-    rec.error = r.error;
-    rec.failure_kind = dfu::to_string(r.failure);
-    rec.target = mac.str();
-    rec.image_version = img.header().version;
-    char sha[65] = {};
-    hex(img.header().bin_sha256.data(), 32, sha);
-    rec.image_sha256 = sha;
-    rec.image_size = img.header().bin_size;
-    rec.started_uptime_s = started_s;
-    rec.duration_ms = r.total_ms;
-    bool any_transfer = false;
-    for (const auto& a : r.attempts) any_transfer = any_transfer || a.ran_transfer;
-    if (any_transfer) rec.last_phase = dfu::to_string(r.transfer.phase);
-    rec.bytes_acked = r.transfer.bytes_acked;
-    rec.target_erased = r.target_erased ? "yes" : "no";
-    rec.sys_reset_after_failure = r.sys_reset_after_failure;
-    rec.wifi_off = wifi_off;
-    rec.bootloader = r.link.dis_fw_rev;
-    rec.bootloader_class = dfu::to_string(r.link.bootloader.cls);
-    rec.mtu = r.link.mtu;
-    rec.packet_size = r.link.packet_size;
-    rec.conn_interval_x125 = r.link.conn_interval;
-    rec.rate_x10_kBps = stream_rate_x10(r.transfer);
-    for (const auto& a : r.attempts) {
-        runlog::RunAttempt ra;
-        ra.number = a.number;
-        ra.interval_ms = a.params.interval_ms;
-        ra.prn = a.params.prn;
-        ra.outcome = a.failure == dfu::FailureKind::None ? "OK" : a.error;
-        ra.kind = dfu::to_string(a.failure);
-        ra.bytes_acked = a.transfer.bytes_acked;
-        rec.attempts.push_back(std::move(ra));
-    }
-    return rec;
+/// Takes the BLE/staging lease or explains who has it.
+bool acquire(job::Lease& lease) {
+    if (lease.ok()) return true;
+    const char* h = job::holder();
+    std::printf("Busy: %s is using BLE/staging. Wait for it (see `job`), or `job abort`.\n", h ? h : "something");
+    return false;
 }
 
 // ---- commands -----------------------------------------------------------------
@@ -311,6 +278,8 @@ int cmd_stage(int argc, char** argv) {
         return 1;
     }
     if (!require_network()) return 1;
+    job::Lease lease("console");
+    if (!acquire(lease)) return 1;
     fetch::StageOptions o;
     o.force = has_flag(argc, argv, "--force");
     o.staged_at = net::unix_time();
@@ -335,6 +304,8 @@ int cmd_stage(int argc, char** argv) {
 
 int cmd_scan(int argc, char** argv) {
     const long secs = argc >= 2 ? std::strtol(argv[1], nullptr, 0) : 8;
+    job::Lease lease("console");
+    if (!acquire(lease)) return 1;
     std::printf("Scanning %ld s...\n", secs);
     const auto list = ble::scan(static_cast<uint32_t>(secs > 0 ? secs : 8) * 1000);
     std::printf("%-17s  %-6s  %4s  %-4s  %s\n", "ADDRESS", "TYPE", "RSSI", "DFU", "NAME");
@@ -381,6 +352,9 @@ int cmd_probe(int argc, char** argv) {
     if (!require_target(mac)) return 1;
     const bool reset = !has_flag(argc, argv, "--no-reset");
     const long wait_s = opt_long(argc, argv, "--wait", 60);
+    job::Lease lease("console");
+    if (!acquire(lease)) return 1;
+    ble::clear_abort();
     std::printf("Probing %s (waiting up to %ld s; run `start ota` on the repeater now if you haven't).\n"
                 "Non-destructive: no START is sent%s.\n",
                 mac.str().c_str(), wait_s, reset ? "; SYS_RESET at the end reboots the target into its app" : "");
@@ -408,6 +382,9 @@ int cmd_flash(int argc, char** argv) {
                     "                       [--settle MS] [--wait S] [--wifi on|off]\n");
         return 1;
     }
+    job::Lease lease("console");
+    if (!acquire(lease)) return 1;
+    ble::clear_abort();
     StagedImage img;
     if (!img.open()) return 1;
     const auto v = img.verify();
@@ -429,16 +406,23 @@ int cmd_flash(int argc, char** argv) {
                 img.header().bin_size, img.header().version.c_str(), o.scan_ms / 1000, mac.str().c_str(), o.attempts);
 
     runlog::RunLog* run_log = runlog::idf::open_run_log();
-    const uint32_t seq = run_log ? run_log->next_seq() : 0;
+    TargetConfig tc;
+    config::load_target(tc);
+    job::RunContext ctx;
+    ctx.seq = run_log ? run_log->next_seq() : 0;
+    ctx.target_id = tc.effective_id();
+    ctx.started_uptime_s = uptime_s();
+    ctx.started_unix = net::unix_time();
+    ctx.trigger = "console";
+    ctx.source = "staged";
     const uint64_t log_mark = runlog::idf::log_position();
-    const uint32_t started_s = uptime_s();
     if (run_log != nullptr) {  // without a run log an abort couldn't be recorded anyway
-        runlog::idf::JobMarker job;
-        job.seq = seq;
-        job.started_uptime_s = started_s;
-        std::snprintf(job.target, sizeof(job.target), "%s", mac.str().c_str());
-        std::snprintf(job.version, sizeof(job.version), "%s", img.header().version.c_str());
-        runlog::idf::job_begin(job);
+        runlog::idf::JobMarker marker;
+        marker.seq = ctx.seq;
+        marker.started_uptime_s = ctx.started_uptime_s;
+        std::snprintf(marker.target, sizeof(marker.target), "%s", mac.str().c_str());
+        std::snprintf(marker.version, sizeof(marker.version), "%s", img.header().version.c_str());
+        runlog::idf::job_begin(marker);
         o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
     }
 
@@ -466,7 +450,8 @@ int cmd_flash(int argc, char** argv) {
 
     uint32_t recorded = 0;
     if (run_log != nullptr) {
-        const std::string json = runlog::to_json(make_record(seq, mac, img, r, started_s, wifi_off));
+        ctx.wifi_off = wifi_off;
+        const std::string json = runlog::to_json(job::make_run_record(ctx, mac, img, r));
         recorded = run_log->append(json, runlog::idf::log_since(log_mark, runlog::kSlotPayloadMax));
         runlog::idf::job_end();
     }
@@ -578,12 +563,71 @@ int cmd_blreset(int argc, char** argv) {
     ble::Mac mac;
     if (!require_target(mac)) return 1;
     const long wait_s = opt_long(argc, argv, "--wait", 20);
+    job::Lease lease("console");
+    if (!acquire(lease)) return 1;
+    ble::clear_abort();
     std::string err;
     if (!ble::reset_bootloader(mac, static_cast<uint32_t>(wait_s) * 1000, err)) {
         std::printf("blreset failed: %s\n", err.c_str());
         return 1;
     }
     std::printf("SYS_RESET sent.\n");
+    return 0;
+}
+
+int cmd_job(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "abort") == 0) {
+        const job::AbortResult r = job::abort();
+        if (!r.was_active) {
+            std::printf("No job is running.\n");
+            return 1;
+        }
+        std::printf("Abort requested in %s.%s\n", job::to_string(r.state),
+                    r.target_erased ? " The transfer had started: the target's app is erased; flash again to recover."
+                                    : "");
+        return 0;
+    }
+    const job::Snapshot s = job::snapshot();
+    if (s.id == 0) {
+        std::printf("No job since boot. Start one with POST /api/v1/targets/{id}/stage or /flash.\n");
+        return 0;
+    }
+    std::printf("  job        #%" PRIu32 " %s (%s) for '%s'\n", s.id, job::to_string(s.kind), job::to_string(s.source),
+                s.target.c_str());
+    std::printf("  state      %s%s%s\n", job::to_string(s.state), s.phase.empty() ? "" : " / ", s.phase.c_str());
+    if (!s.version.empty()) std::printf("  image      \"%s\"\n", s.version.c_str());
+    if (s.bytes_total) {
+        std::printf("  progress   %" PRIu32 " / %" PRIu32 " B", s.bytes_done, s.bytes_total);
+        if (s.rate_bps) std::printf(", %" PRIu32 " B/s", s.rate_bps);
+        std::printf("\n");
+    }
+    if (s.attempt) std::printf("  attempt    %" PRIu32 " of %" PRIu32 "\n", s.attempt, s.max_attempts);
+    if (s.target_erased) std::printf("  target     ERASED (START reached)\n");
+    if (!s.error.empty()) std::printf("  error      %s\n", s.error.c_str());
+    if (s.run_seq) std::printf("  run        #%" PRIu32 " (`run %" PRIu32 "`)\n", s.run_seq, s.run_seq);
+    const char* h = job::holder();
+    std::printf("  lease      %s\n", h ? h : "free");
+    return 0;
+}
+
+int cmd_token(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "rotate") == 0) {
+        const std::string t = api::rotate_token();
+        if (t.empty()) {
+            std::printf("Failed to store a new token.\n");
+            return 1;
+        }
+        std::printf("New API token (the old one stops working):\n%s\n", t.c_str());
+        return 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "clear") == 0) {
+        const bool ok = api::unclaim();
+        std::printf("%s\n", ok ? "Unclaimed: the next POST /api/v1/claim issues a token." : "Failed to clear the token.");
+        return ok ? 0 : 1;
+    }
+    std::array<uint8_t, 32> h{};
+    std::printf("API %s. `token rotate` prints a new token; `token clear` unclaims.\n",
+                config::load_token_hash(h) ? "claimed" : "unclaimed (POST /api/v1/claim)");
     return 0;
 }
 
@@ -643,6 +687,8 @@ void start_console() {
     reg("logs", "Show recent captured log output.", "[bytes]", &cmd_logs);
     reg("blreset", "Send SYS_RESET to the target's bootloader (recover a stuck session).", "[--wait S]",
         &cmd_blreset);
+    reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
+    reg("token", "API token: show claim state, issue a new token, or unclaim.", "[rotate | clear]", &cmd_token);
 
     ESP_LOGI(TAG, "console ready; type 'help'");
     ESP_ERROR_CHECK(esp_console_start_repl(repl));

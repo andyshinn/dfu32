@@ -19,6 +19,7 @@
 #include "freertos/event_groups.h"
 #include "mdns.h"
 #include "nvs.h"
+#include "sdkconfig.h"
 
 namespace dfu32::net {
 namespace {
@@ -291,6 +292,13 @@ bool restore(uint32_t timeout_ms) {
 uint64_t unix_time() {
     const time_t now = time(nullptr);
     return now >= kSaneEpoch ? static_cast<uint64_t>(now) : 0;
+}
+
+void advertise_http(uint16_t port) {
+    if (!s_init) return;
+    mdns_txt_item_t txt[] = {{"path", "/api/v1/"}, {"board", CONFIG_DFU32_BOARD_NAME}};
+    const esp_err_t err = mdns_service_add(nullptr, "_http", "_tcp", port, txt, sizeof(txt) / sizeof(txt[0]));
+    if (err != ESP_OK) ESP_LOGW(TAG, "mDNS _http._tcp: %s", esp_err_to_name(err));
 }
 
 }  // namespace dfu32::net

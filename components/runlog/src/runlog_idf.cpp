@@ -130,6 +130,16 @@ std::string log_since(uint64_t from, size_t max_bytes) {
 
 std::string log_tail(size_t max_bytes) { return log_since(0, max_bytes); }
 
+std::string log_read(uint64_t from, size_t max_bytes, uint64_t& end) {
+    end = 0;
+    if (s_ring == nullptr) return {};
+    xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+    end = s_ring->position();
+    std::string s = s_ring->since(from, max_bytes);
+    xSemaphoreGive(s_ring_mutex);
+    return s;
+}
+
 RunLog* open_run_log() {
     static PartitionStorage* storage = nullptr;
     static RunLog* log = nullptr;

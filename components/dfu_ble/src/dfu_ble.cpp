@@ -37,12 +37,23 @@ constexpr uint16_t interval_units(uint16_t ms) {  // 1.25 ms units, BLE minimum 
 }
 constexpr uint32_t kPacketRetryLimit = 200;  // x 1 tick of back-off on ENOMEM
 
+constexpr uint32_t kBeatMs = 250;  // longest a wait goes without a heartbeat / abort check
+
+std::atomic<bool> g_abort{false};
+std::atomic<int64_t> g_last_beat_us{0};
+
 uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
+void beat() { g_last_beat_us.store(esp_timer_get_time()); }
+
 void sleep_ms(uint32_t ms) {
-    if (ms == 0) return;
-    TickType_t t = pdMS_TO_TICKS(ms);
-    vTaskDelay(t == 0 ? 1 : t);
+    while (ms > 0) {
+        const uint32_t step = std::min(ms, kBeatMs);
+        TickType_t t = pdMS_TO_TICKS(step);
+        vTaskDelay(t == 0 ? 1 : t);
+        ms -= step;
+        beat();
+    }
 }
 
 NimBLEAddress to_nimble(const Mac& m) {
@@ -173,8 +184,13 @@ bool find_target(const Mac& app, uint32_t timeout_ms, const char* what, Advert& 
              app.str().c_str(), app.plus_one().str().c_str());
     bool ok = false;
     if (scan->start(timeout_ms, false, true)) {
-        xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms + 1000));
-        ok = g_scan_cb.found();
+        // Wait in slices so an abort stops the scan promptly.
+        const uint32_t until = now_ms() + timeout_ms + 1000;
+        while (now_ms() < until && !g_abort.load()) {
+            beat();
+            if (xSemaphoreTake(done, pdMS_TO_TICKS(kBeatMs)) == pdTRUE) break;
+        }
+        ok = g_scan_cb.found() && !g_abort.load();
         scan->stop();
     } else {
         ESP_LOGE(TAG, "scan start failed");
@@ -189,6 +205,10 @@ bool find_target(const Mac& app, uint32_t timeout_ms, const char* what, Advert& 
         return true;
     }
     const size_t n = g_scan_cb.notable_count();
+    if (g_abort.load()) {
+        ESP_LOGW(TAG, "scan for the %s aborted", what);
+        return false;
+    }
     if (n == 0) {
         ESP_LOGW(TAG, "no %s at either address, and no other DFU-looking advertisers seen", what);
     }
@@ -308,7 +328,10 @@ public:
 
     bool wait_disconnect(uint32_t ms) {
         const uint32_t until = now_ms() + ms;
-        while (is_connected() && now_ms() < until) sleep_ms(20);
+        while (is_connected() && now_ms() < until) {
+            sleep_ms(20);
+            beat();
+        }
         return !is_connected();
     }
 
@@ -346,19 +369,37 @@ public:
             }
             ++enomem_retries_;
             vTaskDelay(1);
+            beat();
         }
         ESP_LOGE(TAG, "BLE TX stalled (out of mbufs for %" PRIu32 " ticks)", kPacketRetryLimit);
         return false;
     }
 
     bool wait_notification(dfu::RawNotification& out, uint32_t timeout_ms) override {
-        TickType_t t = pdMS_TO_TICKS(timeout_ms);
-        if (t == 0 && timeout_ms > 0) t = 1;
-        if (xQueueReceive(queue_, &out, t) != pdTRUE) return false;
-        // A zero-length entry is the disconnect wake-up from onDisconnect():
-        // report "no notification" so the caller checks is_connected() now
-        // instead of waiting out its timeout.
-        return out.len != 0;
+        // Wait in slices: beat for the stall watchdog, and on abort drop the
+        // link so the transfer fails as Disconnected right away.
+        const uint32_t until = now_ms() + timeout_ms;
+        for (;;) {
+            beat();
+            if (g_abort.load()) {
+                if (client_ != nullptr && client_->isConnected()) {
+                    ESP_LOGW(TAG, "abort requested: disconnecting");
+                    client_->disconnect();
+                }
+                return false;
+            }
+            const uint32_t now = now_ms();
+            const uint32_t left = until > now ? until - now : 0;
+            TickType_t t = pdMS_TO_TICKS(std::min(left, kBeatMs));
+            if (t == 0 && left > 0) t = 1;
+            if (xQueueReceive(queue_, &out, t) == pdTRUE) {
+                // A zero-length entry is the disconnect wake-up from onDisconnect():
+                // report "no notification" so the caller checks is_connected() now
+                // instead of waiting out its timeout.
+                return out.len != 0;
+            }
+            if (left <= kBeatMs) return false;
+        }
     }
 
     void flush_notifications() override { xQueueReset(queue_); }
@@ -414,17 +455,27 @@ private:
 /// Finds the target and returns a connected Link to its bootloader, performing
 /// the buttonless jump if the target is still in its app.
 std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, const ConnParams& conn, LinkInfo& info,
-                                      std::string& err, bool* not_found = nullptr) {
+                                      std::string& err, bool* not_found = nullptr,
+                                      const std::function<void()>* on_found = nullptr) {
     Advert adv;
     bool plus_one = false;
     uint32_t t0 = now_ms();
     if (not_found) *not_found = false;
     if (!find_target(app, scan_ms, "app or bootloader", adv, plus_one)) {
+        if (g_abort.load()) {
+            err = "ABORTED";
+            return nullptr;
+        }
         err = "target not found: run `start ota` on the repeater (or check the MAC)";
         if (not_found) *not_found = true;
         return nullptr;
     }
     info.find_ms = now_ms() - t0;
+    if (on_found != nullptr && *on_found) (*on_found)();
+    if (g_abort.load()) {
+        err = "ABORTED";
+        return nullptr;
+    }
 
     auto link = std::make_unique<Link>();
     t0 = now_ms();
@@ -446,7 +497,9 @@ std::unique_ptr<Link> open_bootloader(const Mac& app, uint32_t scan_ms, const Co
         info.via_buttonless = true;
         sleep_ms(300);
         if (!find_target(app, kBootloaderScanMs, "bootloader", adv, plus_one)) {
-            err = "bootloader did not appear after the buttonless jump (see warnings above for what was seen)";
+            err = g_abort.load() ? "ABORTED"
+                                 : "bootloader did not appear after the buttonless jump (see warnings above for "
+                                   "what was seen)";
             return nullptr;
         }
         info.jump_ms = now_ms() - tj;
@@ -590,11 +643,27 @@ namespace {
 dfu::FailureKind flash_attempt(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
                                std::span<const uint8_t> init_packet, const dfu::InitPacket& init,
                                const FlashOptions& opts, uint32_t scan_ms, AttemptSummary& s, FlashReport& r,
-                               dfu::BootloaderClass& seen_class) {
+                               dfu::BootloaderClass& seen_class, const std::function<void()>& on_found) {
+    const auto progress = [&](const char* phase, uint32_t acked) {
+        if (opts.on_progress) opts.on_progress(FlashProgress{s.number, phase, acked, image_size});
+    };
+    if (g_abort.load()) {
+        s.error = "ABORTED";
+        return dfu::FailureKind::Fatal;
+    }
+    progress(s.number == 1 ? "SCAN" : "RETRY", 0);
     LinkInfo info;
     bool not_found = false;
-    auto link = open_bootloader(app, scan_ms, ConnParams{s.params.interval_ms}, info, s.error, &not_found);
+    const std::function<void()> found = [&] {
+        on_found();
+        progress("CONNECT", 0);
+    };
+    auto link = open_bootloader(app, scan_ms, ConnParams{s.params.interval_ms}, info, s.error, &not_found, &found);
     if (!link) {
+        if (g_abort.load()) {
+            s.error = "ABORTED";
+            return dfu::FailureKind::Fatal;
+        }
         if (!not_found) return dfu::FailureKind::Transient;
         // Not found within the full arm timeout (attempt 1, or a retry of a
         // target that was never erased and so went back to its app): stop.
@@ -642,15 +711,18 @@ dfu::FailureKind flash_attempt(const Mac& app, dfu::IImageSource& image, uint32_
     }
     params.prn = s.params.prn;  // already capped in flash() unless --force-prn
     params.start_settle_ms = opts.start_settle_ms;
+    params.prn_timeout_ms = opts.prn_timeout_ms;
 
     link->read_conn(r.link.conn_interval, r.link.conn_latency, r.link.conn_timeout);
     ESP_LOGI(TAG, "attempt %u: %" PRIu32 " B in %u-byte packets, PRN %u, conn interval %u x1.25 ms, latency %u",
              s.number, image_size, params.packet_size, params.prn, r.link.conn_interval, r.link.conn_latency);
     uint32_t next_pct = 0;
     if (opts.before_transfer) opts.before_transfer(s.number);
+    progress("START", 0);
     s.ran_transfer = true;
     s.transfer = dfu::run_transfer(*link, image, image_size, init_packet, params,
                                    [&](uint32_t acked, uint32_t total) {
+                                       progress("STREAM", acked);
                                        const uint32_t pct = static_cast<uint32_t>(uint64_t{acked} * 100 / total);
                                        if (pct >= next_pct) {
                                            ESP_LOGI(TAG, "progress %3" PRIu32 "%% (%" PRIu32 "/%" PRIu32 ")", pct,
@@ -665,6 +737,11 @@ dfu::FailureKind flash_attempt(const Mac& app, dfu::IImageSource& image, uint32_
     }
     if (s.transfer.ok()) return dfu::FailureKind::None;
 
+    if (g_abort.load()) {
+        std::snprintf(buf, sizeof(buf), "ABORTED in %s", dfu::to_string(s.transfer.phase));
+        s.error = buf;
+        return dfu::FailureKind::Fatal;  // no SYS_RESET: the link was dropped on purpose
+    }
     std::snprintf(buf, sizeof(buf), "%s in %s (status 0x%02x)", dfu::to_string(s.transfer.error),
                   dfu::to_string(s.transfer.phase), s.transfer.status);
     s.error = buf;
@@ -695,6 +772,12 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
     }
     initial.interval_ms = opts.conn.interval_ms != 0 ? opts.conn.interval_ms : kDefaultConnIntervalMs;
     dfu::BootloaderClass seen_class = dfu::BootloaderClass::Unknown;
+    bool found_once = false;
+    const std::function<void()> on_found = [&] {
+        if (found_once) return;
+        found_once = true;
+        if (opts.on_found) opts.on_found();
+    };
 
     const auto result = dfu::run_with_retries(
         policy, initial,
@@ -713,7 +796,8 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
                     ESP_LOGW(TAG, "target was not erased and is back in its app: run `start ota` again");
                 }
             }
-            s.failure = flash_attempt(app, image, image_size, init_packet, init, opts, scan_ms, s, r, seen_class);
+            s.failure =
+                flash_attempt(app, image, image_size, init_packet, init, opts, scan_ms, s, r, seen_class, on_found);
             if (s.failure != dfu::FailureKind::None) {
                 ESP_LOGW(TAG, "attempt %u failed: %s [%s]", n, s.error.c_str(), dfu::to_string(s.failure));
             }
@@ -729,10 +813,16 @@ FlashReport flash(const Mac& app, dfu::IImageSource& image, uint32_t image_size,
 
     r.ok = result.last.ok;
     r.failure = result.last.failure;
+    r.aborted = !r.ok && g_abort.load();
     if (!r.attempts.empty()) r.error = r.attempts.back().error;
     r.total_ms = now_ms() - t0;
     return r;
 }
+
+void request_abort() { g_abort.store(true); }
+void clear_abort() { g_abort.store(false); }
+bool abort_requested() { return g_abort.load(); }
+int64_t last_activity_us() { return g_last_beat_us.load(); }
 
 bool reset_bootloader(const Mac& app, uint32_t scan_ms, std::string& error) {
     Advert adv;

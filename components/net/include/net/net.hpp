@@ -49,4 +49,7 @@ bool restore(uint32_t timeout_ms);
 /// Unix seconds once SNTP has synced, else 0.
 uint64_t unix_time();
 
+/// Announces the HTTP API over mDNS (_http._tcp on `port`, path=/api/v1/).
+void advertise_http(uint16_t port);
+
 }  // namespace dfu32::net

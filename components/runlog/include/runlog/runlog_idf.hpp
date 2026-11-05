@@ -24,6 +24,9 @@ bool log_capture_start(size_t bytes);
 uint64_t log_position();
 std::string log_since(uint64_t from, size_t max_bytes);
 std::string log_tail(size_t max_bytes);
+/// Like log_since(), and also returns the ring position the text ends at,
+/// read under the same lock (the `next` cursor for GET /api/v1/logs).
+std::string log_read(uint64_t from, size_t max_bytes, uint64_t& end);
 
 // ---- run log ----
 /// Opens the `runlog` partition and scans it. Returns nullptr if missing.

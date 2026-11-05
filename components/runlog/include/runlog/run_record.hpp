@@ -36,6 +36,10 @@ struct RunRecord {
     std::string target_erased;  // "yes" | "no" | "possibly"
     bool sys_reset_after_failure = false;
     bool wifi_off = false;            // WiFi was stopped for the transfer (SPEC.md §7.1)
+    std::string target_id;            // target config id (M3b)
+    std::string trigger;              // "console" | "api" | "" (M3b)
+    std::string source;               // "staged" | "manifest" (M3b)
+    uint64_t started_unix = 0;        // wall clock at start, 0 if SNTP hadn't synced (M3b)
     std::string bootloader;     // DIS firmware revision
     std::string bootloader_class;
     uint16_t mtu = 0;

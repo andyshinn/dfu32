@@ -210,9 +210,12 @@ Status stage(const TargetConfig& target, const std::string& manifest_url, const 
     out = StageReport{};
     const uint32_t t0 = now_ms();
     const std::string url = manifest_url.empty() ? target.manifest_url : manifest_url;
+    const auto cancelled = [&] { return opts.cancelled && opts.cancelled(); };
+    const Status aborted = Status::fail(Err::Aborted, "staging cancelled");
     Sha256 manifest_sha{};
     if (Status s = fetch_manifest(url, out.manifest, manifest_sha); !s.ok()) return s;
     const Manifest& m = out.manifest;
+    if (cancelled()) return aborted;
 
     const esp_partition_t* part = PartitionRegion::find_staging();
     if (part == nullptr) return Status::fail(Err::StagingIo, "no staging partition");
@@ -259,13 +262,14 @@ Status stage(const TargetConfig& target, const std::string& manifest_url, const 
     }
     const std::span<const uint8_t> dat(reinterpret_cast<const uint8_t*>(dat_text.data()), dat_text.size());
     if (Status s = precheck_image(m, dat, meta, region.size(), sha, out.init); !s.ok()) return s;
+    if (cancelled()) return aborted;
 
     StagingWriter writer(region, sha);
     ESP_LOGI(TAG, "staging \"%s\" (%" PRIu32 " B) from %s", m.version.c_str(), m.bin.size, m.bin.url.c_str());
     const uint32_t t_bin = now_ms();
     Status s = get_stream(
         m.bin.url, m.bin.size, [&] { return writer.begin(m, dat, meta); },
-        [&](std::span<const uint8_t> chunk) { return writer.write(chunk); }, opts.progress);
+        [&](std::span<const uint8_t> chunk) { return cancelled() ? aborted : writer.write(chunk); }, opts.progress);
     if (s.ok()) s = writer.finish();
     out.bytes = writer.written();
     out.invalidated = !s.ok() && writer.invalidated_previous();

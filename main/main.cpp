@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 //
 // DFU32: boot banner, layout self-check, run-log recovery, NimBLE central,
-// WiFi (net) and the USB-serial bench console. The HTTP API and the job
-// orchestrator arrive in M3b (docs/MILESTONES.md).
+// WiFi (net), the job orchestrator, the HTTP API and the USB-serial bench
+// console.
 #include <cinttypes>
 #include <cstdint>
 
+#include "api/api.hpp"
 #include "console.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/image.hpp"
@@ -15,6 +16,7 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_psram.h"
+#include "job/job.hpp"
 #include "net/net.hpp"
 #include "nvs_flash.h"
 #include "psa/crypto.h"
@@ -126,7 +128,15 @@ extern "C" void app_main(void) {
 
     // WiFi failing to start is logged but not fatal: the console, staging
     // from a PC and flashing still work without it.
-    if (!dfu32::net::init()) ESP_LOGE(TAG, "WiFi init failed; networking disabled");
+    const bool net_ok = dfu32::net::init();
+    if (!net_ok) ESP_LOGE(TAG, "WiFi init failed; networking disabled");
+
+    if (!dfu32::job::init()) {
+        ESP_LOGE(TAG, "job orchestrator failed to start; refusing to mark this image valid");
+        return;
+    }
+    // The API needs the network stack; without it the console still works.
+    if (net_ok && !dfu32::api::start()) ESP_LOGE(TAG, "HTTP API failed to start");
 
     // Mark valid once the self-check and BLE init pass. M4 (self-OTA) moves
     // this after WiFi + HTTP come up (SPEC.md §12.3, rollback).
