@@ -1,4 +1,4 @@
-# Bench guide (M1–M3a)
+# Bench guide (M1–M3b)
 
 This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
@@ -195,6 +195,82 @@ Tuning knobs:
 | `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
 | `--wifi on\|off` | off | WiFi is stopped for the flash and restored afterwards (SPEC §7.1, provisional default). `--wifi on` keeps it up. The run record's `wifi_off` shows which was used, for the M3b on/off comparison. |
+
+## 6. Over the HTTP API (M3b)
+
+Everything above can be done with `curl` from the PC. DFU32 answers on `http://dfu32-xxxx.local/` (the name is in the boot log and in `wifi`); use the IP if your OS doesn't resolve `.local`. Set a shell variable first:
+
+```bash
+DFU=http://dfu32-xxxx.local/api/v1
+```
+
+**Claim the device once.** The token is shown only this time; DFU32 keeps just its SHA-256. If you lose it, `token rotate` on the console prints a new one (`token clear` unclaims).
+
+```bash
+curl -s -X POST $DFU/claim
+```
+
+```bash
+TOKEN=<token from the reply>
+```
+
+Every other call sends `-H "Authorization: Bearer $TOKEN"`. `GET /status` works without it.
+
+**Set up the target** (one target in v1; a target made on the console takes the first id you PUT):
+
+```bash
+curl -s -X PUT $DFU/targets/t096 -H "Authorization: Bearer $TOKEN" -d '{"name":"Bench T096","board":"heltec_t096","mac":"F4:1C:36:A7:33:95","manifest_url":"http://<pc-ip>:8000/t096/manifest.json"}'
+```
+
+Tuning knobs go in the same record: `prn` (1–8), `max_attempts` (1–10), `arm_timeout_s` (10–3600), `start_settle_ms`, `prn_timeout_ms`, `max_app_size`.
+
+**Check, stage, flash:**
+
+```bash
+curl -s -X POST $DFU/targets/t096/check -H "Authorization: Bearer $TOKEN"
+```
+
+```bash
+curl -s -X POST $DFU/targets/t096/flash -H "Authorization: Bearer $TOKEN" -d '{"wifi_off":true}'
+```
+
+The flash call returns `202` straight away and the job runs on its own: it fetches (or reuses) the image, verifies it, and arms (`AWAITING_TARGET`). Now send `start ota` to the repeater, over USB or **remotely over LoRa from the companion app** (that's the M3b "done when"). Poll the job:
+
+```bash
+watch -n1 "curl -s $DFU/status"
+```
+
+With `"wifi_off":true` the API goes quiet from the moment the target is seen until WiFi is back (about a minute for the T096 image). With `"wifi_off":false` `status` shows the live phase, bytes and rate. Body fields, all optional: `source` (`manifest` or `staged`), `arm_timeout_s`, `wifi_off` (default: config `wifi_off_dfu`).
+
+Other calls:
+
+| Call | What it does |
+|---|---|
+| `POST /targets/t096/stage` | Stage without arming (`{"force":true}` re-downloads). Async; poll `status`. |
+| `POST /jobs/current/abort` | Stop the job. During the transfer this leaves the target erased (the reply says so); flash again with `{"source":"staged"}`. |
+| `GET /targets/t096/runs` · `GET /runs/7` | Run records; the second includes the log. |
+| `GET /staging` (`?verify=1` re-hashes) · `DELETE /staging` | The staged image. |
+| `POST /ble/scan` with `{"duration_s":10,"dfu_only":true}` | Advertisers, strongest first, with `dfu` and `matches_target` hints. Run `start ota` first. |
+| `GET /logs` then `GET /logs?since=<next>` | Live log tail. |
+| `GET /config` · `PUT /config` | `hostname`, `ntp_server` (both need a reboot), `wifi_off_dfu`, `dfu_deadline_max_s`. |
+| `POST /system/reboot` · `POST /system/token/rotate` | |
+
+The console's `job` shows the same state as `status`; `job abort` aborts.
+
+### M3b bench checklist
+
+- **Happy path with curl only:** claim, PUT target, flash, `start ota` from the companion app, `status` ends `SUCCEEDED`; `GET /targets/t096` shows `last_ok_version`.
+- **Bad hash:** edit `bin.sha256` in the manifest, `POST /stage` with `{"force":true}`. `status` ends `FAILED` with `HASH_MISMATCH`.
+- **Wrong board:** `PUT` the target with `"board":"rak4631"`, then flash. `FAILED`, `BOARD_MISMATCH` (from the manifest, or from the staged header with `"source":"staged"`), and the repeater is never touched.
+- **Arm timeout:** flash with `{"arm_timeout_s":30}` and don't run `start ota`. `FAILED`, `TARGET_NOT_FOUND`, with a run record.
+- **Busy:** while a job runs, a second `flash`, `stage`, `ble/scan` or target `PUT` gets `409`; so does the console's `scan`.
+- **Abort while armed:** `POST /jobs/current/abort` during `AWAITING_TARGET`: `FAILED`, `ABORTED`, target untouched.
+- **Offline re-flash from staging:** stage while the AP is up, start a flash with `{"source":"staged"}`, then switch the access point off and run `start ota`. Follow it on the console with `job`. It must succeed without the network. Because WiFi was already down when the target was seen, DFU32 doesn't insist on reconnecting afterwards (no reboot); `status` answers again once the AP is back.
+- **Restore watchdog and run deadline** (needs a build with `CONFIG_DFU32_DEBUG_ENDPOINTS=y`; add it to `sdkconfig.defaults` locally, never in a release):
+  - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 waits 60 s, retries once, waits 60 s, then reboots; the run record is already written and WiFi comes back after the reboot.
+  - `{"deadline_s":20}`: the run is aborted 20 s after the target is seen, recorded as `DEADLINE_EXCEEDED`, and WiFi is restored.
+  - `{"stall_s":40}`: the DFU task blocks without a heartbeat; the stall watchdog reboots after about 30 s and the next boot records `ABORTED_BY_REBOOT`.
+- **WiFi on vs off:** at least 5 runs each with `"wifi_off":true` and `false`. Compare `rate_x10_kBps`, attempts and failures in `GET /targets/t096/runs`. This decides the shipped `wifi_off_dfu` default.
 
 ## Bench results so far
 

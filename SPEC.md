@@ -52,7 +52,7 @@ Statements marked **[verified]** were checked against the source of the referenc
 ### 3.1 End-to-end flow ("arm, then wait")
 
 1. Operator: `POST /api/v1/targets/{id}/flash`. The UI has a **Flash** button.
-2. DFU32 fetches `manifest.json`. If its image matches what is already staged (same sha256), DFU32 reuses the staging partition. Otherwise it downloads `.bin`/`.dat` straight into the staging partition, streaming the SHA-256 as it goes, and verifies. If the manifest can't be fetched and `source=staged` was requested, DFU32 uses the staged image after re-verifying it.
+2. DFU32 fetches `manifest.json`. If its image matches what is already staged (same sha256), DFU32 reuses the staging partition. Otherwise it downloads `.bin`/`.dat` straight into the staging partition, streaming the SHA-256 as it goes, and verifies. With `source=staged`, DFU32 skips the fetch and uses the staged image after re-verifying it (works with no network, e.g. after a failed run).
 3. Prechecks run (§7.2). Any failure aborts. Nothing on the target has been touched.
 4. State becomes **AWAITING_TARGET**. The UI says "Ready, run `start ota` on the target now". DFU32 scans for up to `arm_timeout_s`, which defaults to 600 s. WiFi stays up during the scan.
 5. The operator runs `start ota` on the repeater, over USB serial or remotely over LoRa as admin **[verified: no serial-only guard]**. The app starts advertising buttonless DFU at its own MAC.
@@ -288,7 +288,7 @@ A failure *before* START (scan, connect, buttonless, identify) doesn't touch the
 
 ## 7. Orchestrator (job state machine)
 
-There is one job at a time, globally. While a job is active, scan, stage and flash requests get `409 Busy`.
+There is one job at a time, globally. While a job is active, scan, stage and flash requests get `409 Busy`, and so do target `PUT`/`DELETE` and the console's BLE and staging commands (they share one device-wide lease, `components/job`).
 
 ```mermaid
 stateDiagram-v2
@@ -312,6 +312,8 @@ stateDiagram-v2
     SUCCEEDED --> IDLE
     FAILED --> IDLE
 ```
+
+Also: VERIFYING_STAGED → FAILED (nothing staged, re-hash fails), and RADIO_HANDOVER → RESTORING (abort or deadline during the handover). Before the handover any failure or abort goes straight to FAILED; from RADIO_HANDOVER on, every exit goes through RESTORING so WiFi comes back. A finished job's state stays visible in `/status` until the next job starts. The state machine is pure and host-tested (`dfu32_core/job.hpp`); `components/job` drives it on its own task.
 
 ### 7.1 Radio handover
 
@@ -342,8 +344,8 @@ stateDiagram-v2
 
 1. **Per-operation timeouts** in the DFU client (§6.2).
 2. **Run deadline:** an `esp_timer` armed when WiFi stops. Deadline = `120 s + attempts × (60 s + bin.size / 2 kB·s)`, capped at `dfu_deadline_max_s` (default 1200 s). When it fires, DFU32 aborts the BLE link, restores WiFi, and records `DEADLINE_EXCEEDED`.
-3. **Task watchdog:** the DFU task subscribes to the TWDT (10 s) and feeds it on progress or state change. A wedged NimBLE call triggers a panic and reboot.
-4. **Restore verification:** if WiFi isn't connected within 60 s of restore, DFU32 retries once, then calls `esp_restart()`.
+3. **Stall watchdog:** every blocking wait inside the BLE code (scan, notification, disconnect, back-off, retry sleep) records a heartbeat at least every 250 ms. While a flash runs, an `esp_timer` checks it every 5 s; after 30 s of silence it calls `esp_system_abort()` (core dump, reboot, then `ABORTED_BY_REBOOT` at boot). This replaces subscribing the task to the 10 s TWDT, which a legitimate blocking NimBLE call (the 10 s connect timeout, service discovery) could trip.
+4. **Restore verification:** if WiFi isn't connected within 60 s of restore, DFU32 retries once, then calls `esp_restart()`. This applies only when WiFi was connected at the handover; with the access point already down (an offline re-flash) it just restarts the driver. The run record is written before the restore.
 5. **Boot invariants:** WiFi always starts at boot. An NVS flag `job_active` is set when a job begins and cleared when it ends. If it's set at boot, the previous run is recorded as `ABORTED_BY_REBOOT`, along with whether START had been reached.
 
 ---
@@ -406,14 +408,15 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
-| `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. The tuning knobs follow in M3b: |
+| `dfu_deadline` | u32 | Cap on the §7.3 run deadline (`dfu_deadline_max_s`), default 1200, 120–7200. |
+| `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
 | ↳ `board` | str ≤ 31 | free-form, matched against `manifest.boards` |
 | ↳ `mac`, `addr_type` | 6 B, u8 | **app** MAC (§5.2) and address type |
 | ↳ `manifest_url` | str ≤ 255 | |
 | ↳ `max_app_size` | u32 | default 798 720 |
-| ↳ `prn`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs, with the defaults above |
+| ↳ `prn`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs: 8 (1–8), 3 (1–10), 600 (10–3600), 500 (0–5000), 5000 (500–60000) |
 | ↳ `last_ok_version`, `last_ok_at` | str, u64 | updated on success |
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
@@ -447,7 +450,17 @@ The API is served by `esp_http_server` on port 80, with an mDNS name of `dfu32-X
 
 **Authenticated:** everything else.
 
-After 5 failed auth attempts, responses are delayed 1 s for 60 s.
+After 5 failed auth attempts within a minute, authenticated responses are delayed 1 s for 60 s.
+
+Conventions (M3b):
+- Errors are `{"error":"<CODE>","detail":"…"}` with `400` (bad body: unknown fields are refused), `401` (missing or wrong token), `403 UNCLAIMED`, `404`, `405`, `409` (`BUSY`, `TARGET_LIMIT`, `ALREADY_CLAIMED`, `NO_JOB`), `413` (bodies are capped at 4 KB), `422` / `502` (a `check` that fails: §13.3 code, `502` for `HTTP_ERROR`).
+- `PUT /targets/{id}` merges the fields present into the stored record (a new target starts from defaults), so a `GET` result can be sent back: `last_ok_*` are read-only and ignored. A target created on the console has no id and adopts the first id it is `PUT` under.
+- `POST /stage` takes `{"force":bool,"url":"…"}`; `url` overrides the manifest URL for that job only.
+- `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.
+- `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
+- `POST /system/reboot` is refused during a job unless `?force=1`.
+- `GET /` serves a placeholder until the M4 UI.
+- `POST /system/ota` arrives with M4.
 
 | Method & path | Purpose |
 |---|---|
@@ -662,7 +675,7 @@ The `runlog` partition is a ring of 4 KB slots: 14 slots on 4 MB, 16 on 8 MB. A 
   - `bootloader`, `bootloader_class`, `mtu`, `packet_size`, `conn_interval_x125`, `rate_x10_kBps`, `reset_reason`;
   - `attempts[]` (interval, PRN, outcome, kind, bytes acknowledged).
 
-  `wifi_off` was added in M3a (console `flash --wifi on|off`). Still to come in M3b: trigger and source, and wall-clock time from SNTP.
+  `wifi_off` was added in M3a (console `flash --wifi on|off`). M3b added `target_id`, `trigger` (`console` / `api`), `source` (`staged` / `manifest`) and `started_unix` (wall clock from SNTP, 0 if not synced). For API runs, `error` carries the job's code (`TARGET_NOT_FOUND`, `DEADLINE_EXCEEDED`, `ABORTED`, or the DFU error).
 - The log since the run started, trimmed from the front to fit the 4 KB slot (normally about 3 KB).
 - Slot layout: magic `DF32RUN1`, seq, lengths and a CRC32 over the payload (`components/runlog/include/runlog/run_log.hpp`). A torn or corrupted slot is ignored, and the next record goes into the slot after the newest valid one.
 - Console: `runs` lists records, `run N` shows one with its log, and `logs [bytes]` shows recent captured output.
@@ -709,7 +722,12 @@ The `dfu_proto` component has no IDF or NimBLE dependency, so it can be tested o
 
 ### 14.2 On-device fault injection (`CONFIG_DFU32_DEBUG_ENDPOINTS=y`, never in release builds)
 
-`POST /api/v1/debug/fault {"kind":…, "at_bytes":N}` drops the link, stalls the task (to test the watchdog), skips a PRN check, corrupts one chunk (to test the CRC path end to end), or simulates a hang with WiFi off (to test the deadline restore).
+`POST /api/v1/debug/fault` arms faults for the next flash job (M3b):
+- `{"restore_fail":true}`: both restore attempts count as failed, so the restore watchdog reboots (§7.3 layer 4);
+- `{"deadline_s":N}`: use an N-second run deadline (layer 2);
+- `{"stall_s":N}`: block the DFU task for N s at the handover without a heartbeat (layer 3 reboots after 30 s).
+
+Still planned: dropping the link, skipping a PRN check and corrupting one chunk at a given byte offset.
 
 ### 14.3 Fake bootloader fixture (optional, recommended)
 
@@ -754,17 +772,19 @@ The setup:
 ```
 dfu32/
   CMakeLists.txt, sdkconfig.defaults, partitions/{4mb,8mb}.csv, boards/<profile>/sdkconfig.defaults
-  main/                  app_main, bench console (orchestrator + API in M3b), Kconfig.projbuild
+  main/                  app_main, bench console, Kconfig.projbuild
   components/
     dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, transfer engine, retry policy, staging format
-    dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config
+    dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config,
+                         job state machine, API routes / auth helpers / device settings
     dfu_ble/             ITransport on esp-nimble-cpp; scan, probe, flash with retries
     staging/             staging partition reader + partition / PSA SHA-256 adapters for the writer
     fetch/               esp_http_client: manifest, .dat, .bin streamed into staging
     net/                 WiFi STA, stop/restore, mDNS, SNTP
-    config/              NVS settings (targets now; device config in M3b)
+    config/              NVS settings: target record, device settings, token hash
+    job/                 orchestrator task, busy lease, handover, deadline, stall watchdog, restore check
     runlog/              log ring + run-record partition
-    api/                 (M3b) esp_http_server routes, auth; embedded UI in M4
+    api/                 esp_http_server routes, claim / bearer auth; embedded UI in M4
     indicator/           (M4) LED + button
   tools/                 dfu32_pack.py, dfu32_stage_image.py, layout and size checks
   test/host/             Catch2 tests for the pure components
