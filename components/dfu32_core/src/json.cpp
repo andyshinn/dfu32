@@ -35,6 +35,10 @@ size_t Node::size() const noexcept {
     return static_cast<size_t>(cJSON_GetArraySize(n_));
 }
 
+std::string_view Node::key() const noexcept {
+    return n_ != nullptr && n_->string != nullptr ? std::string_view(n_->string) : std::string_view();
+}
+
 std::string Node::str() const {
     return is_string() && n_->valuestring != nullptr ? std::string(n_->valuestring) : std::string();
 }
@@ -83,6 +87,18 @@ ObjectWriter::ObjectWriter() : obj_(cJSON_CreateObject()), ok_(obj_ != nullptr) 
 
 ObjectWriter::~ObjectWriter() { cJSON_Delete(obj_); }
 
+ObjectWriter::ObjectWriter(ObjectWriter&& other) noexcept : obj_(other.obj_), ok_(other.ok_) {
+    other.obj_ = nullptr;
+    other.ok_ = false;
+}
+
+cJSON* ObjectWriter::release() noexcept {
+    cJSON* o = ok_ ? obj_ : nullptr;
+    if (o != nullptr) obj_ = nullptr;
+    ok_ = false;
+    return o;
+}
+
 ObjectWriter& ObjectWriter::add(const char* key, std::string_view value) {
     if (ok_) {
         const std::string v(value);
@@ -101,13 +117,107 @@ ObjectWriter& ObjectWriter::add_bool(const char* key, bool value) {
     return *this;
 }
 
-std::string ObjectWriter::str() const {
-    if (!ok_) return {};
-    char* text = cJSON_PrintUnformatted(obj_);
+ObjectWriter& ObjectWriter::add_null(const char* key) {
+    if (ok_) ok_ = cJSON_AddNullToObject(obj_, key) != nullptr;
+    return *this;
+}
+
+namespace {
+
+// Attaches `child` (owned) to `parent`; frees it and returns false on failure.
+bool attach(cJSON* parent, const char* key, cJSON* child) {
+    if (child == nullptr) return false;
+    const bool ok = key != nullptr ? cJSON_AddItemToObject(parent, key, child) != 0
+                                   : cJSON_AddItemToArray(parent, child) != 0;
+    if (!ok) cJSON_Delete(child);
+    return ok;
+}
+
+cJSON* parse_value(std::string_view json) {
+    const std::string buf(json);
+    const char* end = nullptr;
+    return cJSON_ParseWithLengthOpts(buf.c_str(), buf.size() + 1, &end, 1);
+}
+
+std::string print(const cJSON* v, bool ok) {
+    if (!ok || v == nullptr) return {};
+    char* text = cJSON_PrintUnformatted(v);
     if (text == nullptr) return {};
     std::string out(text);
     cJSON_free(text);
     return out;
 }
+
+}  // namespace
+
+ObjectWriter& ObjectWriter::add(const char* key, ObjectWriter&& child) {
+    cJSON* c = child.release();
+    if (ok_) {
+        ok_ = attach(obj_, key, c);
+    } else {
+        cJSON_Delete(c);
+    }
+    return *this;
+}
+
+ObjectWriter& ObjectWriter::add(const char* key, ArrayWriter&& child) {
+    cJSON* c = child.release();
+    if (ok_) {
+        ok_ = attach(obj_, key, c);
+    } else {
+        cJSON_Delete(c);
+    }
+    return *this;
+}
+
+ObjectWriter& ObjectWriter::add_json(const char* key, std::string_view json) {
+    if (ok_) ok_ = attach(obj_, key, parse_value(json));
+    return *this;
+}
+
+ArrayWriter::ArrayWriter() : arr_(cJSON_CreateArray()), ok_(arr_ != nullptr) {}
+
+ArrayWriter::~ArrayWriter() { cJSON_Delete(arr_); }
+
+ArrayWriter::ArrayWriter(ArrayWriter&& other) noexcept : arr_(other.arr_), ok_(other.ok_) {
+    other.arr_ = nullptr;
+    other.ok_ = false;
+}
+
+cJSON* ArrayWriter::release() noexcept {
+    cJSON* a = ok_ ? arr_ : nullptr;
+    if (a != nullptr) arr_ = nullptr;
+    ok_ = false;
+    return a;
+}
+
+ArrayWriter& ArrayWriter::push(std::string_view value) {
+    if (ok_) {
+        const std::string v(value);
+        ok_ = attach(arr_, nullptr, cJSON_CreateString(v.c_str()));
+    }
+    return *this;
+}
+
+ArrayWriter& ArrayWriter::push(ObjectWriter&& child) {
+    cJSON* c = child.release();
+    if (ok_) {
+        ok_ = attach(arr_, nullptr, c);
+    } else {
+        cJSON_Delete(c);
+    }
+    return *this;
+}
+
+ArrayWriter& ArrayWriter::push_json(std::string_view json) {
+    if (ok_) ok_ = attach(arr_, nullptr, parse_value(json));
+    return *this;
+}
+
+size_t ArrayWriter::size() const noexcept { return ok_ ? static_cast<size_t>(cJSON_GetArraySize(arr_)) : 0; }
+
+std::string ArrayWriter::str() const { return print(arr_, ok_); }
+
+std::string ObjectWriter::str() const { return print(obj_, ok_); }
 
 }  // namespace dfu32::json

@@ -10,6 +10,19 @@
 
 namespace dfu32 {
 
+/// Tuning-knob defaults and limits (SPEC.md §6, §9.1).
+inline constexpr uint16_t kDefaultPrn = 8;            // also the cap (dfu::kMaxSafePrn)
+inline constexpr uint16_t kDefaultMaxAttempts = 3;
+inline constexpr uint16_t kMaxAttemptsLimit = 10;
+inline constexpr uint16_t kDefaultArmTimeoutS = 600;
+inline constexpr uint16_t kMinArmTimeoutS = 10;
+inline constexpr uint16_t kMaxArmTimeoutS = 3600;
+inline constexpr uint16_t kDefaultStartSettleMs = 500;
+inline constexpr uint16_t kMaxStartSettleMs = 5000;
+inline constexpr uint16_t kDefaultPrnTimeoutMs = 5000;
+inline constexpr uint16_t kMinPrnTimeoutMs = 500;
+inline constexpr uint16_t kMaxPrnTimeoutMs = 60000;
+
 struct TargetConfig {
     std::string id;            // slug [a-z0-9-], 1-31 chars; "" = not set yet
     std::string name;          // display name, <= 63
@@ -18,6 +31,17 @@ struct TargetConfig {
     uint8_t addr_type = 1;     // 0 public, 1 random
     std::string manifest_url;  // http://..., <= 255
     uint32_t max_app_size = 0; // 0 = default for the image's device type
+
+    // Tuning knobs (per target, SPEC.md §9.1).
+    uint16_t prn = kDefaultPrn;                    // 1..8 (receipts acknowledge arrival, not flash writes)
+    uint16_t max_attempts = kDefaultMaxAttempts;   // 1..10
+    uint16_t arm_timeout_s = kDefaultArmTimeoutS;  // 10..3600
+    uint16_t start_settle_ms = kDefaultStartSettleMs;  // 0..5000
+    uint16_t prn_timeout_ms = kDefaultPrnTimeoutMs;    // 500..60000
+
+    // Updated by DFU32 after a successful flash; read-only over the API.
+    std::string last_ok_version;
+    uint64_t last_ok_at = 0;   // unix seconds (0 = unknown / clock not synced)
 
     /// id, or "target" when none is set (the staging header needs one).
     std::string effective_id() const { return id.empty() ? std::string("target") : id; }
@@ -45,10 +69,28 @@ std::string normalize_mac(const std::string& mac);
 /// All fields at once; the first problem, or "".
 std::string validate(const TargetConfig& t);
 
-/// JSON form, used as the single atomic NVS record (and by the M3b API).
+/// Resets every field that fails validation to its default (an invalid MAC
+/// or URL becomes unset) and returns how many were reset. Used when loading
+/// a stored record and before a PUT merge, so a record that breaks a newer
+/// rule can still be loaded and repaired.
+unsigned sanitize(TargetConfig& t);
+
+namespace json {
+class ObjectWriter;
+}
+
+/// JSON form, used as the single atomic NVS record and by the HTTP API.
 std::string to_json(const TargetConfig& t);
+void write_json(json::ObjectWriter& w, const TargetConfig& t);
 /// Parses to_json() output; unknown keys are ignored, missing ones keep
 /// their defaults. Returns false on malformed JSON or wrongly typed fields.
 bool from_json(std::string_view json, TargetConfig& out);
+
+/// PUT /api/v1/targets/{id}: merges the fields present in `body` into `t`
+/// (a new target starts from defaults) and validates the result. `id` comes
+/// from the path; a body "id" must match it. last_ok_* are read-only and
+/// ignored, so a GET result can be sent back. Unknown fields are refused.
+/// Returns "" on success, otherwise the reason (and `t` is unchanged).
+std::string apply_json(std::string_view body, const std::string& id, TargetConfig& t);
 
 }  // namespace dfu32

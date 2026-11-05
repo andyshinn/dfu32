@@ -4,6 +4,7 @@ idf_component_register(
         "main.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
+        api
         app_update
         config
         console
@@ -16,6 +17,7 @@ idf_component_register(
         mbedtls
         esp_timer
         fetch
+        job
         net
         nvs_flash
         runlog

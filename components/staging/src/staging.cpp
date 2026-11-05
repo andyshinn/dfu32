@@ -123,4 +123,13 @@ StagingVerify StagedImage::verify(uint32_t max_app_size) {
     return v;
 }
 
+bool invalidate_staging() {
+    const esp_partition_t* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, kPartitionSubtypeStaging, "staging");
+    if (p == nullptr) return false;
+    const esp_err_t err = esp_partition_erase_range(p, 0, 4096);
+    if (err != ESP_OK) ESP_LOGE(TAG, "erasing the staging header failed: %s", esp_err_to_name(err));
+    else ESP_LOGI(TAG, "staged image invalidated");
+    return err == ESP_OK;
+}
+
 }  // namespace dfu32

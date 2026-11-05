@@ -49,4 +49,8 @@ private:
     dfu::StagingHeader header_{};
 };
 
+/// Erases the header sector, so nothing is staged any more (DELETE
+/// /api/v1/staging). The image bytes stay but are no longer trusted.
+bool invalidate_staging();
+
 }  // namespace dfu32

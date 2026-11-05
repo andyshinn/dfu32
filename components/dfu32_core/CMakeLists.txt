@@ -4,7 +4,9 @@
 # espressif/cjson in the firmware (idf_component.yml), the same upstream
 # release fetched here for host builds.
 set(DFU32_CORE_SRCS
+    src/api_core.cpp
     src/errors.cpp
+    src/job.cpp
     src/json.cpp
     src/manifest.cpp
     src/stage_writer.cpp

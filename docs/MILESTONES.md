@@ -91,7 +91,16 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - `components/config`: target settings as one atomic NVS record (`tgt0`), reading an M1 target until the first save;
     - console: `wifi`, `target board|url|id|maxapp|clear`, `check`, `stage`;
     - `tools/dfu32_pack.py`, with a golden manifest shared with the C++ tests.
-  - **M3b, orchestrator and API:** the job FSM (arm, then wait), WiFi handover with the run deadline and restore check, the HTTP API with token claim, the BLE scan endpoint, and the WiFi on/off bench comparison.
+  - **M3b, orchestrator and API (implemented, awaiting bench):**
+    - `components/job`: one job at a time on its own task (stage, or flash = arm then wait); a device-wide lease so the console and the API's scan can't collide with a job (`409 Busy`);
+    - radio handover: WiFi stays up while fetching and waiting, and stops only once the target is seen (per request `wifi_off`, default config `wifi_off_dfu`);
+    - SPEC §7.3 layers: the run deadline (`esp_timer`, `DEADLINE_EXCEEDED`), a stall watchdog fed by heartbeats from every blocking BLE wait (reboots after 30 s of silence), restore verification (retry once, then reboot), the `job_active` marker;
+    - `components/api`: the §10.1 endpoints on `esp_http_server`, claim-on-first-use token (only its SHA-256 in NVS), constant-time compare, the 5-failure throttle, mDNS `_http._tcp`; fault injection behind `CONFIG_DFU32_DEBUG_ENDPOINTS`;
+    - pure, host-tested parts in `dfu32_core`: the job state machine and request parsing, route matching, base64url, the auth throttle, device settings, per-target tuning knobs, scan hints;
+    - run records gain `target_id`, `trigger`, `source` and `started_unix`;
+    - console: `job [abort]`, `token [rotate|clear]`.
+
+    The bench checklist is in [BENCH.md §6](BENCH.md#6-over-the-http-api-m3b).
 
 ## M4: UI, provisioning & polish (3–4 days)
 

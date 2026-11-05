@@ -47,6 +47,8 @@ struct StageOptions {
     bool force = false;        // download even if the staged image already matches
     uint64_t staged_at = 0;    // unix seconds for the header (0 = unknown)
     ProgressFn progress;
+    /// Polled between steps and per received chunk; true stops with ABORTED.
+    std::function<bool()> cancelled;
 };
 
 struct StageReport {

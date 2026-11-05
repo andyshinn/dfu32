@@ -6,6 +6,10 @@
 // first save replaces it.
 #pragma once
 
+#include <array>
+#include <cstdint>
+
+#include "dfu32_core/api_core.hpp"
 #include "dfu32_core/target_config.hpp"
 
 namespace dfu32::config {
@@ -20,5 +24,16 @@ bool save_target(const TargetConfig& t);
 
 /// Removes all target-0 keys.
 bool erase_target();
+
+/// Device-level settings (SPEC.md §9.1): keys hostname, ntp_server,
+/// wifi_off_dfu, dfu_deadline. net reads hostname/ntp_server at boot, so
+/// changes to those apply after a reboot.
+bool load_device(api::DeviceConfig& out);
+bool save_device(const api::DeviceConfig& c);
+
+/// SHA-256 of the API token (SPEC.md §9.3). False when unclaimed.
+bool load_token_hash(std::array<uint8_t, 32>& out);
+bool save_token_hash(const std::array<uint8_t, 32>& hash);
+bool clear_token();
 
 }  // namespace dfu32::config

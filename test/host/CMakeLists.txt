@@ -22,11 +22,13 @@ add_subdirectory(${DFU32_ROOT}/components/runlog ${CMAKE_BINARY_DIR}/runlog)
 add_subdirectory(${DFU32_ROOT}/components/dfu32_core ${CMAKE_BINARY_DIR}/dfu32_core)
 
 add_executable(dfu_proto_tests
+    test_api_core.cpp
     test_bootloader_info.cpp
     test_chunk.cpp
     test_crc16.cpp
     test_image.cpp
     test_init_packet.cpp
+    test_job.cpp
     test_json.cpp
     test_manifest.cpp
     test_protocol.cpp

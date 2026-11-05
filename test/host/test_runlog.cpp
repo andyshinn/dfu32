@@ -174,6 +174,10 @@ TEST_CASE("Run record JSON escapes and reads back", "[runlog]") {
     r.image_size = 413680;
     r.target_erased = "yes";
     r.wifi_off = true;
+    r.target_id = "attic";
+    r.trigger = "api";
+    r.source = "staged";
+    r.started_unix = 1793000000;
     r.attempts.push_back({1, 8, 8, "LINK_LOST", "LINK_OR_OVERRUN", 27328});
     r.attempts.push_back({2, 30, 8, "OK", "NONE", 413680});
     const std::string j = runlog::to_json(r);
@@ -187,6 +191,10 @@ TEST_CASE("Run record JSON escapes and reads back", "[runlog]") {
     CHECK(runlog::json_get_uint(j, "missing", 99) == 99);
     CHECK(j.find("\"attempts\":[{\"n\":1,") != std::string::npos);
     CHECK(j.find("\"wifi_off\":true") != std::string::npos);
+    CHECK(runlog::json_get_string(j, "trigger") == "api");
+    CHECK(runlog::json_get_string(j, "source") == "staged");
+    CHECK(runlog::json_get_string(j, "target_id") == "attic");
+    CHECK(runlog::json_get_uint(j, "started_unix") == 1793000000);
     // The whole record is valid JSON (the M3b API serves it as-is).
     dfu32::json::Doc doc;
     REQUIRE(doc.parse(j));

@@ -12,6 +12,7 @@
 
 using dfu32::json::Doc;
 using dfu32::json::Node;
+using dfu32::json::ArrayWriter;
 using dfu32::json::ObjectWriter;
 
 TEST_CASE("JSON: objects, arrays and scalars", "[json]") {
@@ -129,4 +130,31 @@ TEST_CASE("JSON: object writer escapes and round-trips", "[json]") {
     CHECK(d.root().get("neg").integer(i));
     CHECK(i == -3);
     CHECK(d.root().get("t").boolean());
+}
+
+TEST_CASE("JSON: nested writers, embedded JSON and member names", "[json]") {
+    ObjectWriter child;
+    child.add("a", int64_t{1}).add_null("none");
+    ArrayWriter arr;
+    arr.push("x").push_json(R"({"k":[1,2]})");
+    ObjectWriter inner;
+    inner.add_bool("ok", false);
+    arr.push(std::move(inner));
+    CHECK(arr.size() == 3);
+    ObjectWriter w;
+    w.add("child", std::move(child)).add("list", std::move(arr)).add_json("raw", R"({"seq":7})");
+    CHECK(w.str() == R"({"child":{"a":1,"none":null},"list":["x",{"k":[1,2]},{"ok":false}],"raw":{"seq":7}})");
+    CHECK(child.str().empty());  // NOLINT(bugprone-use-after-move): moved-from writers are empty
+
+    ObjectWriter bad;
+    bad.add_json("raw", "{nope");
+    CHECK(bad.str().empty());  // an unparseable embed fails the whole writer
+
+    Doc d;
+    REQUIRE(d.parse(R"({"first":1,"second":"x"})"));
+    const auto items = d.root().items();
+    REQUIRE(items.size() == 2);
+    CHECK(items[0].key() == "first");
+    CHECK(items[1].key() == "second");
+    CHECK(d.root().key().empty());
 }
