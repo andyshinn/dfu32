@@ -70,8 +70,10 @@ jobs:
           test -n "$idf_ver" || { echo "::error::could not read IDF version"; exit 1; }
           echo "key-prefix=ccache-v1-idf${idf_ver}-${{ matrix.board }}" >> "$GITHUB_OUTPUT"
 
-      # Caches are saved only from main (see "Save ccache"); PR runs restore
-      # the most recent main cache for this board via restore-keys.
+      # Every run saves under a unique key. Caches are scoped to the ref that
+      # saved them, and a restore-keys prefix match searches the current ref
+      # first, then the base branch: a PR run gets its own latest cache for
+      # this board, falling back to main's on its first run.
       - name: Restore ccache
         id: ccache-restore
         uses: actions/cache/restore@v5
@@ -92,11 +94,10 @@ jobs:
         if: always()
         run: ccache --show-stats || true
 
-      # Save only on pushes to main so PR runs don't fill the repo's 10 GB
-      # cache quota and evict the main caches PRs restore from. Saved even
-      # when the build fails: a partially warm cache still helps next time.
+      # Saved even when the build fails: a partially warm cache still helps
+      # the next attempt.
       - name: Save ccache
-        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ccache-restore.outcome == 'success'
+        if: always() && steps.ccache-restore.outcome == 'success'
         uses: actions/cache/save@v5
         with:
           path: .ccache
