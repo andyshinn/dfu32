@@ -154,6 +154,8 @@ Tuning knobs:
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 (already in BL at MAC+1) | same | 244 B, PRN 16, **interval 7.5 ms** | 0.4 s at 29.5 kB/s, then `10 03 06` OPERATION_FAILED | **failed** |
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 7.5 ms** | link lost about 4.5 s in | **failed** |
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 11.25 ms** | link lost about 3.4 s in | **failed** |
+| 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, default range → **30 ms negotiated** | 44.8 s (9.2 kB/s) | 51.0 s |
+| 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 20 ms** | **33.2 s (12.4 kB/s)** | **38.4 s** |
 
 PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash.
 
@@ -162,8 +164,12 @@ PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardles
 - With PRN 16, up to 16 unwritten packets can pile up, giving `10 03 06` OPERATION_FAILED or a bootloader reset.
 - PRN 8 did **not** fix it at 7.5 or 11.25 ms. Receipts acknowledge *arrival*, so DFU32 keeps sending while earlier packets still wait behind a lazy page erase (about 85 ms per 4 KB page). The PRN window therefore does not bound OTAFIX's pending writes.
 - What bounds them is the arrival rate during an erase: at most about 8 packets per 85 ms, roughly 94 packets/s or about 23 kB/s (an estimate from the source, not measured). The default interval (about 41 packets/s observed) stays well inside that.
+- **Measured:** throughput scales with 1/interval at about **one 244-byte packet per connection event** (30 ms: 38 packets/s, 20 ms: 51 packets/s). That suggests data length extension isn't in effect, to be checked in M2.
+  - The default 15–30 ms range negotiates 30 ms.
+  - 11.25 ms works out to about 89 packets/s, right at the ~94 packets/s OTAFIX erase limit, which fits it failing.
+  - 20 ms works (+35% over the default). 15 ms (about 67 packets/s) is the next test.
 - Options:
-  - an interval between the default and 11.25 ms;
+  - an interval between the default and 11.25 ms (**20 ms confirmed, 15 ms pending**);
   - pacing around 4 KB page boundaries, an experimental `--page-pause` idea;
   - M2 retries falling back to the default interval and PRN after a link loss or `06` in the stream.
 - The 2 s supervision timeout cut the buttonless jump from 4.5 s to 2.4 s.
