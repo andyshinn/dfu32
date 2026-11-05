@@ -65,6 +65,14 @@ Status precheck_image(const Manifest& m, std::span<const uint8_t> dat, const Sta
 /// The staged header describes exactly this manifest's .bin and .dat.
 bool same_image(const Manifest& m, const dfu::StagingHeader& staged) noexcept;
 
+/// An already-staged image is being reused for `meta` (another target id,
+/// board or manifest URL may now own it). Rewrites the header sector when
+/// target_id, board, version, manifest_url or manifest_sha256 differ, so the
+/// header never attributes the image to the wrong target; the image data is
+/// untouched. `rewritten` says whether a write happened.
+Status refresh_staged_header(IFlashRegion& region, const dfu::StagingHeader& current, const Manifest& m,
+                             const StageMeta& meta, bool& rewritten);
+
 class StagingWriter {
 public:
     StagingWriter(IFlashRegion& region, ISha256& sha) : region_(region), sha_(sha) {}
@@ -77,6 +85,8 @@ public:
     Status finish();
 
     uint32_t written() const noexcept { return written_; }
+    /// The previous image's header has been (or may have been) erased.
+    bool invalidated_previous() const noexcept { return invalidated_; }
     uint32_t total() const noexcept { return header_.bin_size; }
     const dfu::InitPacket& init() const noexcept { return init_; }
     const dfu::StagingHeader& header() const noexcept { return header_; }
@@ -90,6 +100,7 @@ private:
     State state_ = State::Idle;
     uint32_t written_ = 0;
     uint32_t erased_to_ = 0;  // data bytes erased so far (sector multiple)
+    bool invalidated_ = false;
     dfu::InitPacket init_{};
     dfu::StagingHeader header_{};
 };

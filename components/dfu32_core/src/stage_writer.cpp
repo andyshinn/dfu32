@@ -19,6 +19,22 @@ bool hash_of(ISha256& sha, std::span<const uint8_t> data, Sha256& out) {
 
 std::string bytes(uint64_t n) { return std::to_string(n) + " B"; }
 
+// Header sector must already be erased. Writes, reads back, decodes.
+Status write_header(IFlashRegion& region, const dfu::StagingHeader& h) {
+    std::array<uint8_t, dfu::kStagingHeaderSize> hdr{};
+    if (dfu::encode_staging_header(h, hdr) != dfu::StagingHeaderError::Ok) {
+        return Status::fail(Err::StagingIo, "header encode failed");
+    }
+    if (!region.write(0, hdr)) return Status::fail(Err::StagingIo, "header write failed");
+    std::array<uint8_t, dfu::kStagingHeaderSize> check{};
+    dfu::StagingHeader decoded;
+    if (!region.read(0, check) || check != hdr ||
+        dfu::decode_staging_header(check, decoded) != dfu::StagingHeaderError::Ok) {
+        return Status::fail(Err::StagingIo, "header read-back failed");
+    }
+    return {};
+}
+
 }  // namespace
 
 Status precheck_image(const Manifest& m, std::span<const uint8_t> dat, const StageMeta& meta, uint32_t region_size,
@@ -68,6 +84,29 @@ bool same_image(const Manifest& m, const dfu::StagingHeader& staged) noexcept {
            staged.dat_sha256 == m.dat.sha256;
 }
 
+Status refresh_staged_header(IFlashRegion& region, const dfu::StagingHeader& current, const Manifest& m,
+                             const StageMeta& meta, bool& rewritten) {
+    rewritten = false;
+    if (current.target_id == meta.target_id && current.board == meta.board && current.version == m.version &&
+        current.manifest_url == meta.manifest_url && current.manifest_sha256 == meta.manifest_sha256) {
+        return {};
+    }
+    dfu::StagingHeader h = current;
+    h.target_id = meta.target_id;
+    h.board = meta.board;
+    h.version = m.version;
+    h.manifest_url = meta.manifest_url;
+    h.manifest_sha256 = meta.manifest_sha256;
+    h.staged_at = meta.staged_at;
+    std::array<uint8_t, dfu::kStagingHeaderSize> probe{};
+    if (dfu::encode_staging_header(h, probe) != dfu::StagingHeaderError::Ok) {
+        return Status::fail(Err::ManifestInvalid, "target id, board, version or URL too long for the staging header");
+    }
+    rewritten = true;  // from the erase on, the old header is gone
+    if (!region.erase(0, kFlashSector)) return Status::fail(Err::StagingIo, "erasing the header failed");
+    return write_header(region, h);
+}
+
 Status StagingWriter::fail(Status s) {
     state_ = State::Failed;
     return s;
@@ -76,6 +115,7 @@ Status StagingWriter::fail(Status s) {
 Status StagingWriter::begin(const Manifest& m, std::span<const uint8_t> dat, const StageMeta& meta) {
     state_ = State::Failed;
     written_ = 0;
+    invalidated_ = false;
     header_ = dfu::StagingHeader{};
     if (Status s = precheck_image(m, dat, meta, region_.size(), sha_, init_); !s.ok()) return s;
 
@@ -95,6 +135,7 @@ Status StagingWriter::begin(const Manifest& m, std::span<const uint8_t> dat, con
     // Header first: from here on the partition reads as "nothing staged".
     // Data sectors are erased as the body arrives (write()), so the HTTP
     // connection never sits idle through a multi-second bulk erase.
+    invalidated_ = true;  // set before the erase: a failed erase may still have cleared it
     if (!region_.erase(0, kFlashSector)) return fail(Status::fail(Err::StagingIo, "erasing the header failed"));
     erased_to_ = 0;
     if (!sha_.reset()) return fail(Status::fail(Err::StagingIo, "SHA-256 failed"));
@@ -155,17 +196,7 @@ Status StagingWriter::finish() {
         return fail(Status::fail(Err::DatCrcMismatch, "CRC16 of the .bin does not match the .dat"));
     }
 
-    std::array<uint8_t, dfu::kStagingHeaderSize> hdr{};
-    if (dfu::encode_staging_header(header_, hdr) != dfu::StagingHeaderError::Ok) {
-        return fail(Status::fail(Err::StagingIo, "header encode failed"));
-    }
-    if (!region_.write(0, hdr)) return fail(Status::fail(Err::StagingIo, "header write failed"));
-    std::array<uint8_t, dfu::kStagingHeaderSize> check{};
-    dfu::StagingHeader decoded;
-    if (!region_.read(0, check) || check != hdr ||
-        dfu::decode_staging_header(check, decoded) != dfu::StagingHeaderError::Ok) {
-        return fail(Status::fail(Err::StagingIo, "header read-back failed"));
-    }
+    if (Status hs = write_header(region_, header_); !hs.ok()) return fail(std::move(hs));
     state_ = State::Done;
     return {};
 }

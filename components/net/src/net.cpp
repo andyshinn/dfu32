@@ -7,6 +7,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "dfu32_core/target_config.hpp"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -38,6 +39,16 @@ std::atomic<bool> s_want_connect{true};
 std::atomic<uint32_t> s_backoff_ms{kBackoffMinMs};
 std::atomic<uint32_t> s_reconnects{0};
 std::atomic<uint8_t> s_last_reason{0};
+
+// Link state as seen from our side, so a retry never issues a second
+// esp_wifi_connect() while one is in flight or already associated.
+enum Link : uint8_t { kIdle, kConnecting, kAssociated };
+std::atomic<uint8_t> s_link{kIdle};
+// set_credentials() disconnects on purpose. Its STA_DISCONNECTED arrives later
+// on the event task; swallow that one event (if it comes within 2 s) so it
+// doesn't count as a drop or arm a retry against the new connection.
+std::atomic<int64_t> s_swallow_until_us{0};
+constexpr int64_t kSwallowWindowUs = 2000000;
 // Set once in init(); lwIP's SNTP keeps the server name pointer.
 char s_hostname[32] = {};
 char s_ntp_server[64] = "pool.ntp.org";
@@ -48,20 +59,38 @@ bool provisioned() {
 }
 
 void connect_now() {
-    if (s_stopped || !s_want_connect || !provisioned()) return;
+    if (s_stopped || !s_want_connect || s_link != kIdle || !provisioned()) return;
+    s_link = kConnecting;
     const esp_err_t err = esp_wifi_connect();
-    if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
+    if (err == ESP_OK || err == ESP_ERR_WIFI_CONN) return;  // CONN: already connecting
+    s_link = kIdle;
+    ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
+}
+
+// Disconnect on purpose (new credentials, forget).
+void local_disconnect() {
+    esp_timer_stop(s_retry);
+    if (s_link != kIdle) s_swallow_until_us = esp_timer_get_time() + kSwallowWindowUs;
+    esp_wifi_disconnect();  // synchronous: the driver is idle once it returns
+    s_link = kIdle;
+    xEventGroupClearBits(s_events, kGotIp);
 }
 
 void retry_cb(void*) { connect_now(); }
 
 void on_event(void*, esp_event_base_t base, int32_t id, void* data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        s_link = kIdle;
         s_backoff_ms = kBackoffMinMs;
         connect_now();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_link = kAssociated;
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
+        const int64_t until = s_swallow_until_us.exchange(0);
+        if (until != 0 && esp_timer_get_time() <= until) return;  // our own local_disconnect()
         s_last_reason = d->reason;
+        s_link = kIdle;
         xEventGroupClearBits(s_events, kGotIp);
         if (s_stopped || !s_want_connect || !provisioned()) return;
         const uint32_t wait = s_backoff_ms;
@@ -84,14 +113,22 @@ void load_settings() {
     std::snprintf(s_hostname, sizeof(s_hostname), "dfu32-%02x%02x", mac[4], mac[5]);
     nvs_handle_t h;
     if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return;
-    char buf[64];
-    size_t len = sizeof(buf);
-    if (nvs_get_str(h, "hostname", buf, &len) == ESP_OK && buf[0] != 0) {
-        std::snprintf(s_hostname, sizeof(s_hostname), "%s", buf);
+    // A stored hostname must be a legal DHCP/mDNS label; anything else (or
+    // too long for the buffer) keeps the default.
+    char host[sizeof(s_hostname)] = {};
+    size_t len = sizeof(host);
+    if (nvs_get_str(h, "hostname", host, &len) == ESP_OK) {
+        const std::string why = validate_hostname(host);
+        if (why.empty()) {
+            std::memcpy(s_hostname, host, sizeof(s_hostname));
+        } else {
+            ESP_LOGW(TAG, "ignoring stored hostname \"%s\": %s", host, why.c_str());
+        }
     }
-    len = sizeof(buf);
-    if (nvs_get_str(h, "ntp_server", buf, &len) == ESP_OK && buf[0] != 0) {
-        std::snprintf(s_ntp_server, sizeof(s_ntp_server), "%s", buf);
+    char ntp[sizeof(s_ntp_server)] = {};
+    len = sizeof(ntp);
+    if (nvs_get_str(h, "ntp_server", ntp, &len) == ESP_OK && ntp[0] != 0) {
+        std::memcpy(s_ntp_server, ntp, sizeof(s_ntp_server));
     }
     nvs_close(h);
 }
@@ -121,7 +158,11 @@ void start_sntp() {
 }  // namespace
 
 bool init() {
-    if (s_init) return true;
+    // One shot: a half-initialised driver can't be brought up a second time
+    // (esp_netif_create_default_wifi_sta asserts), so a failed init stays failed.
+    static bool attempted = false;
+    if (attempted) return s_init;
+    attempted = true;
     load_settings();
     s_events = xEventGroupCreate();
     if (s_events == nullptr) return false;
@@ -195,9 +236,7 @@ bool set_credentials(const std::string& ssid, const std::string& password) {
     cfg.sta.threshold.authmode = password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
     cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     s_want_connect = false;
-    esp_timer_stop(s_retry);
-    esp_wifi_disconnect();
-    xEventGroupClearBits(s_events, kGotIp);
+    local_disconnect();
     const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_config: %s", esp_err_to_name(err));
@@ -212,9 +251,7 @@ bool set_credentials(const std::string& ssid, const std::string& password) {
 bool forget() {
     if (!s_init) return false;
     s_want_connect = false;
-    esp_timer_stop(s_retry);
-    esp_wifi_disconnect();
-    xEventGroupClearBits(s_events, kGotIp);
+    local_disconnect();
     wifi_config_t cfg{};
     const bool ok = esp_wifi_set_config(WIFI_IF_STA, &cfg) == ESP_OK;
     s_want_connect = true;  // a later set_credentials() connects again
@@ -232,6 +269,7 @@ bool stop() {
     esp_timer_stop(s_retry);
     xEventGroupClearBits(s_events, kGotIp);
     const esp_err_t err = esp_wifi_stop();
+    s_link = kIdle;
     if (err != ESP_OK) ESP_LOGE(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
     else ESP_LOGI(TAG, "WiFi stopped for the BLE transfer");
     return err == ESP_OK;

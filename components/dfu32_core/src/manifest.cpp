@@ -97,7 +97,8 @@ Status parse_manifest(std::string_view text, std::string_view manifest_url, Mani
     }
     if (schema->as_int() > kManifestSchema) {
         return Status::fail(Err::ManifestUnsupported,
-                            "schema " + std::to_string(schema->as_int()) + " (this DFU32 understands 1)");
+                            "schema " + std::to_string(schema->as_int()) + " (this DFU32 understands up to " +
+                                std::to_string(kManifestSchema) + ")");
     }
     out.schema = static_cast<uint32_t>(schema->as_int());
 

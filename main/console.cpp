@@ -98,7 +98,7 @@ uint32_t stream_rate_x10(const dfu::TransferResult& t) {
 }
 
 runlog::RunRecord make_record(uint32_t seq, const ble::Mac& mac, const StagedImage& img, const ble::FlashReport& r,
-                              uint32_t started_s) {
+                              uint32_t started_s, bool wifi_off) {
     runlog::RunRecord rec;
     rec.seq = seq;
     rec.result = r.ok ? "SUCCEEDED" : "FAILED";
@@ -118,6 +118,7 @@ runlog::RunRecord make_record(uint32_t seq, const ble::Mac& mac, const StagedIma
     rec.bytes_acked = r.transfer.bytes_acked;
     rec.target_erased = r.target_erased ? "yes" : "no";
     rec.sys_reset_after_failure = r.sys_reset_after_failure;
+    rec.wifi_off = wifi_off;
     rec.bootloader = r.link.dis_fw_rev;
     rec.bootloader_class = dfu::to_string(r.link.bootloader.cls);
     rec.mtu = r.link.mtu;
@@ -176,7 +177,14 @@ int cmd_target(int argc, char** argv) {
             err = validate_target_id(value);
             t.id = value;
         } else if (field == "maxapp") {
-            t.max_app_size = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 0));
+            uint32_t bytes = 0;
+            if (!parse_u32(value, bytes)) {
+                std::printf("Not saved: '%s' is not a number of bytes (e.g. 802816 or 0xC4000; 0 = default)\n",
+                            value.c_str());
+                return 1;
+            }
+            err = validate_max_app_size(bytes);
+            t.max_app_size = bytes;
         } else if (field == "clear") {
             if (!config::erase_target()) {
                 std::printf("Failed to clear the target\n");
@@ -310,7 +318,7 @@ int cmd_stage(int argc, char** argv) {
     const Status s = fetch::stage(t, url, o, r);
     if (!s.ok()) {
         std::printf("STAGE FAILED: %s\n", s.str().c_str());
-        if (r.bytes) std::printf("The previous staged image was invalidated; stage again once this is fixed.\n");
+        if (r.invalidated) std::printf("The previous staged image was invalidated; stage again once this is fixed.\n");
         return 1;
     }
     if (r.reused) {
@@ -397,7 +405,7 @@ int cmd_flash(int argc, char** argv) {
     if (!has_flag(argc, argv, "--yes")) {
         std::printf("This ERASES the target's application and flashes the staged image.\n"
                     "Re-run as: flash --yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS]\n"
-                    "                       [--settle MS] [--wait S]\n");
+                    "                       [--settle MS] [--wait S] [--wifi on|off]\n");
         return 1;
     }
     StagedImage img;
@@ -434,11 +442,31 @@ int cmd_flash(int argc, char** argv) {
         o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
     }
 
+    // SPEC.md §7.1: WiFi off during the transfer is the provisional default;
+    // `--wifi on` keeps it up so the two can be compared in the run records.
+    // The console is attended, so it skips the M3b run deadline and simply
+    // restores WiFi afterwards.
+    bool wifi_off = false;
+    const char* wifi_opt = nullptr;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--wifi") == 0) wifi_opt = argv[i + 1];
+    }
+    if (!(wifi_opt != nullptr && std::strcmp(wifi_opt, "on") == 0) && net::status().initialised) {
+        std::printf("WiFi is off until the flash finishes (--wifi on keeps it up).\n");
+        std::fflush(stdout);
+        wifi_off = net::stop();
+    }
+
     const auto r = ble::flash(mac, img, img.header().bin_size, img.header().dat_bytes(), v.init, o);
+
+    if (wifi_off) {
+        const bool back = net::restore(30000);
+        std::printf("WiFi %s.\n", back ? "restored" : "restarted; still reconnecting in the background");
+    }
 
     uint32_t recorded = 0;
     if (run_log != nullptr) {
-        const std::string json = runlog::to_json(make_record(seq, mac, img, r, started_s));
+        const std::string json = runlog::to_json(make_record(seq, mac, img, r, started_s, wifi_off));
         recorded = run_log->append(json, runlog::idf::log_since(log_mark, runlog::kSlotPayloadMax));
         runlog::idf::job_end();
     }
@@ -607,7 +635,8 @@ void start_console() {
         "then SYS_RESET back to the app.",
         "[--no-reset] [--interval MS] [--wait S]", &cmd_probe);
     reg("flash", "Flash the staged image to the target (erases its app), retrying up to --attempts times.",
-        "--yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS] [--settle MS] [--wait S]",
+        "--yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS] [--settle MS] [--wait S] "
+        "[--wifi on|off]",
         &cmd_flash);
     reg("runs", "List recorded flash runs (newest first).", "[count]", &cmd_runs);
     reg("run", "Show one run record and its log tail.", "<N>", &cmd_run);

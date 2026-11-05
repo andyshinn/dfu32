@@ -194,6 +194,7 @@ Tuning knobs:
 | `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval, then halves PRN. |
 | `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
+| `--wifi on\|off` | off | WiFi is stopped for the flash and restored afterwards (SPEC §7.1, provisional default). `--wifi on` keeps it up. The run record's `wifi_off` shows which was used, for the M3b on/off comparison. |
 
 ## Bench results so far
 

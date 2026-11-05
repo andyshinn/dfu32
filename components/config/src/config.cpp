@@ -3,33 +3,33 @@
 
 #include <vector>
 
+#include "esp_log.h"
 #include "nvs.h"
 
 namespace dfu32::config {
 namespace {
 
+constexpr const char* TAG = "config";
 constexpr const char* kNs = "dfu32";
-constexpr const char* kMac = "tgt0_mac";
-constexpr const char* kType = "tgt0_type";
-constexpr const char* kId = "tgt0_id";
-constexpr const char* kName = "tgt0_name";
-constexpr const char* kBoard = "tgt0_board";
-constexpr const char* kUrl = "tgt0_url";
-constexpr const char* kMaxApp = "tgt0_maxapp";
+// Target 0 is one JSON record, so a save is a single NVS entry write: either
+// the old or the new record survives a failure or power cut, never a mix.
+constexpr const char* kTarget = "tgt0";
+// M1 builds stored only these two; read them when no record exists yet.
+constexpr const char* kLegacyMac = "tgt0_mac";
+constexpr const char* kLegacyType = "tgt0_type";
 
-void get_str(nvs_handle_t h, const char* key, std::string& out) {
+bool get_str(nvs_handle_t h, const char* key, std::string& out) {
     size_t len = 0;
-    if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len == 0) return;
+    if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len == 0) return false;
     std::vector<char> buf(len);
-    if (nvs_get_str(h, key, buf.data(), &len) == ESP_OK) out.assign(buf.data());
+    if (nvs_get_str(h, key, buf.data(), &len) != ESP_OK) return false;
+    out.assign(buf.data());
+    return true;
 }
 
-bool set_str(nvs_handle_t h, const char* key, const std::string& v) {
-    if (v.empty()) {
-        const esp_err_t e = nvs_erase_key(h, key);
-        return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;
-    }
-    return nvs_set_str(h, key, v.c_str()) == ESP_OK;
+bool erase_key(nvs_handle_t h, const char* key) {
+    const esp_err_t e = nvs_erase_key(h, key);
+    return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;
 }
 
 }  // namespace
@@ -40,15 +40,14 @@ bool load_target(TargetConfig& out) {
     const esp_err_t err = nvs_open(kNs, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) return true;  // nothing saved yet
     if (err != ESP_OK) return false;
-    get_str(h, kId, out.id);
-    get_str(h, kName, out.name);
-    get_str(h, kBoard, out.board);
-    get_str(h, kMac, out.mac);
-    get_str(h, kUrl, out.manifest_url);
-    uint8_t type = 1;
-    if (nvs_get_u8(h, kType, &type) == ESP_OK) out.addr_type = type;
-    uint32_t max_app = 0;
-    if (nvs_get_u32(h, kMaxApp, &max_app) == ESP_OK) out.max_app_size = max_app;
+    std::string json;
+    if (get_str(h, kTarget, json)) {
+        if (!from_json(json, out)) ESP_LOGE(TAG, "stored target record is corrupt; ignoring it");
+    } else {
+        get_str(h, kLegacyMac, out.mac);
+        uint8_t type = 1;
+        if (nvs_get_u8(h, kLegacyType, &type) == ESP_OK && type <= 1) out.addr_type = type;
+    }
     nvs_close(h);
     out.mac = normalize_mac(out.mac);
     return true;
@@ -57,10 +56,13 @@ bool load_target(TargetConfig& out) {
 bool save_target(const TargetConfig& t) {
     nvs_handle_t h;
     if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return false;
-    bool ok = set_str(h, kId, t.id) && set_str(h, kName, t.name) && set_str(h, kBoard, t.board) &&
-              set_str(h, kMac, t.mac) && set_str(h, kUrl, t.manifest_url) &&
-              nvs_set_u8(h, kType, t.addr_type) == ESP_OK && nvs_set_u32(h, kMaxApp, t.max_app_size) == ESP_OK;
-    ok = ok && nvs_commit(h) == ESP_OK;
+    const bool ok = nvs_set_str(h, kTarget, to_json(t).c_str()) == ESP_OK && nvs_commit(h) == ESP_OK;
+    if (ok) {
+        // The record supersedes the M1 keys; dropping them is best-effort.
+        erase_key(h, kLegacyMac);
+        erase_key(h, kLegacyType);
+        nvs_commit(h);
+    }
     nvs_close(h);
     return ok;
 }
@@ -68,12 +70,8 @@ bool save_target(const TargetConfig& t) {
 bool erase_target() {
     nvs_handle_t h;
     if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return false;
-    bool ok = true;
-    for (const char* key : {kMac, kType, kId, kName, kBoard, kUrl, kMaxApp}) {
-        const esp_err_t e = nvs_erase_key(h, key);
-        ok = ok && (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND);
-    }
-    ok = ok && nvs_commit(h) == ESP_OK;
+    const bool ok = erase_key(h, kTarget) && erase_key(h, kLegacyMac) && erase_key(h, kLegacyType) &&
+                    nvs_commit(h) == ESP_OK;
     nvs_close(h);
     return ok;
 }

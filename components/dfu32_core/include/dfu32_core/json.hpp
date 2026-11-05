@@ -53,6 +53,9 @@ private:
     std::vector<std::string> keys_;
 };
 
+/// Escapes `s` for use inside a JSON string literal (no surrounding quotes).
+std::string escape(std::string_view s);
+
 /// Parses one JSON document (RFC 8259) with nothing but whitespace after it.
 /// On failure returns false and, if `error` is given, describes the problem
 /// and its byte offset.

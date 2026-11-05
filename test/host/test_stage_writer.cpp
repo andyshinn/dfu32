@@ -230,6 +230,50 @@ TEST_CASE("Stage writer: download problems", "[stage]") {
           dfu::StagingHeaderError::Ok);
 }
 
+TEST_CASE("Stage writer: reports when the previous image was invalidated", "[stage]") {
+    Fixture f;
+    dfu32::StagingWriter w(f.region, f.sha);
+    f.meta.board = "nope";
+    CHECK_FALSE(w.begin(f.m, f.dat, f.meta).ok());
+    CHECK_FALSE(w.invalidated_previous());  // precheck failed: nothing touched
+    f.meta.board = "rak4631";
+    REQUIRE(w.begin(f.m, f.dat, f.meta).ok());
+    CHECK(w.invalidated_previous());  // header erased even though no byte was written yet
+    CHECK(w.written() == 0);
+}
+
+TEST_CASE("Stage writer: reusing a staged image refreshes its header", "[stage]") {
+    Fixture f;
+    REQUIRE(f.stage().ok());
+    dfu::StagingHeader h;
+    REQUIRE(dfu::decode_staging_header({f.region.mem.data(), dfu::kStagingHeaderSize}, h) ==
+            dfu::StagingHeaderError::Ok);
+    const std::vector<uint8_t> data(f.region.mem.begin() + dfu::kStagingDataOffset, f.region.mem.end());
+
+    bool rewritten = true;
+    REQUIRE(dfu32::refresh_staged_header(f.region, h, f.m, f.meta, rewritten).ok());
+    CHECK_FALSE(rewritten);  // same owner: no flash write
+
+    f.meta.target_id = "garage-repeater";
+    f.meta.manifest_url = "http://fw.lan/garage/manifest.json";
+    f.meta.staged_at = 1762400000;
+    REQUIRE(dfu32::refresh_staged_header(f.region, h, f.m, f.meta, rewritten).ok());
+    CHECK(rewritten);
+    CHECK_FALSE(f.region.unerased_write);
+    dfu::StagingHeader h2;
+    REQUIRE(dfu::decode_staging_header({f.region.mem.data(), dfu::kStagingHeaderSize}, h2) ==
+            dfu::StagingHeaderError::Ok);
+    CHECK(h2.target_id == "garage-repeater");
+    CHECK(h2.manifest_url == "http://fw.lan/garage/manifest.json");
+    CHECK(h2.staged_at == 1762400000);
+    CHECK(dfu32::same_image(f.m, h2));
+    CHECK(std::equal(data.begin(), data.end(), f.region.mem.begin() + dfu::kStagingDataOffset));
+
+    f.meta.target_id = std::string(40, 'x');
+    CHECK(dfu32::refresh_staged_header(f.region, h2, f.m, f.meta, rewritten).code == Err::ManifestInvalid);
+    CHECK_FALSE(rewritten);  // refused before erasing
+}
+
 TEST_CASE("Stage writer: CRC16 mismatch between .bin and .dat", "[stage]") {
     Fixture f;
     f.dat = make_dat(make_bin(16));  // valid layout, CRC of some other image

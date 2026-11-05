@@ -88,7 +88,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - `components/net`: WiFi STA (credentials in the IDF WiFi NVS), reconnect with backoff, mDNS `dfu32-xxxx.local`, SNTP, and `stop()`/`restore()` for the handover;
     - `components/fetch`: HTTP GET with redirects, manifest fetch, the `.dat` before anything is erased, then the `.bin` streamed into staging;
     - `components/dfu32_core` (pure, host-tested): JSON reader, URL resolution, manifest parse and validation, §7.2 prechecks, the staging writer (lazy sector erase, read-back, header last) and target-config validation;
-    - `components/config`: target settings in NVS (`tgt0_*`, keeping the M1 keys);
+    - `components/config`: target settings as one atomic NVS record (`tgt0`), reading an M1 target until the first save;
     - console: `wifi`, `target board|url|id|maxapp|clear`, `check`, `stage`;
     - `tools/dfu32_pack.py`, with a golden manifest shared with the C++ tests.
   - **M3b, orchestrator and API:** the job FSM (arm, then wait), WiFi handover with the run deadline and restore check, the HTTP API with token claim, the BLE scan endpoint, and the WiFi on/off bench comparison.

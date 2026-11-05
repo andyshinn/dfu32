@@ -47,6 +47,8 @@ TEST_CASE("URL: refuse what v1 doesn't support", "[url]") {
     CHECK_FALSE(parse_http_url("http://h:8a/", u, &err));
     CHECK_FALSE(parse_http_url("http://h/a b", u, &err));
     CHECK_FALSE(parse_http_url("http://[fd00::1/", u, &err));
+    CHECK_FALSE(parse_http_url("http://fe80::1/manifest.json", u, &err));  // unbracketed IPv6
+    CHECK(err.find("brackets") != std::string::npos);
 }
 
 TEST_CASE("URL: resolve manifest-relative references (RFC 3986 §5.4)", "[url]") {

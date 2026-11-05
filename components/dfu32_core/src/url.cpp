@@ -105,7 +105,10 @@ bool parse_http_url(std::string_view text, Url& out, std::string* error) {
             port = host.substr(close + 2);
         }
         host = host.substr(0, close + 1);
-    } else if (const size_t colon = host.rfind(':'); colon != std::string_view::npos) {
+    } else if (const size_t colon = host.find(':'); colon != std::string_view::npos) {
+        if (host.find(':', colon + 1) != std::string_view::npos) {
+            return set_err(error, "IPv6 addresses must be in brackets, e.g. http://[fe80::1]/");
+        }
         port = host.substr(colon + 1);
         host = host.substr(0, colon);
     }

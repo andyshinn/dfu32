@@ -52,6 +52,7 @@ struct StageOptions {
 struct StageReport {
     Manifest manifest;
     bool reused = false;       // the staged image already matched and re-verified OK
+    bool invalidated = false;  // failed after the previously staged image was erased
     uint32_t bytes = 0;        // .bin bytes downloaded
     uint32_t ms = 0;           // total time
     dfu::InitPacket init{};
@@ -59,7 +60,10 @@ struct StageReport {
 
 /// Fetch, verify and stage `target`'s image from `manifest_url` (or the
 /// target's own URL when empty). On a precheck failure the previously staged
-/// image is untouched; once the download starts it is invalidated.
+/// image is untouched; once the download starts it is invalidated
+/// (StageReport::invalidated). The header records the URL as configured,
+/// before redirects, so a stable "/latest" URL stays recognisable; file URLs
+/// resolve against the post-redirect manifest URL.
 Status stage(const TargetConfig& target, const std::string& manifest_url, const StageOptions& opts,
              StageReport& out);
 

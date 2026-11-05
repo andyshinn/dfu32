@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "dfu32_core/stage_writer.hpp"
+#include "dfu32_core/url.hpp"
 #include "esp_app_desc.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -65,14 +66,25 @@ public:
                     return http_error("HTTP " + std::to_string(status) + " without a usable Location from " + url);
                 }
                 esp_http_client_close(h_);
-                ESP_LOGI(TAG, "following HTTP %d redirect", status);
+                // The client is built without TLS: refuse https (and anything
+                // else) with the same message a configured URL would get.
+                const std::string next = current_url();
+                Url parsed;
+                std::string why;
+                if (!parse_http_url(next, parsed, &why)) return http_error("redirect to " + next + ": " + why);
+                ESP_LOGI(TAG, "following HTTP %d redirect to %s", status, next.c_str());
                 continue;
             }
             if (status != 200) return http_error("HTTP " + std::to_string(status) + " for " + url);
             chunked_ = esp_http_client_is_chunked_response(h_);
+            final_url_ = current_url();
+            if (final_url_.empty()) final_url_ = url;
             return {};
         }
     }
+
+    /// The URL that answered 200, after any redirects.
+    const std::string& final_url() const { return final_url_; }
 
     /// Content-Length, or -1 when the server didn't send one (chunked).
     int64_t length() const { return chunked_ ? -1 : length_; }
@@ -90,7 +102,13 @@ public:
     }
 
 private:
+    std::string current_url() const {
+        char buf[kMaxUrlLen + 64] = {};
+        return esp_http_client_get_url(h_, buf, sizeof(buf)) == ESP_OK ? std::string(buf) : std::string();
+    }
+
     esp_http_client_handle_t h_ = nullptr;
+    std::string final_url_;
     int64_t length_ = 0;
     bool chunked_ = false;
 };
@@ -100,24 +118,29 @@ bool sha256_of(std::string_view text, Sha256& out) {
     return sha.reset() && sha.update({reinterpret_cast<const uint8_t*>(text.data()), text.size()}) && sha.finish(out);
 }
 
+Status get_text_impl(const std::string& url, size_t max_bytes, std::string& out, std::string* final_url);
+
+// Relative file URLs resolve against where the manifest was actually served
+// from (after redirects), so a "/latest" redirect to "/v1.2/manifest.json"
+// finds "/v1.2/firmware.bin".
 Status fetch_manifest(const std::string& url, Manifest& m, Sha256& digest) {
     if (url.empty()) return Status::fail(Err::ManifestInvalid, "no manifest URL set for the target");
     std::string text;
+    std::string served_from;
     ESP_LOGI(TAG, "fetching manifest %s", url.c_str());
-    if (Status s = get_text(url, kMaxManifestBytes, text); !s.ok()) {
+    if (Status s = get_text_impl(url, kMaxManifestBytes, text, &served_from); !s.ok()) {
         if (s.code == Err::SizeMismatch) return Status::fail(Err::ManifestInvalid, "larger than 8 KB");
         return s;
     }
     if (!sha256_of(text, digest)) return Status::fail(Err::StagingIo, "SHA-256 failed");
-    return parse_manifest(text, url, m);
+    return parse_manifest(text, served_from, m);
 }
 
-}  // namespace
-
-Status get_text(const std::string& url, size_t max_bytes, std::string& out) {
+Status get_text_impl(const std::string& url, size_t max_bytes, std::string& out, std::string* final_url) {
     out.clear();
     Client c;
     if (Status s = c.open(url); !s.ok()) return s;
+    if (final_url != nullptr) *final_url = c.final_url();
     if (c.length() > static_cast<int64_t>(max_bytes)) {
         return Status::fail(Err::SizeMismatch, "response is " + std::to_string(c.length()) + " B, limit " +
                                                    std::to_string(max_bytes) + " B");
@@ -132,6 +155,12 @@ Status get_text(const std::string& url, size_t max_bytes, std::string& out) {
             return Status::fail(Err::SizeMismatch, "response exceeds " + std::to_string(max_bytes) + " B");
         }
     }
+}
+
+}  // namespace
+
+Status get_text(const std::string& url, size_t max_bytes, std::string& out) {
+    return get_text_impl(url, max_bytes, out, nullptr);
 }
 
 Status get_stream(const std::string& url, uint32_t expected_size, const std::function<Status()>& on_headers,
@@ -207,6 +236,11 @@ Status stage(const TargetConfig& target, const std::string& manifest_url, const 
         }
         const StagingVerify v = img.verify(target.max_app_size);
         if (v.ok) {
+            bool rewritten = false;
+            const Status hs = refresh_staged_header(region, img.header(), m, meta, rewritten);
+            out.invalidated = rewritten && !hs.ok();
+            if (!hs.ok()) return hs;
+            if (rewritten) ESP_LOGI(TAG, "staged header updated for target '%s'", meta.target_id.c_str());
             out.reused = true;
             out.ms = now_ms() - t0;
             ESP_LOGI(TAG, "\"%s\" is already staged and verifies; not downloading again", m.version.c_str());
@@ -234,6 +268,7 @@ Status stage(const TargetConfig& target, const std::string& manifest_url, const 
         [&](std::span<const uint8_t> chunk) { return writer.write(chunk); }, opts.progress);
     if (s.ok()) s = writer.finish();
     out.bytes = writer.written();
+    out.invalidated = !s.ok() && writer.invalidated_previous();
     out.ms = now_ms() - t0;
     if (!s.ok()) {
         ESP_LOGE(TAG, "staging failed: %s", s.str().c_str());

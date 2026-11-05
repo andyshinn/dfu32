@@ -385,7 +385,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
-| `tgt.0.*` | — | Target 0 (v1 cap = 1). NVS keys are limited to 15 characters, so these are stored as `tgt0_id`, `tgt0_name`, `tgt0_board`, `tgt0_mac`, `tgt0_type` (addr type), `tgt0_url`, `tgt0_maxapp` (M3a, `components/config`); the tuning knobs follow in M3b: |
+| `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. The tuning knobs follow in M3b: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
 | ↳ `board` | str ≤ 31 | free-form, matched against `manifest.boards` |
@@ -639,7 +639,7 @@ The `runlog` partition is a ring of 4 KB slots: 14 slots on 4 MB, 16 on 8 MB. A 
   - `bootloader`, `bootloader_class`, `mtu`, `packet_size`, `conn_interval_x125`, `rate_x10_kBps`, `reset_reason`;
   - `attempts[]` (interval, PRN, outcome, kind, bytes acknowledged).
 
-  Fields still to come in M3: trigger and source, wall-clock time once SNTP exists, and `wifi_off`.
+  `wifi_off` was added in M3a (console `flash --wifi on|off`). Still to come in M3b: trigger and source, and wall-clock time from SNTP.
 - The log since the run started, trimmed from the front to fit the 4 KB slot (normally about 3 KB).
 - Slot layout: magic `DF32RUN1`, seq, lengths and a CRC32 over the payload (`components/runlog/include/runlog/run_log.hpp`). A torn or corrupted slot is ignored, and the next record goes into the slot after the newest valid one.
 - Console: `runs` lists records, `run N` shows one with its log, and `logs [bytes]` shows recent captured output.
