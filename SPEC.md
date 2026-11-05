@@ -69,12 +69,33 @@ DFU32 can also stage without arming: `POST /targets/{id}/stage`. This lets the o
 |---|---|
 | Framework | ESP-IDF **v6.1** (in service until about Feb 2029). C++ at IDF's default standard (gnu++2b); C where libraries are C. No exceptions, no RTTI. |
 | BLE | NimBLE via `h2zero/esp-nimble-cpp` **pinned `2.6.0`** (master is 3.0.0-dev). Central for DFU, observer for scanning, peripheral only for Improv BLE while unprovisioned. |
-| JSON | `espressif/cjson` managed component (IDF 6 removed the built-in `json` component). |
+| JSON | `espressif/cjson` managed component (IDF 6 removed the built-in `json` component), behind `dfu32_core/json.hpp`. |
 | Hashing | mbedTLS / PSA SHA-256 (built in). CRC16-CCITT implemented locally. |
 | Supported SoCs | ESP32-S3 (BLE 5: 2M PHY, DLE) and classic ESP32 (BLE 4.2: DLE, no 2M PHY). |
 | Min flash / PSRAM | 4 MB flash, **2 MB PSRAM required**. PSRAM holds the 64 KB log ring, HTTP and JSON buffers, and WiFi/LWIP buffers (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`). That leaves internal RAM for NimBLE, which stays on internal allocation. Staging stays in flash, for offline retry after a reboot. |
 | Bench boards | **Adafruit Feather ESP32-S3** (primary: native USB, NeoPixel, BOOT button) and **Adafruit Feather ESP32 V2** (secondary target, or the fake-bootloader test fixture, §14.3). |
 | Also supported | Generic ESP32-S3 N16R8 DevKitC (8/16 MB layout). |
+
+### 4.1 Third-party components (prefer these over writing our own)
+
+Registry components are declared in the `idf_component.yml` of the component that uses them, so CI fetches them. Versions are the latest at the time of writing; pin with `^` when adding.
+
+| Component | Version | Used for | Milestone |
+|---|---|---|---|
+| `h2zero/esp-nimble-cpp` | 2.6.0 (pinned) | BLE central, scanning, Improv BLE peripheral | M1 (in use) |
+| `espressif/mdns` | ^1.10 | `dfu32-xxxx.local` | M3a (in use) |
+| `espressif/cjson` | ^1.7.19 | Manifest, API bodies, target record | M3a (in use) |
+| `espressif/button` (esp-iot-solution) | 4.2.x | Debounce, long-press events for the 5 s unclaim and 15 s factory reset (§9.3) | M4 |
+| `espressif/led_indicator` (esp-iot-solution) on `espressif/led_strip` | 2.1.x / 3.1.x | NeoPixel and red-LED patterns with priorities (§13.4) | M4 |
+| `improv-wifi/sdk-cpp` (not in the registry; vendored or fetched) | 1.2.x | Improv packet parsing and checksums; DFU32 supplies the serial and BLE transports (§9.2) | M4 |
+| `espressif/mqtt` (esp-mqtt) | 1.x | MQTT + Home Assistant discovery (§10.3) | post-v1 |
+| `espressif/libsodium` | 1.0.x | Ed25519 verification for signed manifests (§11); PSA in IDF 6 has no Ed25519 | post-v1 |
+
+Considered and not used:
+- `espressif/network_provisioning`: Espressif's protobuf/protocomm provisioning, tied to the ESP provisioning apps. Improv fits the ESP Web Tools / Home Assistant flow and is much smaller.
+- ROM `esp_rom_crc16`/`esp_rom_crc32`: `dfu_proto` must also build on the host, and the local versions are a few lines each.
+- A filesystem (e.g. LittleFS) for run records: one 4 KB slot write per run doesn't need one.
+- URL resolution stays local: `esp_http_client` parses URLs but can't resolve a relative reference against a base.
 
 Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top of the root `sdkconfig.defaults`. Each profile sets flash size, the partition CSV, the console transport, PSRAM, and pins (LED, button).
 
@@ -357,11 +378,15 @@ Header, little-endian, all fixed-size:
 ```
 
 Write sequence:
-1. Erase the header sector, which invalidates the old image.
-2. Erase the data range.
-3. Stream the HTTP body into `0x1000+`, hashing as it goes.
-4. Read back and re-hash. This catches flash write errors and costs about 1 s for 800 kB.
-5. Write the header.
+0. Fetch the manifest and the `.dat` and run every §7.2 check that needs only them. A failure here leaves the old image untouched.
+1. Erase the header sector, which invalidates the old image. This happens only once the `.bin` request has returned `200` with the expected `Content-Length`, so a 404 doesn't cost the staged image either.
+2. Stream the HTTP body into `0x1000+`, erasing each 4 KB sector just before it is written and hashing as it goes. Erasing as it goes keeps the connection from idling through a multi-second bulk erase.
+3. Read back and re-hash, plus CRC16 against the `.dat`. This catches flash write errors and costs about 1 s for 800 kB.
+4. Write the header, then read it back.
+
+If the manifest's `.bin` and `.dat` hashes equal the staged header's, the download is skipped: the staged image is re-checked against the target (board, size) and re-hashed instead (`stage --force` downloads anyway).
+
+Implemented as `dfu32::StagingWriter` (`components/dfu32_core`, host-tested against a NOR-flash model) over the partition and PSA SHA-256 adapters in `components/staging`.
 
 Before use (flash with `source=staged`), DFU32 re-verifies `header_crc32` and the bin SHA-256.
 
@@ -381,7 +406,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
-| `tgt.0.*` | — | Target 0 (v1 cap = 1): |
+| `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. The tuning knobs follow in M3b: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
 | ↳ `board` | str ≤ 31 | free-form, matched against `manifest.boards` |
@@ -393,7 +418,8 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
 
-- **Improv Serial** runs on the console port: USB-Serial-JTAG on S3, UART0 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
+- **Improv Serial** (M4, together with ESP Web Tools; until then the `wifi <ssid> <password>` console command stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
+- Both transports use the Improv project's C++ SDK (`improv-wifi/sdk-cpp`, §4.1) for packet parsing; DFU32 provides the UART/USB and NimBLE GATT plumbing.
 - **Improv BLE** runs only while unprovisioned, or for 5 min after a 2 s button press. It uses a NimBLE GATT server and advertising. It is fully torn down when provisioning finishes or the window expires, and a DFU can't start while it is active.
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
@@ -401,6 +427,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 - While unclaimed, `POST /api/v1/claim` returns a newly generated token **once**: 32 bytes from `esp_fill_random` with the radio on, encoded base64url. DFU32 stores its SHA-256.
 - While unclaimed, the mutating endpoints are disabled; only `GET /status`, `GET /`, and `/claim` work.
+- Button handling uses `espressif/button` long-press events (§4.1).
 - **Unclaim:** hold the button 5 s. The LED flashes amber. This clears `token_sha256` without touching anything else.
 - **Factory reset:** hold 15 s. This erases the `dfu32` namespace and WiFi credentials. The staging partition and run log are kept.
 - On boards with no button, use `POST /api/v1/system/token/rotate` while authenticated, or reflash with an NVS erase.
@@ -485,7 +512,7 @@ The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
 
 ### 10.3 Home Assistant
 
-v1 has no MQTT. HA can use `rest` sensors on `/api/v1/status` and `rest_command` for check, stage and flash. A later milestone adds MQTT with HA discovery: an `update` entity, a state sensor, a progress sensor, and a Flash button.
+v1 has no MQTT (the later milestone uses `espressif/mqtt`, §4.1). HA can use `rest` sensors on `/api/v1/status` and `rest_command` for check, stage and flash. A later milestone adds MQTT with HA discovery: an `update` entity, a state sensor, a progress sensor, and a Flash button.
 
 ---
 
@@ -511,11 +538,12 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - `boards` is required and non-empty. DFU32 refuses if `target.board` isn't in it.
 - `init` is optional. If present, it is cross-checked against the parsed `.dat` and a mismatch gives `DAT_INVALID`. This catches a server-side mix-up of `.dat` files.
 - Unknown keys are ignored. `schema > 1` is refused (`MANIFEST_UNSUPPORTED`).
+- Parsed by `dfu32::parse_manifest` (`components/dfu32_core`) using cJSON from the component registry (`espressif/cjson`; ESP-IDF 6 no longer bundles it) behind a thin C++ wrapper (`dfu32_core/json.hpp`: ownership, case-sensitive lookup, exact-integer reads). The nesting limit is set to 16 (`CONFIG_CJSON_NESTING_LIMIT`) so a hostile document can't recurse through the task stack. Relative URLs follow RFC 3986 resolution against the manifest URL, and only `http://` is accepted.
 - Size limits: manifest ≤ 8 KB, `.dat` ≤ 64 B, `.bin` ≤ the staging capacity.
-- **Trust model (decided: HTTP + hashes).** Hashes catch corruption, not malicious substitution. Anyone who can spoof the artifact server on your LAN can flash an image that passes the board, `.dat` and CRC checks. This is accepted for v1. An Ed25519-signed manifest is a later, compatible addition (`"sig"` field plus a public key in NVS).
+- **Trust model (decided: HTTP + hashes).** Hashes catch corruption, not malicious substitution. Anyone who can spoof the artifact server on your LAN can flash an image that passes the board, `.dat` and CRC checks. This is accepted for v1. An Ed25519-signed manifest is a later, compatible addition (`"sig"` field plus a public key in NVS), verified with `espressif/libsodium` (§4.1).
 
 **Server tooling** (`tools/`, Python, MIT):
-- `dfu32-pack <dfu.zip> --board rak4631 --version … --out dir/` reads the adafruit-nrfutil `manifest.json` in the zip, extracts `.bin` and `.dat`, validates them (word alignment, dev type, CRC16, max size), and writes `manifest.json`.
+- `dfu32-pack <dfu.zip> --board rak4631 --version … --out dir/` (`tools/dfu32_pack.py`, M3a) reads the adafruit-nrfutil `manifest.json` in the zip, extracts `.bin` and `.dat`, validates them (word alignment, dev type, CRC16, max size), and writes `manifest.json`.
 - `dfu32-meshcore-fetch --tag repeater-v1.18.0 --env RAK_4631_repeater` resolves the asset through the GitHub API, because asset names carry a SHA suffix and `releases/latest` is shared across firmware types. It then calls `dfu32-pack`. This is MeshCore-specific, so it stays in tooling.
 - `dfu32-stage-image` builds a raw staging-partition image for flashing with `parttool.py` (used by Milestone 1).
 
@@ -634,7 +662,7 @@ The `runlog` partition is a ring of 4 KB slots: 14 slots on 4 MB, 16 on 8 MB. A 
   - `bootloader`, `bootloader_class`, `mtu`, `packet_size`, `conn_interval_x125`, `rate_x10_kBps`, `reset_reason`;
   - `attempts[]` (interval, PRN, outcome, kind, bytes acknowledged).
 
-  Fields still to come in M3: trigger and source, wall-clock time once SNTP exists, and `wifi_off`.
+  `wifi_off` was added in M3a (console `flash --wifi on|off`). Still to come in M3b: trigger and source, and wall-clock time from SNTP.
 - The log since the run started, trimmed from the front to fit the 4 KB slot (normally about 3 KB).
 - Slot layout: magic `DF32RUN1`, seq, lengths and a CRC32 over the payload (`components/runlog/include/runlog/run_log.hpp`). A torn or corrupted slot is ignored, and the next record goes into the slot after the newest valid one.
 - Console: `runs` lists records, `run N` shows one with its log, and `logs [bytes]` shows recent captured output.
@@ -660,6 +688,8 @@ Writes are rare (one sector per run), so wear isn't a concern.
 | amber flash | button-hold feedback |
 
 On the Feathers, the plain red LED (GPIO13) is the **attention** indicator, separate from the NeoPixel. It stays solid while the target is known to be erased and not yet reflashed, so the warning is visible even if the NeoPixel is dimmed or disabled. It blinks during the transfer.
+
+Implemented with `espressif/led_indicator` over `espressif/led_strip` (§4.1): each row is a blink pattern, and when several apply the highest-priority one shows (erased target > failure > transfer > awaiting > fetching > idle). The red LED uses the same component in GPIO mode.
 
 ---
 
@@ -719,27 +749,25 @@ The setup:
 
 ---
 
-## 15. Repository layout (planned)
+## 15. Repository layout
 
 ```
 dfu32/
   CMakeLists.txt, sdkconfig.defaults, partitions/{4mb,8mb}.csv, boards/<profile>/sdkconfig.defaults
-  main/                  app_main, orchestrator, Kconfig.projbuild, idf_component.yml
+  main/                  app_main, bench console (orchestrator + API in M3b), Kconfig.projbuild
   components/
-    dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, client FSM (transport-agnostic)
-    dfu_ble/             IDfuTransport impl on esp-nimble-cpp; scanner
-    ble_mgr/             NimBLE lifecycle + role arbitration (scan / central / Improv peripheral)
-    staging/             raw partition format
-    fetcher/             esp_http_client → staging, SHA-256
-    manifest/            cJSON parse + validate
-    net_mgr/             WiFi STA, stop/restore, mDNS, SNTP, Improv Serial/BLE
-    api/                 esp_http_server routes, auth, embedded UI
-    config/              NVS schema + migration
+    dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, transfer engine, retry policy, staging format
+    dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config
+    dfu_ble/             ITransport on esp-nimble-cpp; scan, probe, flash with retries
+    staging/             staging partition reader + partition / PSA SHA-256 adapters for the writer
+    fetch/               esp_http_client: manifest, .dat, .bin streamed into staging
+    net/                 WiFi STA, stop/restore, mDNS, SNTP
+    config/              NVS settings (targets now; device config in M3b)
     runlog/              log ring + run-record partition
-    indicator/           LED + button
-  web/                   UI source → gzipped into api/ at build time
-  tools/                 dfu32-pack, dfu32-meshcore-fetch, dfu32-stage-image
-  test/host/, test/fakeboot/
+    api/                 (M3b) esp_http_server routes, auth; embedded UI in M4
+    indicator/           (M4) LED + button
+  tools/                 dfu32_pack.py, dfu32_stage_image.py, layout and size checks
+  test/host/             Catch2 tests for the pure components
   docs/
 ```
 
@@ -754,3 +782,10 @@ dfu32/
 | lucidnx/nrf_dfu_py | **No license** | Behavioural reference only; **do not copy code** |
 | astronomer80/nrf52_bledfu_win | **No license** | Behavioural reference only |
 | esp-nimble-cpp | Apache-2.0 | Dependency |
+| espressif/mdns, espressif/mqtt (esp-protocols) | Apache-2.0 | Dependency |
+| espressif/cjson (cJSON) | MIT | Dependency |
+| espressif/button, espressif/led_indicator (esp-iot-solution), espressif/led_strip | Apache-2.0 | Dependency (M4) |
+| improv-wifi/sdk-cpp | Apache-2.0 | Dependency (M4); keep its LICENSE alongside if vendored |
+| espressif/libsodium (libsodium) | ISC | Dependency (post-v1) |
+
+Apache-2.0 dependencies are compatible with DFU32's MIT licence. Binary releases (the merged `.bin`, ESP Web Tools) should ship a `THIRD_PARTY_NOTICES` file listing these licences; generating it from the build's `dependencies.lock` is an M5 task.

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <catch2/catch_test_macros.hpp>
 
+#include "dfu32_core/json.hpp"
+
 #include <array>
 #include <string>
 #include <vector>
@@ -171,6 +173,7 @@ TEST_CASE("Run record JSON escapes and reads back", "[runlog]") {
     r.target = "F4:1C:36:A7:33:95";
     r.image_size = 413680;
     r.target_erased = "yes";
+    r.wifi_off = true;
     r.attempts.push_back({1, 8, 8, "LINK_LOST", "LINK_OR_OVERRUN", 27328});
     r.attempts.push_back({2, 30, 8, "OK", "NONE", 413680});
     const std::string j = runlog::to_json(r);
@@ -183,6 +186,12 @@ TEST_CASE("Run record JSON escapes and reads back", "[runlog]") {
     CHECK(runlog::json_get_string(j, "missing").empty());
     CHECK(runlog::json_get_uint(j, "missing", 99) == 99);
     CHECK(j.find("\"attempts\":[{\"n\":1,") != std::string::npos);
+    CHECK(j.find("\"wifi_off\":true") != std::string::npos);
+    // The whole record is valid JSON (the M3b API serves it as-is).
+    dfu32::json::Doc doc;
+    REQUIRE(doc.parse(j));
+    CHECK(doc.root().get("error").str() == r.error);
+    CHECK(doc.root().get("attempts").size() == 2);
     CHECK(runlog::json_escape(std::string(1, '\x01')) == "\\u0001");
     CHECK(runlog::json_get_string("{\"k\":\"a\\u0001b\"}", "k") == std::string("a\x01" "b"));
 }

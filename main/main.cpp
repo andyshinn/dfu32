@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
-// DFU32 M1: boot banner, layout self-check, NimBLE central and the USB-serial
-// bench console (scan / probe / flash). Networking and the HTTP API arrive in
-// M3 (docs/MILESTONES.md).
+// DFU32: boot banner, layout self-check, run-log recovery, NimBLE central,
+// WiFi (net) and the USB-serial bench console. The HTTP API and the job
+// orchestrator arrive in M3b (docs/MILESTONES.md).
 #include <cinttypes>
 #include <cstdint>
 
@@ -15,6 +15,7 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_psram.h"
+#include "net/net.hpp"
 #include "nvs_flash.h"
 #include "psa/crypto.h"
 #include "runlog/run_record.hpp"
@@ -123,8 +124,12 @@ extern "C" void app_main(void) {
         return;
     }
 
-    // No network yet, so mark valid once the self-check and BLE init pass.
-    // M3 moves this after Wi-Fi + HTTP come up (SPEC.md §12.3, rollback).
+    // WiFi failing to start is logged but not fatal: the console, staging
+    // from a PC and flashing still work without it.
+    if (!dfu32::net::init()) ESP_LOGE(TAG, "WiFi init failed; networking disabled");
+
+    // Mark valid once the self-check and BLE init pass. M4 (self-OTA) moves
+    // this after WiFi + HTTP come up (SPEC.md §12.3, rollback).
     esp_ota_mark_app_valid_cancel_rollback();
 
     dfu32::start_console();

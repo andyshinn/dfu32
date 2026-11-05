@@ -35,6 +35,7 @@ struct RunRecord {
     uint32_t bytes_acked = 0;
     std::string target_erased;  // "yes" | "no" | "possibly"
     bool sys_reset_after_failure = false;
+    bool wifi_off = false;            // WiFi was stopped for the transfer (SPEC.md §7.1)
     std::string bootloader;     // DIS firmware revision
     std::string bootloader_class;
     uint16_t mtu = 0;

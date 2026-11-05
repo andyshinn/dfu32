@@ -80,6 +80,7 @@ std::string to_json(const RunRecord& r) {
     num_field(o, "bytes_acked", r.bytes_acked);
     str_field(o, "target_erased", r.target_erased);
     bool_field(o, "sys_reset_after_failure", r.sys_reset_after_failure);
+    bool_field(o, "wifi_off", r.wifi_off);
     str_field(o, "bootloader", r.bootloader);
     str_field(o, "bootloader_class", r.bootloader_class);
     num_field(o, "mtu", r.mtu);

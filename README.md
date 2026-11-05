@@ -4,7 +4,7 @@ DFU32 is ESP32 firmware that flashes nRF52 boards over BLE using Nordic **legacy
 
 DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
-**Status:** Milestone M1, the bench proof. A USB-serial console can scan for the repeater, probe its bootloader without erasing anything (a frame-size test), and flash an image staged from your computer. See [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
+**Status:** Milestone M3a. A USB-serial console joins WiFi, fetches a target's manifest and stages its image over HTTP, then flashes the repeater over BLE with automatic retries and persisted run records. The HTTP API and the arm-then-wait job come next (M3b). See [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
 
 - [SPEC.md](SPEC.md): the full specification
 - [docs/MILESTONES.md](docs/MILESTONES.md): phased plan
@@ -46,7 +46,7 @@ python3 tools/check_app_size.py build/feather_esp32s3
 
 ## Host tests
 
-The protocol logic in `components/dfu_proto` is plain C++20, so its tests run on your computer. They need CMake ≥ 3.22, Ninja and a C++20 compiler; Catch2 is fetched automatically.
+The protocol and job logic in `components/dfu_proto`, `components/dfu32_core` and `components/runlog` is plain C++20, so its tests run on your computer. They need CMake ≥ 3.22, Ninja and a C++20 compiler; Catch2 is fetched automatically.
 
 ```bash
 cmake -S test/host -B build-host -G Ninja && cmake --build build-host && ctest --test-dir build-host --output-on-failure

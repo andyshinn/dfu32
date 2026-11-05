@@ -1,6 +1,6 @@
-# Bench guide (M1)
+# Bench guide (M1–M3a)
 
-This guide covers bench-testing M1 on your desk: build DFU32, stage an image, then probe and flash an nRF52 repeater over BLE.
+This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
 **You need:**
 - a Feather ESP32-S3 (or another supported board) on USB;
@@ -108,6 +108,43 @@ If the repeater doesn't come back after `probe`, power-cycle it. Nothing was era
 
 ## 4. Stage an image
 
+### Over WiFi (M3a)
+
+Package the release on your computer and serve it over plain HTTP:
+
+```bash
+python3 tools/dfu32_pack.py RAK_4631_repeater-v1.18.0-81dbae5.zip --board rak4631 --out site/rak4631
+```
+
+```bash
+python3 -m http.server -d site 8000
+```
+
+In the DFU32 monitor, join your WiFi network once (it's remembered across reboots, and it survives an app-only update but not a merged-bin flash), then tell the target where its manifest lives and which board it is:
+
+```
+dfu32> wifi MyNetwork MyPassword
+dfu32> target board rak4631
+dfu32> target url http://<your-computer-ip>:8000/rak4631/manifest.json
+dfu32> check
+dfu32> stage
+dfu32> staged
+```
+
+- `wifi` on its own shows the IP, RSSI and the `dfu32-xxxx.local` name.
+- `check` fetches the manifest and compares it with the target's board and the staged image. It writes nothing.
+- `stage` downloads, verifies and stages the image. Run it again and it notices that the same image is already staged, re-verifies it and skips the download (`stage --force` downloads anyway).
+- The `--board` you pack with must match `target board` (case-insensitive), or `stage` stops with `BOARD_MISMATCH` before anything is erased.
+
+Worth trying on the bench:
+- **Wrong board:** `target board heltec_t114`, then `stage`. Expect `BOARD_MISMATCH`, and `staged` still shows the old image.
+- **Bad hash:** edit one character of `bin.sha256` in `manifest.json`, then `stage --force`. Expect `HASH_MISMATCH`. The old image is gone at this point, because the download had already started.
+- **Wrong size:** append a byte to `firmware.bin`. Expect `SIZE_MISMATCH` before anything is erased, because the server's `Content-Length` disagrees with the manifest.
+- **404:** point `target url` at a missing file. Expect `HTTP_ERROR: HTTP 404`.
+- **WiFi drop:** turn the access point off and on again. `wifi` should show it reconnecting, with the backoff capped at 30 s.
+
+### From the PC with esptool
+
 On your computer, build the staging image:
 
 ```bash
@@ -157,6 +194,7 @@ Tuning knobs:
 | `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval, then halves PRN. |
 | `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
+| `--wifi on\|off` | off | WiFi is stopped for the flash and restored afterwards (SPEC §7.1, provisional default). `--wifi on` keeps it up. The run record's `wifi_off` shows which was used, for the M3b on/off comparison. |
 
 ## Bench results so far
 
