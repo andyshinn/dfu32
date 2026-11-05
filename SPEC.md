@@ -185,7 +185,7 @@ Status codes: `01` SUCCESS, `02` INVALID_STATE, `03` NOT_SUPPORTED, `04` DATA_SI
   - Every data write **must be a multiple of 4**, or the bootloader returns `10 03 03` **[verified]**. A non-4n+3 MTU such as 185 must be rounded down.
   - Never pass `len > mtu−3` to esp-nimble-cpp `writeValue(…, false)`. It **silently turns into a long write with response** **[verified]**. The client asserts this.
 - **App size** must be a multiple of 4. This is a precheck; DFU32 never pads, because padding would change the CRC.
-- **PRN:** default **8** (configurable 1–16).
+- **PRN:** default **8** (configurable 1–16). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. M2 caps PRN at 8 for OTAFIX-class targets. After a stream-phase `06`, the next attempt backs off: PRN halved, interval doubled.
   - ESPHome documents that the bootloader runs out of memory beyond 8 unacknowledged packets.
   - The bootloader RX pool is 16 buffers (OTAFIX/upstream ≥0.10) or 8 (older).
 - Flow:
