@@ -57,7 +57,9 @@ FailureKind classify_transfer_failure(const TransferResult& r) noexcept {
     }
 }
 
-uint16_t cap_prn(uint16_t requested) noexcept { return std::min(requested, kMaxSafePrn); }
+uint16_t cap_prn(uint16_t requested) noexcept {
+    return (requested == 0 || requested > kMaxSafePrn) ? kMaxSafePrn : requested;
+}
 
 AttemptParams degrade(const AttemptParams& p, const RetryPolicy& policy) noexcept {
     AttemptParams next = p;
@@ -76,15 +78,26 @@ RetryResult run_with_retries(const RetryPolicy& policy, AttemptParams initial, c
     RetryResult result;
     AttemptParams params = initial;
     const uint8_t max_attempts = std::max<uint8_t>(1, policy.max_attempts);
-    for (uint8_t n = 1; n <= max_attempts; ++n) {
-        result.attempts = n;
+    uint8_t free_stale_left = policy.free_stale_retries;
+    for (;;) {
+        ++result.tries;
+        ++result.attempts;
         result.last_params = params;
-        result.last = attempt(n, params);
+        result.last = attempt(result.tries, params);
         if (result.last.ok || result.last.failure == FailureKind::Fatal ||
-            result.last.failure == FailureKind::TargetGone || n == max_attempts) {
+            result.last.failure == FailureKind::TargetGone) {
             break;
         }
-        const size_t idx = std::min<size_t>(n - 1, policy.backoff_ms.size() - 1);
+        const bool free_retry = result.last.failure == FailureKind::StaleSession && free_stale_left > 0;
+        if (free_retry) {
+            --free_stale_left;
+            --result.attempts;  // not counted against the budget
+        }
+        if (result.attempts >= max_attempts) {
+            break;
+        }
+        const size_t idx = std::min<size_t>(result.attempts == 0 ? 0 : result.attempts - 1u,
+                                            policy.backoff_ms.size() - 1);
         sleep(result.last.failure == FailureKind::StaleSession ? policy.stale_session_delay_ms
                                                                : policy.backoff_ms[idx]);
         if (result.last.failure == FailureKind::LinkOrOverrun) {

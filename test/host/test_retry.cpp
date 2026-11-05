@@ -83,7 +83,7 @@ TEST_CASE("PRN cap", "[retry]") {
     CHECK(dfu::cap_prn(16) == 8);
     CHECK(dfu::cap_prn(8) == 8);
     CHECK(dfu::cap_prn(4) == 4);
-    CHECK(dfu::cap_prn(0) == 0);
+    CHECK(dfu::cap_prn(0) == 8);  // receipts off is not exempt
 }
 
 TEST_CASE("Degrade: interval first, then PRN", "[retry]") {
@@ -182,5 +182,47 @@ TEST_CASE("Attempt budget of one means no retry", "[retry]") {
         },
         [](uint32_t) { FAIL("should not sleep"); });
     CHECK(calls == 1);
+    CHECK(r.attempts == 1);
+}
+
+TEST_CASE("Link loss then stale session: the stale START does not use up the budget", "[retry]") {
+    // Review finding: after a link loss no SYS_RESET can be sent, so the next
+    // START sees INVALID_STATE. With --attempts 2 that must still recover.
+    dfu::RetryPolicy pol;
+    pol.max_attempts = 2;
+    std::vector<AttemptParams> seen;
+    std::vector<uint32_t> sleeps;
+    const auto r = dfu::run_with_retries(
+        pol, AttemptParams{8, 20},
+        [&](uint8_t n, const AttemptParams& p) {
+            seen.push_back(p);
+            if (n == 1) return AttemptOutcome{false, FailureKind::LinkOrOverrun};
+            if (n == 2) return AttemptOutcome{false, FailureKind::StaleSession};
+            return AttemptOutcome{true, FailureKind::None};
+        },
+        [&](uint32_t ms) { sleeps.push_back(ms); });
+    CHECK(r.last.ok);
+    CHECK(r.tries == 3);
+    CHECK(r.attempts == 2);
+    REQUIRE(seen.size() == 3);
+    CHECK(seen[1].interval_ms == 30);  // degraded after the link loss
+    CHECK(seen[2].interval_ms == 30);  // kept through the stale-session retry
+    CHECK(sleeps == std::vector<uint32_t>{3000, 1000});
+}
+
+TEST_CASE("Free stale-session retries are bounded", "[retry]") {
+    dfu::RetryPolicy pol;
+    pol.max_attempts = 1;
+    pol.free_stale_retries = 2;
+    int calls = 0;
+    const auto r = dfu::run_with_retries(
+        pol, AttemptParams{},
+        [&](uint8_t, const AttemptParams&) {
+            ++calls;
+            return AttemptOutcome{false, FailureKind::StaleSession};
+        },
+        [](uint32_t) {});
+    CHECK_FALSE(r.last.ok);
+    CHECK(calls == 3);  // 1 budgeted + 2 free
     CHECK(r.attempts == 1);
 }

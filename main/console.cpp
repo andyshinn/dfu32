@@ -255,9 +255,13 @@ int cmd_flash(int argc, char** argv) {
     }
     std::printf("FLASH FAILED after %u attempt(s): %s\n", static_cast<unsigned>(r.attempts.size()), r.error.c_str());
     if (r.target_erased) {
+        const bool recoverable = r.failure == dfu::FailureKind::LinkOrOverrun ||
+                                 r.failure == dfu::FailureKind::Transient ||
+                                 r.failure == dfu::FailureKind::StaleSession;
         std::printf("The target's app was erased. The staged image is intact; run `flash --yes` again once the "
-                    "cause is fixed%s.\n",
-                    r.failure == dfu::FailureKind::TargetGone ? "" : " (OTAFIX waits in BLE OTA, usually at MAC+1)");
+                    "cause is fixed.%s\n",
+                    recoverable ? " OTAFIX waits in BLE OTA, usually at MAC+1."
+                                : " Bootloader state unknown: check with `probe --no-reset` before retrying.");
     } else {
         std::printf("The target was not erased.\n");
     }

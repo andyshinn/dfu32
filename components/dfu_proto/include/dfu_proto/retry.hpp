@@ -36,8 +36,9 @@ FailureKind classify_transfer_failure(const TransferResult& r) noexcept;
 /// buffers only 8 packets (ESPHome's reference client notes the same limit).
 inline constexpr uint16_t kMaxSafePrn = 8;
 
-/// Requested PRN limited to kMaxSafePrn for every bootloader class (0 = off is
-/// left alone: it is a deliberate choice, not a window size).
+/// Requested PRN limited to kMaxSafePrn for every bootloader class. 0 (receipts
+/// off, no flow control at all) is the most overrun-prone setting, so it is
+/// capped to kMaxSafePrn too; callers wanting it must bypass the cap explicitly.
 uint16_t cap_prn(uint16_t requested) noexcept;
 
 struct AttemptParams {
@@ -49,6 +50,9 @@ struct RetryPolicy {
     uint8_t max_attempts = 3;
     std::array<uint32_t, 3> backoff_ms{3000, 6000, 12000};  // after attempt 1, 2, 3+
     uint32_t stale_session_delay_ms = 1000;                 // bootloader reboots after SYS_RESET
+    // A stale-session START usually follows a link loss (no SYS_RESET could be
+    // sent), so it does not consume the attempt budget, up to this many times.
+    uint8_t free_stale_retries = 2;
     uint16_t slowest_interval_ms = 30;
     uint16_t min_prn = 2;
 };
@@ -65,16 +69,19 @@ struct AttemptOutcome {
 
 struct RetryResult {
     AttemptOutcome last;
-    uint8_t attempts = 0;
+    uint8_t attempts = 0;  // budgeted attempts consumed
+    uint8_t tries = 0;     // attempt-function calls, including free stale-session retries
     AttemptParams last_params;
 };
 
-using AttemptFn = std::function<AttemptOutcome(uint8_t attempt, const AttemptParams& params)>;
+/// `try_number` counts every call from 1, including free stale-session retries.
+using AttemptFn = std::function<AttemptOutcome(uint8_t try_number, const AttemptParams& params)>;
 using SleepFn = std::function<void(uint32_t ms)>;
 
 /// Runs attempts until one succeeds, a failure is Fatal/TargetGone, or the
 /// policy's attempt budget is spent. Sleeps between attempts (backoff, or the
 /// short stale-session delay) and degrades parameters after LinkOrOverrun.
+/// StaleSession failures are free (not counted) up to free_stale_retries.
 RetryResult run_with_retries(const RetryPolicy& policy, AttemptParams initial, const AttemptFn& attempt,
                              const SleepFn& sleep);
 

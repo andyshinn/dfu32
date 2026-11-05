@@ -99,6 +99,8 @@ struct AttemptSummary {
     std::string error;           // empty on success
     dfu::TransferResult transfer;
     bool reached_bootloader = false;
+    bool ran_transfer = false;   // `transfer` is meaningful
+    bool sys_reset_sent = false; // SYS_RESET sent after this attempt's failure
 };
 
 struct FlashReport {
@@ -106,10 +108,10 @@ struct FlashReport {
     std::string error;                 // from the last attempt
     dfu::FailureKind failure = dfu::FailureKind::None;
     LinkInfo link;                     // last attempt that reached the bootloader
-    dfu::TransferResult transfer;      // last attempt's transfer
+    dfu::TransferResult transfer;      // last attempt that actually ran a transfer
     std::vector<AttemptSummary> attempts;
     bool target_erased = false;        // any attempt got as far as START
-    bool sys_reset_after_failure = false;
+    bool sys_reset_after_failure = false;  // the last attempt sent SYS_RESET after failing
     uint32_t total_ms = 0;
 };
 

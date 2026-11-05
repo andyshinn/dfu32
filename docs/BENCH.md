@@ -42,6 +42,19 @@ Each CI run uploads a `dfu32-<board>` artifact. Its `dfu32-<board>-merged.bin` c
    python -m esptool --port /dev/cu.usbmodem1101 --baud 460800 write-flash 0x0 dfu32-feather_esp32s3-merged.bin
    ```
 
+   The merged image is contiguous from `0x0` to the end of the app, and the gaps between segments are filled with `0xFF`. **That includes NVS, so it erases your stored `target`.** The staging partition lies beyond the app, so the staged image survives.
+
+**Updating DFU32 later:** write only the app, at its offset. NVS (target) and staging are kept:
+
+| Layout | Boards | App offset |
+|---|---|---|
+| 4 MB | Feather S3 | `0x20000` |
+| 8 MB | Feather V2, N16R8 | `0x30000` |
+
+```bash
+python -m esptool --port /dev/cu.usbserial-575E0522651 --baud 460800 write-flash 0x30000 build/feather_esp32_v2/dfu32.bin
+```
+
 If flashing fails right after "Changing baud rate", the USB-serial link can't sustain that speed. This is common on the Feather V2 with the macOS built-in driver (`/dev/cu.usbserial-*`). Retry with `--baud 115200`.
 
 If esptool can't connect at all, the board isn't in download mode: hold **BOOT**, tap **RESET**, release BOOT, then retry. This is normal while the factory TinyUF2 firmware is still on the Feather S3. Tap RESET after flashing if the board doesn't restart on its own.
