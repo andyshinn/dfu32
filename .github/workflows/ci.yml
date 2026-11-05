@@ -44,14 +44,64 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # idf.py passes -DCCACHE_ENABLE=1 to CMake, which wraps the compilers in
+      # ccache (preinstalled in the espressif/idf image). Set job-wide so the
+      # merge-bin invocation sees the same value and doesn't reconfigure.
+      IDF_CCACHE_ENABLE: 1
+      CCACHE_MAXSIZE: 500M
+      # Hash the compiler binary rather than its mtime, which can change when
+      # the image tag is rebuilt even though the toolchain is identical.
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v7
+
+      # ${{ github.workspace }} is the host path in container jobs, so derive
+      # container paths from $GITHUB_WORKSPACE at runtime instead. The cache
+      # key embeds the IDF version read from the image itself, so it can't
+      # drift from the container tag above; bump "v1" to drop all caches.
+      - name: Configure ccache
+        id: ccache-config
+        run: |
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          idf_ver=$(sed -n 's/^set(IDF_VERSION_\(MAJOR\|MINOR\|PATCH\) \([0-9]*\))$/\2/p' \
+            "$IDF_PATH/tools/cmake/version.cmake" | paste -sd.)
+          test -n "$idf_ver" || { echo "::error::could not read IDF version"; exit 1; }
+          echo "key-prefix=ccache-v1-idf${idf_ver}-${{ matrix.board }}" >> "$GITHUB_OUTPUT"
+
+      # Every run saves under a unique key. Caches are scoped to the ref that
+      # saved them, and a restore-keys prefix match searches the current ref
+      # first, then the base branch: a PR run gets its own latest cache for
+      # this board, falling back to main's on its first run.
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: ${{ steps.ccache-config.outputs.key-prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ steps.ccache-config.outputs.key-prefix }}-
 
       - name: Build
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
+          ccache --zero-stats
           idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
+
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+
+      # Saved even when the build fails: a partially warm cache still helps
+      # the next attempt.
+      - name: Save ccache
+        if: always() && steps.ccache-restore.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
       - name: App size budget
         run: python3 tools/check_app_size.py "build/${{ matrix.board }}"
