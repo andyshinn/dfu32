@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench import checks  # noqa: E402,F401  (registers the checks)
 from bench.console import Redactor, SerialConsole  # noqa: E402
-from bench.flasher import Flasher, FlashError  # noqa: E402
+from bench.flasher import Flasher  # noqa: E402
 from bench.runner import Ctx, ordered, run_checks  # noqa: E402
 from bench.site import FirmwareSite  # noqa: E402
 
@@ -185,8 +185,10 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or Path("bench-results") / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
     redactor = Redactor()
-    redactor.add(args.wifi_pass)
-    redactor.add(args.token)
+    for name, secret in (("--wifi-pass", args.wifi_pass), ("--token", args.token)):
+        if secret and not redactor.add(secret):
+            print(f"warning: {name} is shorter than {Redactor.MIN_LEN} characters, so it is NOT redacted from the "
+                  "logs (masking it would mangle every line)", file=sys.stderr)
     eol = {"cr": "\r", "lf": "\n", "crlf": "\r\n"}[args.eol]
     echo = (lambda line: print(f"      | {line}", flush=True)) if args.echo else None
     con = SerialConsole(args.port, args.baud, log_path=out / "serial.log", eol=eol, redactor=redactor, echo=echo)
@@ -211,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             setup(ctx)
-        except (FlashError, Exception) as e:  # noqa: B014 - report any setup failure plainly
+        except Exception as e:  # any setup failure, esptool's included; Ctrl+C isn't an Exception and goes on up
             print(f"\nsetup failed: {e}", file=sys.stderr)
             return 2
         if ctx.host_ip:

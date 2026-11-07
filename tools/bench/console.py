@@ -61,10 +61,15 @@ class Redactor:
         self._secrets: set[str] = set()
         self._lock = threading.Lock()
 
-    def add(self, secret: Optional[str]) -> None:
-        if secret and len(secret) >= 4:
-            with self._lock:
-                self._secrets.add(secret)
+    MIN_LEN = 4  # shorter strings would mask ordinary text all over the logs
+
+    def add(self, secret: Optional[str]) -> bool:
+        """Registers a secret; False (not redacted) when it is empty or shorter than MIN_LEN."""
+        if not secret or len(secret) < self.MIN_LEN:
+            return False
+        with self._lock:
+            self._secrets.add(secret)
+        return True
 
     def __call__(self, text: str) -> str:
         with self._lock:

@@ -98,7 +98,7 @@ jobs:
           . "$IDF_PATH/export.sh"
           idf.py -B "build/${{ matrix.board }}-debug" -DDFU32_BOARD=${{ matrix.board }} -DDFU32_DEBUG_ENDPOINTS=ON build
           grep -q '^CONFIG_DFU32_DEBUG_ENDPOINTS=y' "build/${{ matrix.board }}-debug/sdkconfig"
-          cp "build/${{ matrix.board }}-debug/dfu32.bin" "build/${{ matrix.board }}/dfu32-${{ matrix.board }}-debug.bin"
+          cp "build/${{ matrix.board }}-debug/dfu32.bin" "build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin"
 
       - name: ccache stats
         if: always()
@@ -127,8 +127,6 @@ jobs:
           name: dfu32-${{ matrix.board }}
           path: |
             build/${{ matrix.board }}/dfu32-${{ matrix.board }}-merged.bin
-            build/${{ matrix.board }}/dfu32.bin
-            build/${{ matrix.board }}/dfu32-${{ matrix.board }}-debug.bin
             build/${{ matrix.board }}/ota_data_initial.bin
             build/${{ matrix.board }}/dfu32.bin
             build/${{ matrix.board }}/dfu32.elf
@@ -138,3 +136,11 @@ jobs:
             build/${{ matrix.board }}/sdkconfig
             dependencies.lock
           if-no-files-found: warn
+
+      # Its own artifact, so nothing that picks up dfu32-<board> for a
+      # release can ship the fault-injection build by accident.
+      - name: Upload debug build (bench only, never release)
+        uses: actions/upload-artifact@v7
+        with:
+          name: dfu32-${{ matrix.board }}-debug
+          path: build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin

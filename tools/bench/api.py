@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import socket
 import time
 import urllib.error
 import urllib.request
@@ -15,6 +14,19 @@ _DEFAULT = object()
 
 class ApiUnreachable(RuntimeError):
     """No HTTP response at all (WiFi off, device rebooting, wrong address)."""
+
+
+class ApiTimeout(ApiUnreachable):
+    """Connected, or tried to, but no response within the timeout."""
+
+
+def retry_after(headers: dict, default: float = 1.0) -> float:
+    """Seconds from a Retry-After header; an HTTP-date or junk falls back to `default`."""
+    try:
+        v = float(headers.get("Retry-After", default))
+    except (TypeError, ValueError):
+        return default
+    return v if 0 <= v <= 60 else default
 
 
 @dataclass
@@ -69,13 +81,17 @@ class ApiClient:
                     resp = self._make(r.status, r.read(), dict(r.headers), time.monotonic() - t0)
             except urllib.error.HTTPError as e:
                 resp = self._make(e.code, e.read() or b"", dict(e.headers or {}), time.monotonic() - t0)
-            except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
-                self._write(f"{method} {path} -> unreachable ({getattr(e, 'reason', e)})")
-                raise ApiUnreachable(f"{method} {path}: {getattr(e, 'reason', e)}") from e
+            except OSError as e:  # URLError, timeouts and connection errors are all OSErrors
+                reason = getattr(e, "reason", e)
+                if isinstance(e, TimeoutError) or isinstance(reason, TimeoutError):
+                    self._write(f"{method} {path} -> no response within {timeout:g} s")
+                    raise ApiTimeout(f"{method} {path}: no response within {timeout:g} s") from e
+                self._write(f"{method} {path} -> unreachable ({reason})")
+                raise ApiUnreachable(f"{method} {path}: {reason}") from e
             self._write(f"{method} {path}" + (f" {data.decode(errors='replace')}" if data else "") +
                         f" -> {resp.status} ({resp.elapsed * 1000:.0f} ms) {resp.text[:2000]}")
             if resp.status == 429 and retry_429 and tries < 8:
-                time.sleep(float(resp.headers.get("Retry-After", "1") or 1) + 0.1)
+                time.sleep(retry_after(resp.headers) + 0.1)
                 continue
             return resp
 

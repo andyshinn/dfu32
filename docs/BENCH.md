@@ -276,7 +276,7 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 - **Busy:** while a job runs, a second `flash`, `stage`, `ble/scan` or target `PUT` gets `409`; so does the console's `scan`.
 - **Abort while armed:** `POST /jobs/current/abort` during `AWAITING_TARGET`: `FAILED`, `ABORTED`, target untouched.
 - **Offline re-flash from staging:** stage while the AP is up, start a flash with `{"source":"staged"}`, then switch the access point off and run `start ota`. Follow it on the console with `job`. It must succeed without the network. Because WiFi was already down when the target was seen, DFU32 doesn't insist on reconnecting afterwards (no reboot); `status` answers again once the AP is back.
-- **Restore watchdog and run deadline** (needs the debug build: the `dfu32-<board>-debug.bin` CI artifact, or `idf.py -B build/<profile>-debug -DDFU32_BOARD=<profile> -DDFU32_DEBUG_ENDPOINTS=ON build`; never ship it):
+- **Restore watchdog and run deadline** (needs the debug build: the `dfu32-<board>-debug` CI artifact, or `idf.py -B build/<profile>-debug -DDFU32_BOARD=<profile> -DDFU32_DEBUG_ENDPOINTS=ON build`; never ship it):
   - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 restarts WiFi and counts the restore as failed, retries once, then reboots. Each wait ends as soon as WiFi reconnects (60 s at most), so on a working network this takes seconds, not minutes. The run record is already written and WiFi comes back after the reboot.
   - `{"deadline_s":20}`: the run is aborted 20 s after the target is seen, recorded as `DEADLINE_EXCEEDED`, and WiFi is restored.
   - `{"stall_s":40}`: the DFU task blocks without a heartbeat; the stall watchdog reboots after about 30 s and the next boot records `ABORTED_BY_REBOOT`.
@@ -293,7 +293,7 @@ You need Python 3.8+ and esptool, which brings pyserial with it: `pip install es
 
 ### Run it
 
-Download the CI artifact for your board. It contains the merged image, the app-only `dfu32.bin` and `dfu32-<board>-debug.bin` (the same app with the fault endpoints).
+Download the CI artifacts for your board. `dfu32-<board>` contains the merged image and the app-only `dfu32.bin`. `dfu32-<board>-debug` contains `dfu32-<board>-debug.bin`: the same app with the fault endpoints. It is a separate artifact so it can never be shipped by mistake.
 
 ```bash
 python3 tools/dfu32_bench.py --port /dev/cu.usbserial-575E0522651 \

@@ -26,6 +26,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dfu32_bench  # noqa: E402
 from bench import parse  # noqa: E402
+from bench.api import retry_after  # noqa: E402
 from bench.console import Redactor, SerialConsole, quote_arg, split_incomplete_escape, strip_ansi  # noqa: E402
 from bench.fake_dfu32 import FakeDfu32  # noqa: E402
 from bench.runner import Ctx  # noqa: E402
@@ -188,10 +189,16 @@ class Console(unittest.TestCase):
         self.assertEqual(hit[2].group(1), "0")
         self.assertIsNone(self.con.wait_line(r"nothing", 0.1, since=mark))
 
+    def test_retry_after(self):
+        self.assertEqual(retry_after({"Retry-After": "2"}), 2.0)
+        self.assertEqual(retry_after({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}), 1.0)
+        self.assertEqual(retry_after({}), 1.0)
+        self.assertEqual(retry_after({"Retry-After": "-5"}), 1.0)
+
     def test_redactor(self):
         r = Redactor()
-        r.add("pw")  # too short to redact safely
-        r.add("hunter22")
+        self.assertFalse(r.add("pw"))  # too short to redact safely; main() warns about it
+        self.assertTrue(r.add("hunter22"))
         self.assertEqual(r("wifi net hunter22 pw"), "wifi net <redacted> pw")
 
 
