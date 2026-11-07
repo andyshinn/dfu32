@@ -2,19 +2,33 @@
 #
 # Board profiles live in boards/<name>/sdkconfig.defaults. Each profile sets
 # CONFIG_IDF_TARGET, flash size, partition table, PSRAM mode, console and pins,
-# so do NOT run `idf.py set-target`; select a profile instead and give each
-# profile its own build directory:
+# so do NOT run `idf.py set-target`; pick the profile's preset instead:
 #
-#   idf.py -B build/feather_esp32s3 -DDFU32_BOARD=feather_esp32s3 build
+#   idf.py --preset feather_esp32s3 build
 #
-# The generated sdkconfig lives inside the build directory, so profiles never
-# clobber each other.
+# Each preset in CMakePresets.json sets DFU32_BOARD and its own build directory
+# (build/<name>), and the generated sdkconfig lives inside that directory, so
+# profiles never clobber each other. tools/check_presets.py keeps the presets
+# and boards/ in sync; tools/build_all.py builds every preset.
 cmake_minimum_required(VERSION 3.22)
 
+if(NOT DEFINED CACHE{DFU32_BOARD})
+    message(WARNING "DFU32_BOARD not set; defaulting to feather_esp32s3. "
+                    "Build with `idf.py --preset <board>` (see CMakePresets.json).")
+endif()
 set(DFU32_BOARD "feather_esp32s3" CACHE STRING "DFU32 board profile (directory name under boards/)")
 set(_dfu32_board_defaults "${CMAKE_CURRENT_LIST_DIR}/boards/${DFU32_BOARD}/sdkconfig.defaults")
 if(NOT EXISTS "${_dfu32_board_defaults}")
     message(FATAL_ERROR "Unknown DFU32_BOARD '${DFU32_BOARD}': ${_dfu32_board_defaults} not found")
+endif()
+# A build directory named after another board (e.g. `idf.py -B build/<board>`
+# without --preset, which picks the default preset) would quietly get the
+# wrong profile; stop instead.
+get_filename_component(_dfu32_build_name "${CMAKE_BINARY_DIR}" NAME)
+if(NOT _dfu32_build_name STREQUAL DFU32_BOARD
+   AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/boards/${_dfu32_build_name}/sdkconfig.defaults")
+    message(FATAL_ERROR "Build directory ${CMAKE_BINARY_DIR} is for board '${_dfu32_build_name}' but "
+                        "DFU32_BOARD is '${DFU32_BOARD}'. Use `idf.py --preset ${_dfu32_build_name}`.")
 endif()
 
 set(SDKCONFIG_DEFAULTS

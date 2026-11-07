@@ -33,14 +33,37 @@ jobs:
       - name: Test
         run: ctest --test-dir build-host --output-on-failure
 
+  # The firmware matrix comes from CMakePresets.json, so a new board only needs
+  # its boards/<name>/ profile and a preset. Checking them here first means a
+  # mismatch fails this job with a clear error before any firmware job starts.
+  boards:
+    name: Board list
+    runs-on: ubuntu-24.04
+    outputs:
+      boards: ${{ steps.list.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Board presets
+        run: python3 tools/check_presets.py
+
+      # Assign first: a failing command substitution inside echo's arguments
+      # wouldn't fail the step.
+      - id: list
+        name: List presets
+        run: |
+          boards=$(python3 tools/build_all.py --list --json)
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+
   firmware:
     name: Firmware (${{ matrix.board }})
+    needs: boards
     runs-on: ubuntu-24.04
     container: espressif/idf:v6.1
     strategy:
       fail-fast: false
       matrix:
-        board: [feather_esp32s3, feather_esp32_v2, esp32s3_n16r8]
+        board: ${{ fromJSON(needs.boards.outputs.boards) }}
     defaults:
       run:
         shell: bash
@@ -88,7 +111,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
           ccache --zero-stats
-          idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
+          idf.py --preset "${{ matrix.board }}" build
 
       - name: ccache stats
         if: always()
@@ -109,7 +132,7 @@ jobs:
       - name: Merged image (single file, flash at 0x0)
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py -B "build/${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
+          idf.py --preset "${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
