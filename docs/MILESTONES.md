@@ -69,7 +69,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
 ## M3: Networking & API (3–4 days)
 
-- `net_mgr`: WiFi STA, mDNS, SNTP, stop/restore, and the run deadline + restore verification (§7.3). Improv Serial moved to M4, next to ESP Web Tools: it shares the console port with the REPL and is only useful from the browser installer.
+- `net_mgr`: WiFi STA, mDNS, SNTP, stop/restore, and the run deadline + restore verification (§7.3). Improv Serial moved to M5, with the browser installer: it shares the console port with the REPL and is only useful from the installer page.
 - `fetcher` + `manifest`: HTTP fetch into staging with streaming SHA-256 and read-back verification.
 - Orchestrator job FSM (§7): check / stage / flash (arm, then wait) / abort.
 - `api`: claim, token auth, status, targets, runs, logs, staging, **BLE scan** endpoint, system reboot/rotate.
@@ -104,20 +104,53 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
 ## M4: UI, provisioning & polish (3–4 days)
 
-- Web UI: status, target form with the **scan picker**, runs, logs, system.
-- Improv BLE (only while unprovisioned), the button (unclaim / factory reset), and the LED states, built on `improv-wifi/sdk-cpp`, `espressif/button` and `espressif/led_indicator` + `led_strip` (SPEC §4.1) rather than local code.
+- Web UI: status, target form with the **scan picker**, runs, logs, system. `GET /` works while unclaimed and opens on the claim screen, because that's where an Improv redirect lands.
+- Improv core plus Improv BLE (only while unprovisioned), built on `improv-wifi/sdk-cpp` (SPEC §4.1, §9.2). Keep the core separate from the transport so M5 can add Improv Serial without changing it:
+  - takes the WiFi settings, saves them with `net::set_credentials`, waits for the connection (with a timeout), then reports provisioned with the redirect URL `http://<ip>/`, or reports an error;
+  - answers device info with `DFU32`, the firmware version, the chip and the hostname.
+- The button (unclaim / factory reset) and the LED states, built on `espressif/button` and `espressif/led_indicator` + `led_strip` (SPEC §4.1) rather than local code.
 - DFU32 self-OTA upload with rollback (`esp_ota_mark_app_valid_cancel_rollback` once WiFi and HTTP are up).
-- ESP Web Tools manifest so DFU32 can be flashed from a browser, plus Improv Serial provisioning in the same session (moved here from M3; until then, set WiFi with the `wifi` console command).
+- Firmware version from the git tag: CI checks out full history (`fetch-depth: 0`) so `git describe` gives `v0.4.0` rather than a bare hash. The same string shows in `/api/v1/status`, the UI, Improv device info and, in M5, the installer manifests.
 - `docs/RECOVERY.md` and `docs/OPERATOR.md` (MeshCore walkthrough, including remote `start ota`).
-- **Done when:** someone else can go from a fresh Feather to a successful repeater flash using only the browser.
+- **Done when:** a Feather flashed with `idf.py` joins WiFi over Improv BLE (for example from Home Assistant or Chrome) and then completes a repeater flash using only the web UI.
 
-## M5: v1.0 hardening (2 days)
+## M5: Browser installer (1–2 days)
+
+A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi with Improv Serial in the same session. It needs desktop Chrome or Edge and a USB cable, and no toolchain. Details in SPEC §9.4.
+
+- **Improv Serial in firmware**, on the console port (USB-Serial-JTAG on the S3, UART0 at 115200 on the classic ESP32), using the M4 Improv core:
+  - the REPL currently uses `esp_console_new_repl_stdio`, so linenoise owns stdin. Replace it with a small reader: frames that start with `IMPROV` go to the Improv parser, and everything else goes to the line editor and `esp_console_run`. Typing in a terminal must work as it does today;
+  - it starts early enough in boot to answer within ESP Web Tools' post-install wait (10 s by default);
+  - it stays on after provisioning, so the page can recognise an installed DFU32 and offer to change WiFi or open the device's page. USB access already allows this through the `wifi` console command.
+- **`web/`**: `index.html` plus a little CSS. No framework and no build step.
+  - The `<esp-web-install-button>` comes from ESP Web Tools, pinned to an exact version.
+  - A board picker sets the button's `manifest`. One manifest can't serve every board, because the Feather S3 and the N16R8 are both `ESP32-S3`.
+  - The button's `unsupported` slot shows a message in browsers without Web Serial.
+  - Links to the README, `OPERATOR.md` and `RECOVERY.md`.
+- **`tools/dfu32_web_manifest.py`** (with unit tests, like the other tools) writes `manifest-<board>.json` from a build's `flasher_args.json`:
+  - one build per board: its `chipFamily`, plus the separate parts at their offsets (bootloader, partition table, otadata, app). Not the merged `.bin`: raw merging fills the gaps with `0xFF`, so updating from the page would wipe NVS (WiFi, token, target) and `runlog`;
+  - `new_install_prompt_erase: true`, so a fresh install can start from blank flash;
+  - `version` is the M4 firmware version string.
+- **CI**: a `pages` job in `ci.yml` that runs for a published GitHub release (pre-releases count until v1.0) and on `workflow_dispatch`:
+  - it reuses the firmware matrix's artifacts, generates the manifests, and copies `web/`, the parts and the manifests into one directory;
+  - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
+  - it also attaches the merged `.bin` files to the release for esptool users;
+  - one-time repo setting: Pages → Source → "GitHub Actions".
+- `THIRD_PARTY_NOTICES`, generated from `dependencies.lock`, ships on the page and with each release (moved here from M6, because this is the first milestone that publishes binaries).
+- README: an "Install from your browser" link, and a note that the merged `.bin` is for fresh installs and resets settings.
+- **Bench:**
+  - Feather S3 (erased) and Feather V2: install, enter the SSID and passphrase, then "Visit device" opens the claim screen;
+  - a wrong passphrase shows the Improv error, and the retry works;
+  - coming back with DFU32 installed: the page recognises it, and updating keeps WiFi, the token, the target and the staged image;
+  - the console REPL still works in a terminal afterwards.
+- **Done when:** someone else can go from a fresh Feather to a successful repeater flash using only the browser (moved here from M4).
+
+## M6: v1.0 hardening (2 days)
 
 - Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX.
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
 - `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API).
-- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0.
-- `THIRD_PARTY_NOTICES` for binary releases, generated from `dependencies.lock` (SPEC §16).
+- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0, which also publishes the installer page.
 
 ## Later (post-v1, in rough priority order)
 
