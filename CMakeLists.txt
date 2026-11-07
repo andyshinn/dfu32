@@ -23,5 +23,13 @@ set(SDKCONFIG_DEFAULTS
 )
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 
+# h2zero/esp-nimble-cpp (even upstream master) still declares
+# cmake_minimum_required(VERSION 3.5), which CMake 4.x flags as deprecated.
+# Raising the floor to 3.10 silences that and only affects components that ask
+# for less (IDF itself requires 3.22). Older CMake ignores this variable.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(dfu32)
