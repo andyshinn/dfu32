@@ -33,5 +33,25 @@ if(DFU32_DEBUG_ENDPOINTS)
 endif()
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 
+# Workaround: h2zero/esp-nimble-cpp (2.6.0 and upstream master) declares
+# cmake_minimum_required(VERSION 3.5), which the CMake 4.x shipped with IDF v6.1
+# flags as deprecated on every configure. Raising the policy floor to 3.10 makes
+# any component that asks for less get the 3.6-3.10 policies as NEW
+# (CMP0066-CMP0071: try_compile flags, macOS RPATH, IPO, file(GENERATE) paths,
+# AUTOMOC). Today esp-nimble-cpp is the only such component, and it uses none of
+# them. IDF adds managed components from its own build function, so this cannot
+# be scoped to one component. The bootloader sub-build never includes it.
+# Older CMake ignores this variable; a value from -D or the environment wins.
+# Remove once esp-nimble-cpp requires CMake >= 3.10.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM AND NOT DEFINED ENV{CMAKE_POLICY_VERSION_MINIMUM})
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# One Component Manager lock per chip. A single dependencies.lock records the
+# target it was solved for, so building an ESP32 profile after an ESP32-S3 one
+# would rewrite it. Commit every dependencies.lock.<target> file.
+idf_build_set_property(DEPENDENCIES_LOCK "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
+
 project(dfu32)

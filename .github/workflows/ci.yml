@@ -90,6 +90,18 @@ jobs:
           ccache --zero-stats
           idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
 
+      # The Component Manager rewrites the lock if the committed one doesn't
+      # match what it resolves, and creates it if it is missing. Either way
+      # the committed pin was not what this build used.
+      - name: Component lock unchanged
+        run: |
+          if [ -n "$(git status --porcelain -- 'dependencies.lock*')" ]; then
+            git status --short -- 'dependencies.lock*'
+            git diff -- 'dependencies.lock*'
+            echo "::error::the build changed dependencies.lock.*; build this profile locally and commit the result"
+            exit 1
+          fi
+
       # The same firmware with the fault-injection endpoints, for the bench
       # runner's safety checks (tools/dfu32_bench.py, section 4). Built
       # before the cache is saved so its objects are cached too.
@@ -134,7 +146,7 @@ jobs:
             build/${{ matrix.board }}/partition_table/partition-table.bin
             build/${{ matrix.board }}/flasher_args.json
             build/${{ matrix.board }}/sdkconfig
-            dependencies.lock
+            dependencies.lock.*
           if-no-files-found: warn
 
       # Its own artifact, so nothing that picks up dfu32-<board> for a
