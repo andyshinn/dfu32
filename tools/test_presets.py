@@ -25,13 +25,16 @@ def preset(name: str, **over) -> dict:
 
 
 class Project:
-    def __init__(self, boards: list[str], presets: list[dict]):
+    def __init__(self, boards: list[str], presets: list):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         for b in boards:
             (self.dir / "boards" / b).mkdir(parents=True)
             (self.dir / "boards" / b / "sdkconfig.defaults").write_text(f'CONFIG_DFU32_BOARD_NAME="{b}"\n')
-        (self.dir / "CMakePresets.json").write_text(json.dumps({"version": 3, "configurePresets": presets}))
+        self.write({"version": 3, "configurePresets": presets})
+
+    def write(self, data) -> None:
+        (self.dir / "CMakePresets.json").write_text(data if isinstance(data, str) else json.dumps(data))
 
 
 class CheckPresets(unittest.TestCase):
@@ -60,6 +63,37 @@ class CheckPresets(unittest.TestCase):
         self.assertEqual(len(errs), 2)
         self.assertIn("binaryDir must be 'build/a'", errs[0])
         self.assertIn("DFU32_BOARD must be 'a'", errs[1])
+
+    def test_dict_form_cache_variable(self):
+        p = preset("a", cacheVariables={"DFU32_BOARD": {"type": "STRING", "value": "a"}})
+        self.assertEqual(self.errors(["a"], [p]), [])
+
+    def test_malformed_entries_are_errors_not_tracebacks(self):
+        errs = self.errors(["a", "b"], [preset("a", cacheVariables=None), "b", {"binaryDir": "build/x"}])
+        self.assertEqual(errs, [
+            "preset 'a': cacheVariables.DFU32_BOARD must be 'a', got None",
+            "configurePresets[1] is not an object",
+            "configurePresets[2] has no name",
+            "board 'b' has no preset in CMakePresets.json",
+        ])
+
+    def test_no_presets(self):
+        self.assertEqual(self.errors([], []), ["CMakePresets.json has no configure presets"])
+
+    def test_unreadable_file(self):
+        for content in ("{not json", "[]", '{"configurePresets": {}}'):
+            proj = Project([], [])
+            proj.write(content)
+            try:
+                errs = check_presets.check(proj.dir)
+            finally:
+                proj.tmp.cleanup()
+            self.assertEqual(len(errs), 1, content)
+            self.assertTrue(errs[0].startswith("cannot read CMakePresets.json: "), errs)
+        proj = Project([], [])
+        (proj.dir / "CMakePresets.json").unlink()
+        self.assertIn("cannot read CMakePresets.json", check_presets.check(proj.dir)[0])
+        proj.tmp.cleanup()
 
     def test_inherits_and_duplicate(self):
         errs = self.errors(["a"], [preset("a"), preset("a", inherits="base")])
@@ -103,6 +137,31 @@ class BuildAll(unittest.TestCase):
         self.assertEqual(len(self.calls), 3)
         self.assertIn("b: FAILED (exit 1)", out)
         self.assertIn("c: ok", out)
+
+    def test_idf_args_are_not_parsed_as_own_options(self):
+        rc, _ = self.run_main("--only", "a", "build", "--help", "--only", "x")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.calls, [["idf.py", "--preset", "a", "build", "--help", "--only", "x"]])
+
+    def test_double_dash_before_dashed_idf_args(self):
+        rc, _ = self.run_main("--only", "c", "--", "-p", "/dev/ttyACM0", "flash")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.calls, [["idf.py", "--preset", "c", "-p", "/dev/ttyACM0", "flash"]])
+
+    def test_bad_presets_fail_before_running(self):
+        self.proj.write("{not json")
+        for argv in ((), ("--list", "--json")):
+            rc, out = self.run_main(*argv)
+            self.assertEqual(rc, 2)
+            self.assertIn("error: cannot read CMakePresets.json", out)
+        self.assertEqual(self.calls, [])
+
+    def test_no_presets_fails(self):
+        self.proj.write({"version": 3, "configurePresets": []})
+        rc, out = self.run_main("--list", "--json")
+        self.assertEqual(rc, 2)
+        self.assertIn("no configure presets", out)
+        self.assertNotIn("[]", out)
 
     def test_only_unknown(self):
         rc, out = self.run_main("--only", "nope")
