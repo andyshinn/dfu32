@@ -219,7 +219,11 @@ class Ctx:
     def start_ota(self, *, lora: bool = False, wait_enter: bool = False, hint: str = "") -> None:
         self.ota_pending = True
         if self.repeater and not lora:
-            out = self.repeater.command("start ota")
+            try:
+                out = self.repeater.command("start ota")
+            except Exception as e:  # pyserial errors (port gone, busy) shouldn't end the check
+                out = ""
+                self.warn(f"repeater USB console failed ({type(e).__name__}: {e})")
             if "OK" in out:
                 self.say("sent `start ota` over the repeater's USB console")
                 if wait_enter:
@@ -237,11 +241,16 @@ class Ctx:
         """Checks that expect DFU32 *not* to find the repeater need it out of OTA mode."""
         if not self.ota_pending:
             return
+        rebooted = False
         if self.repeater:
-            self.repeater.command("reboot", wait=1)
-            self.say("rebooted the repeater over USB so it stops advertising for OTA")
-            time.sleep(10)
-        else:
+            try:
+                self.repeater.command("reboot", wait=1)
+                rebooted = True
+                self.say("rebooted the repeater over USB so it stops advertising for OTA")
+                time.sleep(10)
+            except Exception as e:
+                self.warn(f"repeater USB console failed ({type(e).__name__}: {e})")
+        if not rebooted:
             self.pause("The repeater is still in OTA mode from an earlier `start ota`. Reboot it (`reboot` on its "
                        "console or over LoRa) so it stops advertising, and wait until it is back up.")
         self.ota_pending = False
@@ -709,8 +718,12 @@ def run_checks(ctx: Ctx, selected: list[TestDef], hooks: dict) -> bool:
                 res.notes.append(traceback.format_exc())
             res.seconds = time.monotonic() - t0
             color = {"PASS": GREEN, "WARN": YELLOW, "SKIP": DIM}.get(res.status, RED)
-            last = res.notes[-1].splitlines()[0] if res.notes and res.status in ("FAIL", "ERROR", "SKIP") else ""
+            tb = res.notes[-1] if res.notes and res.notes[-1].startswith("Traceback") else ""
+            msgs = [n for n in res.notes if n.startswith(("FAIL:", "ERROR:", "SKIP:"))]
+            last = msgs[-1] if msgs and res.status in ("FAIL", "ERROR", "SKIP") else ""
             print("  => " + _c(color, res.status) + (f"  {last}" if last else ""), flush=True)
+            if tb:  # a bug in the runner: show where, so it can be reported
+                print(_c(DIM, "\n".join("     " + ln for ln in tb.rstrip().splitlines())), flush=True)
             cleanup(ctx, interrupted)
             write_report(ctx, started, False)
             if interrupted:
