@@ -122,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how long DFU32 waits for `start ota` each time (default 300 s)")
 
     g = ap.add_argument_group("behaviour")
+    g.add_argument("--unattended", action="store_true",
+                   help="run with nobody at the keyboard: 3.5 sends `start ota` over --repeater-port instead of "
+                        "LoRa (noted in the report), and checks that would prompt you are skipped")
     g.add_argument("--manual-reset", action="store_true", help="ask you to press RESET instead of pulsing RTS")
     g.add_argument("--power-cycle", action="store_true", help="1.4: ask you to unplug DFU32 instead of a reset")
     g.add_argument("--keep-hostname", action="store_true", help="3.13: leave the hostname as bench-dfu")
@@ -168,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"--{need} is required")
     if not (args.zip or (args.bin and args.dat)):
         ap.error("give the repeater firmware: --zip, or --bin and --dat")
+    if args.unattended and not args.repeater_port:
+        ap.error("--unattended needs --repeater-port, so the runner can send `start ota` itself")
+    if args.unattended and (args.manual_reset or args.power_cycle):
+        ap.error("--unattended can't be combined with --manual-reset or --power-cycle")
     if args.debug_app_bin and not args.app_bin:
         print("note: without --app-bin the debug build stays on DFU32 after section 4", file=sys.stderr)
 

@@ -274,6 +274,8 @@ class Ctx:
         self.con.note("ACTION: " + msg)
 
     def pause(self, msg: str) -> None:
+        if self.args.unattended:
+            raise TestSkipped("needs a person (--unattended): " + msg)
         if not sys.stdin.isatty():
             raise TestSkipped("needs a person at the keyboard: " + msg)
         self.action(msg)
@@ -289,6 +291,10 @@ class Ctx:
 
     def start_ota(self, *, lora: bool = False, wait_enter: bool = False, hint: str = "") -> None:
         self.ota_pending = True
+        if lora and self.args.unattended and self.repeater:
+            self.note("--unattended: `start ota` sent over the repeater's USB console instead of LoRa, so the "
+                      "remote (LoRa) path was not tested")
+            lora = False
         if self.repeater and not lora:
             try:
                 out = self.repeater.command("start ota", expect="OK")

@@ -288,6 +288,7 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 
 - **`start ota` on the repeater.** It rings the terminal bell, prints what to do, and carries on by itself once DFU32 sees the repeater. With `--repeater-port` it sends `start ota` over the repeater's USB console instead. Check 3.5, the M3 "done when", always asks you to send it **over LoRa from the companion app**.
 - Nothing needs the access point switched off. The WiFi-drop test (§4) and the offline re-flash (§6) are left to do by hand.
+- **Fully unattended:** with `--repeater-port` and `--unattended`, nothing waits for you. 3.5 sends `start ota` over USB instead of LoRa (the report says so), and any check that would need a person is skipped.
 
 You need Python 3.8+ and esptool, which brings pyserial with it: `pip install esptool`. Close any serial monitor first, so the port is free.
 
