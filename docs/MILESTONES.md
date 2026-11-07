@@ -102,7 +102,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
     The bench checklist is in [BENCH.md §6](BENCH.md#6-over-the-http-api-m3b).
 
-## M4: UI, provisioning & polish (3–4 days)
+## M4: UI, provisioning & polish (4–5 days)
 
 - Web UI: status, target form with the **scan picker**, runs, logs, system. `GET /` works while unclaimed and opens on the claim screen, because that's where an Improv redirect lands.
 - Improv core plus Improv BLE (only while unprovisioned), built on `improv-wifi/sdk-cpp` (SPEC §4.1, §9.2). Keep the core separate from the transport so M5 can add Improv Serial without changing it:
@@ -114,35 +114,42 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - `docs/RECOVERY.md` and `docs/OPERATOR.md` (MeshCore walkthrough, including remote `start ota`).
 - **Done when:** a Feather flashed with `idf.py` joins WiFi over Improv BLE (for example from Home Assistant or Chrome) and then completes a repeater flash using only the web UI.
 
-## M5: Browser installer (1–2 days)
+## M5: Browser installer (2–3 days)
 
 A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi with Improv Serial in the same session. It needs desktop Chrome or Edge and a USB cable, and no toolchain. Details in SPEC §9.4.
 
 - **Improv Serial in firmware**, on the console port (USB-Serial-JTAG on the S3, UART0 at 115200 on the classic ESP32), using the M4 Improv core:
   - the REPL currently uses `esp_console_new_repl_stdio`, so linenoise owns stdin. Replace it with a small reader: frames that start with `IMPROV` go to the Improv parser, and everything else goes to the line editor and `esp_console_run`. Typing in a terminal must work as it does today;
+  - resync as in SPEC §9.2: a partial header goes back to the line editor; after the header, a bad checksum, an oversized length or 250 ms of silence drops the frame. The framing state machine is pure and host-tested;
   - it starts early enough in boot to answer within ESP Web Tools' post-install wait (10 s by default);
   - it stays on after provisioning, so the page can recognise an installed DFU32 and offer to change WiFi or open the device's page. USB access already allows this through the `wifi` console command.
 - **`web/`**: `index.html` plus a little CSS. No framework and no build step.
   - The `<esp-web-install-button>` comes from ESP Web Tools, pinned to an exact version.
   - A board picker sets the button's `manifest`. One manifest can't serve every board, because the Feather S3 and the N16R8 are both `ESP32-S3`.
   - The button's `unsupported` slot shows a message in browsers without Web Serial.
+  - A warning next to the button: choosing "Erase device" removes WiFi, the token and the target.
   - Links to the README, `OPERATOR.md` and `RECOVERY.md`.
 - **`tools/dfu32_web_manifest.py`** (with unit tests, like the other tools) writes `manifest-<board>.json` from a build's `flasher_args.json`:
   - one build per board: its `chipFamily`, plus the separate parts at their offsets (bootloader, partition table, otadata, app). Not the merged `.bin`: raw merging fills the gaps with `0xFF`, so updating from the page would wipe NVS (WiFi, token, target) and `runlog`;
   - `new_install_prompt_erase: true`, so a fresh install can start from blank flash;
   - `version` is the M4 firmware version string.
-- **CI**: a `pages` job in `ci.yml` that runs for a published GitHub release (pre-releases count until v1.0) and on `workflow_dispatch`:
-  - it reuses the firmware matrix's artifacts, generates the manifests, and copies `web/`, the parts and the manifests into one directory;
+- **Partition baseline:** `tools/check_partitions.py` checks `nvs`, `runlog` and `staging` against a committed baseline, so a layout change that would break keep-settings updates can't land by accident (SPEC §9.4).
+- **CI**: a `pages` job in `ci.yml` (details in SPEC §9.4):
+  - triggers on `release: published` and `workflow_dispatch`. A release run builds the firmware from the tag in the same run and uses that run's artifacts;
+  - deploys only for the latest stable release, never a pre-release or a patch to an older line, under a `pages` concurrency group;
+  - manual runs deploy from `main`. This is the path to bench M5 before the first release;
+  - generates the manifests and copies `web/`, the parts and the manifests into one directory;
   - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
   - it also attaches the merged `.bin` files to the release for esptool users;
-  - one-time repo setting: Pages → Source → "GitHub Actions".
+  - one-time repo settings: Pages → Source → "GitHub Actions", and a `v*` tag rule in the `github-pages` environment's deployment branches and tags (by default it rejects tag refs).
 - `THIRD_PARTY_NOTICES`, generated from `dependencies.lock`, ships on the page and with each release (moved here from M6, because this is the first milestone that publishes binaries).
 - README: an "Install from your browser" link, and a note that the merged `.bin` is for fresh installs and resets settings.
 - **Bench:**
-  - Feather S3 (erased) and Feather V2: install, enter the SSID and passphrase, then "Visit device" opens the claim screen;
+  - from a manual `pages` deployment of `main`: Feather S3 (erased) and Feather V2: install, enter the SSID and passphrase, then "Visit device" opens the claim screen;
   - a wrong passphrase shows the Improv error, and the retry works;
   - coming back with DFU32 installed: the page recognises it, and updating keeps WiFi, the token, the target and the staged image;
-  - the console REPL still works in a terminal afterwards.
+  - the console REPL still works in a terminal afterwards, including after a cut-off Improv frame;
+  - after the first release is published, the page serves it. Publishing a pre-release leaves the page alone.
 - **Done when:** someone else can go from a fresh Feather to a successful repeater flash using only the browser (moved here from M4).
 
 ## M6: v1.0 hardening (2 days)
