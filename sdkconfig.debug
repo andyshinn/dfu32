@@ -1,0 +1,3 @@
+# Bench-only additions, applied with -DDFU32_BOARD=<profile> -DDFU32_DEBUG_ENDPOINTS=ON
+# (see CMakeLists.txt). Never ship a build made with this file.
+CONFIG_DFU32_DEBUG_ENDPOINTS=y
