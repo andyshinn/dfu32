@@ -29,7 +29,7 @@ from bench import parse  # noqa: E402
 from bench.api import retry_after  # noqa: E402
 from bench.console import Redactor, SerialConsole, quote_arg, split_incomplete_escape, strip_ansi  # noqa: E402
 from bench.fake_dfu32 import FakeDfu32  # noqa: E402
-from bench.runner import Ctx  # noqa: E402
+from bench.runner import Ctx, Repeater  # noqa: E402
 from bench.site import FirmwareSite, flip_hex_digit  # noqa: E402
 from test_dfu32_pack import write_zip  # noqa: E402
 from test_stage_image import synthetic_package  # noqa: E402
@@ -208,6 +208,60 @@ class Console(unittest.TestCase):
         self.assertFalse(r.add("pw"))  # too short to redact safely; main() warns about it
         self.assertTrue(r.add("hunter22"))
         self.assertEqual(r("wifi net hunter22 pw"), "wifi net <redacted> pw")
+
+
+class FlakyUsbPort:
+    """A repeater port that vanishes right after a command is written, like the T096 after `start ota`."""
+
+    def __init__(self, opened):
+        self.opened = opened
+        self.written = b""
+
+    def reset_input_buffer(self):
+        pass
+
+    def write(self, b):
+        self.written += b
+
+    def flush(self):
+        pass
+
+    def read(self, n):
+        raise OSError(6, "Device not configured")
+
+    def close(self):
+        pass
+
+
+class RepeaterPort(unittest.TestCase):
+    def test_port_dropping_after_write_is_not_an_error(self):
+        opened = []
+
+        def opener(port, baud):
+            p = FlakyUsbPort(opened)
+            opened.append(p)
+            return p
+
+        logs = []
+        r = Repeater("usb", 115200, logs.append, opener=opener)
+        self.assertEqual(r.command("start ota", wait=0.5), "")
+        self.assertEqual(opened[0].written, b"start ota\r\n")
+        self.assertIsNone(r.ser)  # dropped; reopened on the next command
+        r.command("reboot", wait=0.2)
+        self.assertEqual(len(opened), 2)
+        self.assertTrue(any("dropped" in m for m in logs))
+
+    def test_interrupt_sends_ctrl_c_alone(self):
+        port = FakePort()
+        con = SerialConsole("fake", opener=lambda p, b: port)
+        con.open()
+        try:
+            th = __import__("threading").Timer(0.3, lambda: con.feed(b"FLASH ABORTED after 1 attempt(s): x\ndfu32> "))
+            th.start()
+            self.assertTrue(con.interrupt(timeout=3))
+            self.assertEqual(port.written, b"\x03")
+        finally:
+            con.close()
 
 
 class Site(unittest.TestCase):

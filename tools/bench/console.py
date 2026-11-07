@@ -321,6 +321,24 @@ class SerialConsole:
     def ctrl_c(self) -> None:
         self._write(b"\x03")
 
+    def interrupt(self, timeout: float = 90) -> bool:
+        """Sends Ctrl+C alone and waits, sending nothing else, for the command to end at its prompt.
+
+        DFU32's abort watcher only honours a read that holds nothing but Ctrl+C/Ctrl+D, so a
+        newline sent right after it would cancel the abort.
+        """
+        with self._cv:
+            start = len(self._text)
+        self.ctrl_c()
+        deadline = time.monotonic() + timeout
+        with self._cv:
+            while not _PROMPT_RE.search(self._text, start):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._cv.wait(min(left, 0.5))
+        return True
+
     # ---- log watching ------------------------------------------------------------------
 
     def mark(self) -> int:

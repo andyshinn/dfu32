@@ -102,21 +102,63 @@ class JobWatch:
 
 
 class Repeater:
-    """Optional: the repeater's own USB console, to send `start ota` without a person."""
+    """Optional: the repeater's own USB console, to send `start ota` without a person.
 
-    def __init__(self, port: str, baud: int, log) -> None:
-        import serial  # type: ignore
-        self.ser = serial.Serial(port, baud, timeout=0.2)
+    On native-USB boards (the T096 among them) the port can vanish right after
+    `start ota` or `reboot` and come back later, so it is reopened on demand.
+    """
+
+    def __init__(self, port: str, baud: int, log, opener: Optional[Callable] = None) -> None:
+        self.port = port
+        self.baud = baud
         self.log = log
+        self._opener = opener or self._pyserial
+        self.ser = None
+        self._open(timeout=0)  # fail early on a wrong port
+
+    def _pyserial(self, port: str, baud: int):
+        import serial  # type: ignore
+        return serial.Serial(port, baud, timeout=0.2)
+
+    def _open(self, timeout: float) -> None:
+        end = time.monotonic() + timeout
+        while True:
+            try:
+                self.ser = self._opener(self.port, self.baud)
+                return
+            except OSError:  # pyserial's SerialException is an OSError
+                if time.monotonic() >= end:
+                    raise
+                time.sleep(0.5)
+
+    def _drop(self) -> None:
+        ser, self.ser = self.ser, None
+        if ser is not None:
+            try:
+                ser.close()
+            except OSError:
+                pass
 
     def command(self, line: str, wait: float = 3.0) -> str:
-        self.ser.reset_input_buffer()
-        self.ser.write((line + "\r\n").encode())
-        self.ser.flush()
+        """Sends one line and returns what came back. Raises only if it couldn't be sent."""
+        if self.ser is None:
+            self._open(timeout=30)  # it re-enumerates after `start ota` or a reboot
+        try:
+            self.ser.reset_input_buffer()
+            self.ser.write((line + "\r\n").encode())
+            self.ser.flush()
+        except OSError:
+            self._drop()
+            raise
         end = time.monotonic() + wait
         buf = b""
         while time.monotonic() < end:
-            buf += self.ser.read(256)
+            try:
+                buf += self.ser.read(256)
+            except OSError as e:  # sent, then the port went away: normal for some boards
+                self.log(f"repeater port dropped after '{line}' ({e}); reopening it next time")
+                self._drop()
+                break
         text = buf.decode(errors="replace")
         self.log(f"repeater> {line}\n{text.strip()}")
         return text
@@ -221,15 +263,17 @@ class Ctx:
         if self.repeater and not lora:
             try:
                 out = self.repeater.command("start ota")
-            except Exception as e:  # pyserial errors (port gone, busy) shouldn't end the check
-                out = ""
-                self.warn(f"repeater USB console failed ({type(e).__name__}: {e})")
-            if "OK" in out:
-                self.say("sent `start ota` over the repeater's USB console")
+            except Exception as e:  # couldn't even send it: ask the person instead
+                self.warn(f"couldn't send `start ota` over the repeater's USB port ({type(e).__name__}: {e})")
+            else:
+                if "OK" in out:
+                    self.say("sent `start ota` over the repeater's USB console (it replied OK)")
+                else:
+                    self.say("sent `start ota` over the repeater's USB console (no reply read; the port may have "
+                             "dropped). If DFU32 doesn't see the repeater, send it yourself.")
                 if wait_enter:
-                    time.sleep(1)
+                    time.sleep(2)
                 return
-            self.warn("repeater USB console didn't answer `start ota` with OK; asking you instead")
         where = "OVER LoRa from the companion app (remote admin)" if lora else "to the repeater (LoRa or its USB console)"
         msg = f"Send `start ota` {where}." + (f" {hint}" if hint else "")
         if wait_enter:
@@ -757,8 +801,11 @@ def cleanup(ctx: Ctx, interrupted: bool) -> None:
         # A console command (flash, scan) is still running: Ctrl+C stops it at a safe point.
         try:
             ctx.say("console busy: sending Ctrl+C")
-            ctx.con.ctrl_c()
-            ctx.con.sync(attempts=12, timeout=5)
+            # Ctrl+C must arrive on its own (DFU32 ignores it mixed with other keys), so send
+            # nothing else until the command has stopped and printed its prompt.
+            if not ctx.con.interrupt(timeout=90):
+                ctx.say("no prompt yet after Ctrl+C; still trying")
+            ctx.con.sync(attempts=6, timeout=5)
         except ConsoleError as e:
             ctx.say(f"console still not at its prompt: {e}")
     try:
