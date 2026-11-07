@@ -126,7 +126,7 @@ class Repeater:
             try:
                 self.ser = self._opener(self.port, self.baud)
                 return
-            except OSError:  # pyserial's SerialException is an OSError
+            except Exception:  # noqa: BLE001 - SerialException, OSError, termios.error while re-enumerating
                 if time.monotonic() >= end:
                     raise
                 time.sleep(0.5)
@@ -141,37 +141,52 @@ class Repeater:
 
     def _send(self, data: bytes) -> None:
         if self.ser is None:
-            self._open(timeout=30)  # it re-enumerates after `start ota` or a reboot
+            self._open(timeout=0)
         self.ser.reset_input_buffer()
         self.ser.write(data)
         self.ser.flush()
 
-    def command(self, line: str, wait: float = 3.0) -> str:
-        """Sends one line and returns what came back. Raises only if it couldn't be sent."""
-        data = (line + "\r\n").encode()
-        try:
-            self._send(data)
-        except Exception as e:  # noqa: BLE001 - a stale handle after a USB re-enumeration raises
-            # OSError, SerialException or (macOS) termios.error: reopen once and retry.
-            self.log(f"repeater port stale ({type(e).__name__}: {e}); reopening")
-            self._drop()
-            try:
-                self._send(data)
-            except Exception:
-                self._drop()
-                raise
+    def _read(self, wait: float) -> tuple[str, bool]:
+        """What comes back within `wait` s, and whether the port dropped meanwhile."""
         end = time.monotonic() + wait
         buf = b""
         while time.monotonic() < end:
             try:
                 buf += self.ser.read(256)
-            except Exception as e:  # noqa: BLE001 - sent, then the port went away: normal for some boards
-                self.log(f"repeater port dropped after '{line}' ({e}); reopening it next time")
+            except Exception:  # noqa: BLE001 - some boards drop USB right after `start ota`
                 self._drop()
-                break
-        text = buf.decode(errors="replace")
-        self.log(f"repeater> {line}\n{text.strip()}")
-        return text
+                return buf.decode(errors="replace"), True
+        return buf.decode(errors="replace"), False
+
+    def command(self, line: str, wait: float = 3.0, *, expect: str = "", window: float = 60.0,
+                tries: int = 3) -> str:
+        """Sends one line and returns the reply.
+
+        Keeps trying for up to `window` s while the port can't be opened or written: right after
+        a flash the repeater is still rebooting and its USB port isn't back yet. With `expect`,
+        the line is sent again (up to `tries` times) when the port stays up but the reply lacks
+        it. Raises only if the line could never be sent.
+        """
+        data = (line + "\r\n").encode()
+        deadline = time.monotonic() + window
+        sent = 0
+        while True:
+            try:
+                self._send(data)
+            except Exception as e:  # noqa: BLE001
+                self._drop()
+                if time.monotonic() >= deadline:
+                    self.log(f"repeater port still unavailable after {window:.0f} s ({type(e).__name__}: {e})")
+                    raise
+                self.log(f"repeater port not ready ({type(e).__name__}: {e}); retrying")
+                time.sleep(1.5)
+                continue
+            sent += 1
+            text, dropped = self._read(wait)
+            self.log(f"repeater> {line} (try {sent}){' [port dropped]' if dropped else ''}\n{text.strip()}")
+            if dropped or not expect or expect in text or sent >= tries or time.monotonic() >= deadline:
+                return text
+            self.log(f"repeater didn't answer '{expect}'; sending '{line}' again")
 
 
 # ---- context ----------------------------------------------------------------------------
@@ -272,7 +287,7 @@ class Ctx:
         self.ota_pending = True
         if self.repeater and not lora:
             try:
-                out = self.repeater.command("start ota")
+                out = self.repeater.command("start ota", expect="OK")
             except Exception as e:  # couldn't even send it: ask the person instead
                 self.warn(f"couldn't send `start ota` over the repeater's USB port ({type(e).__name__}: {e})")
             else:

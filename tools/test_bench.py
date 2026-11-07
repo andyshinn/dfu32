@@ -270,6 +270,27 @@ class RepeaterPort(unittest.TestCase):
         self.assertEqual(len(opened), 2)
         self.assertEqual(opened[1].written, b"start ota\r\n")
 
+    def test_waits_for_the_port_to_come_back_and_resends_without_ok(self):
+        import termios
+        state = {"opens": 0}
+
+        class Quiet(FlakyUsbPort):
+            def read(self, n):
+                time.sleep(0.01)
+                return b""
+
+        def opener(port, baud):
+            state["opens"] += 1
+            if 2 <= state["opens"] <= 3:  # still rebooting: the device node isn't back yet
+                raise termios.error(2, "No such file or directory")
+            return Quiet([]) if state["opens"] > 1 else FlakyUsbPort([])
+
+        r = Repeater("usb", 115200, lambda m: None, opener=opener)
+        r.ser = None  # as after a drop
+        with mock.patch.object(time, "sleep"):
+            r.command("start ota", wait=0.05, expect="OK", window=30)
+        self.assertEqual(r.ser.written, b"start ota\r\n" * 3)  # no OK: sent three times
+
     def test_interrupt_sends_ctrl_c_alone(self):
         port = FakePort()
         con = SerialConsole("fake", opener=lambda p, b: port)
