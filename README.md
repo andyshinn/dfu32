@@ -35,7 +35,7 @@ Use your own serial port in place of `/dev/cu.usbmodem1101`.
 
 PSRAM is required. A board without it won't boot this firmware.
 
-The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into download mode by itself. Pull BOOT0 to GND, press reset, flash, then release BOOT0 and press reset again. Its status LED is the green one (the RAK19007 has no NeoPixel), and with no user button you unclaim the API token through `POST /api/v1/system/token/rotate`.
+The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into download mode by itself. Pull BOOT0 to GND, press reset, flash, then release BOOT0 and press reset again. Its status LED is the blue one on GPIO2 (the RAK19007 has no NeoPixel). It has no user button, so a lost API token can only be recovered by reflashing with an NVS erase; while you still have the token, `POST /api/v1/system/token/rotate` replaces it.
 
 Change settings for a profile with `idf.py -B build/<profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
 

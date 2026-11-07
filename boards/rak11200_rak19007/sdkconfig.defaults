@@ -1,5 +1,7 @@
-# RAKwireless WisBlock RAK11200 core (ESP32-WROVER-B: 4 MB flash, 8 MB PSRAM, of
-# which a classic ESP32 maps 4 MB) on a RAK19007 base board. Classic ESP32,
+# RAKwireless WisBlock RAK11200 core (ESP32-WROVER-B: 4 MB flash, 8 MB PSRAM) on
+# a RAK19007 base board. A classic ESP32 maps only 4 MB of the PSRAM; IDF detects
+# the chip size itself, maps the first 4 MB and logs a warning, so no extra PSRAM
+# option is set (as for feather_esp32_v2). Classic ESP32,
 # BLE 4.2 (DLE, no 2M PHY). Console on UART0 over the base board's USB-C.
 # There is no auto-reset circuit: to flash, hold BOOT0 low (pull it to GND)
 # while resetting the board.
@@ -19,10 +21,12 @@ CONFIG_DFU32_BOARD_NAME="rak11200_rak19007"
 # No addressable LED on the core or the base board.
 CONFIG_DFU32_NEOPIXEL_GPIO=-1
 CONFIG_DFU32_NEOPIXEL_POWER_GPIO=-1
-# Green LED (WisBlock LED1). The blue LED (LED2) is GPIO2. GPIO12 is the MTDI
-# strapping pin that picks the flash voltage at reset: the LED's resistor to
-# ground keeps it low, so never add a pull-up here.
-CONFIG_DFU32_STATUS_LED_GPIO=12
+# Blue LED (WisBlock LED2). GPIO2 is a strapping pin, but it only matters when
+# GPIO0 is also low (download mode), so a lit LED can't stop a normal boot.
+# The green LED (LED1) is on GPIO12, the MTDI strapping pin that picks the
+# flash voltage: driving it high across a reset could select 1.8 V for the
+# WROVER-B's 3.3 V flash, so don't use it as an output.
+CONFIG_DFU32_STATUS_LED_GPIO=2
 # The RAK19007 has only a reset button. WB_SW1 (GPIO34) is a connector pin for
 # IO modules, not a button on the base.
 CONFIG_DFU32_BUTTON_GPIO=-1
