@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .api import ApiClient, ApiUnreachable
-from .console import ConsoleError, ConsoleRebooted, SerialConsole, quote_arg
+from .console import ConsoleError, ConsoleRebooted, DownloadMode, SerialConsole, quote_arg
 from .flasher import FlashError, Flasher, Layout, LAYOUTS, layout_for_staging
 from .parse import parse_flash, parse_job, parse_run, parse_runs, parse_staged, parse_target, parse_token, parse_wifi
 from .site import FirmwareSite, local_ip_for
@@ -414,12 +414,22 @@ class Ctx:
     # ---- reboot / flashing DFU32 itself -----------------------------------------------------
 
     def reset_and_wait(self, *, manual: bool = False, why: str = "") -> dict:
-        before = len(self.con.boots)
-        if manual or self.args.manual_reset:
-            self.action(f"Press RESET on the DFU32 board now{(' (' + why + ')') if why else ''}.")
-        else:
-            self.con.hard_reset()
-        boot = self.con.wait_boot(before, timeout=120 if manual or self.args.manual_reset else 45)
+        manual = manual or self.args.manual_reset
+        for attempt in (1, 2):
+            before, mark = len(self.con.boots), self.con.mark()
+            if manual:
+                self.action(f"Press RESET on the DFU32 board now{(' (' + why + ')') if why else ''}.")
+            else:
+                self.con.hard_reset()
+            try:
+                boot = self.con.wait_boot(before, timeout=120 if manual else 45, since=mark)
+                break
+            except DownloadMode:
+                if attempt == 2 or manual:
+                    raise ConsoleError("DFU32 keeps resetting into its ROM download mode ('waiting for download'): "
+                                       "something holds GPIO0 low. Press RESET on the board (with nothing else "
+                                       "holding the port), then run again with --manual-reset if it recurs.")
+                self.say("DFU32 came up in ROM download mode; resetting again with DTR released")
         self.after_boot(boot)
         return boot
 

@@ -35,6 +35,10 @@ class ConsoleRebooted(ConsoleError):
     """DFU32 rebooted while a command was running."""
 
 
+class DownloadMode(ConsoleError):
+    """The chip reset with GPIO0 low and sits in its ROM bootloader ("waiting for download")."""
+
+
 def quote_arg(arg: str) -> str:
     """Quotes an argument for esp_console's argv splitter (spaces, quotes, backslashes)."""
     if arg and not any(c in arg for c in ' "\\\''):
@@ -365,18 +369,25 @@ class SerialConsole:
             raise ConsoleError("port not open")
         self._meta("hard reset (RTS)")
         try:
-            ser.dtr = False
+            ser.dtr = False  # GPIO0 high: boot the app, not the ROM downloader
+            time.sleep(0.05)
             ser.rts = True
             time.sleep(0.2)
             ser.rts = False
         except Exception:
             pass  # native USB drops the port as the chip resets; the reader reconnects
 
-    def wait_boot(self, boots_before: int, timeout: float = 45) -> dict:
-        """Waits for a boot banner after `boots_before` boots, then for the prompt."""
+    def wait_boot(self, boots_before: int, timeout: float = 45, since: Optional[int] = None) -> dict:
+        """Waits for a boot banner after `boots_before` boots, then for the prompt.
+
+        With `since` (a line index), raises DownloadMode as soon as the ROM
+        reports "waiting for download" after that line.
+        """
         deadline = time.monotonic() + timeout
         with self._cv:
             while len(self.boots) <= boots_before:
+                if since is not None and any("waiting for download" in ln.text for ln in self.lines[since:]):
+                    raise DownloadMode("DFU32 reset into its ROM download mode (GPIO0 was low: the serial DTR line)")
                 left = deadline - time.monotonic()
                 if left <= 0:
                     raise ConsoleError(f"DFU32 did not boot within {timeout:.0f} s")

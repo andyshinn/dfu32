@@ -182,6 +182,14 @@ class Console(unittest.TestCase):
         self.assertNotIn("SECRETTOKEN123", log)
         self.assertIn("<redacted>", log)
 
+    def test_download_mode_is_reported(self):
+        from bench.console import DownloadMode
+        mark = self.con.mark()
+        self.con.feed(b"ets Jul 29 2019 12:21:46\n\nrst:0x1 (POWERON_RESET),boot:0x3 (DOWNLOAD_BOOT(UART0/UART1/SDIO_REI_REO_V2))\n"
+                      b"waiting for download\n")
+        with self.assertRaises(DownloadMode):
+            self.con.wait_boot(len(self.con.boots), timeout=2, since=mark)
+
     def test_wait_line(self):
         mark = self.con.mark()
         self.con.feed(b"progress   0%\nprogress  10% (1/2)\n")
