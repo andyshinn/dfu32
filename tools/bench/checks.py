@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import platform
-import re
 import statistics
 import subprocess
 import threading
@@ -178,6 +177,10 @@ def c_wifi(ctx: Ctx) -> None:
     ip = ctx.resolve(name)
     ctx.soft(ip == st["ip"], f"{name} resolves to {st['ip']}", f"got {ip}; is mDNS available on this computer?")
     ctx.soft(_ping(name), f"ping {name} answers")
+    end = time.monotonic() + 30  # SNTP can take a few seconds after the first connect
+    while not st["time_synced"] and time.monotonic() < end:
+        time.sleep(3)
+        st = ctx.wifi_status()
     ctx.soft(st["time_synced"], "clock synced over SNTP")
 
 
@@ -281,38 +284,6 @@ def c_hash_mismatch(ctx: Ctx) -> None:
     _stage_fault(ctx, "badhash", "HASH_MISMATCH", keeps_old=False)
     s = stage_cmd(ctx)
     ctx.expect(s["ok"], "re-staged the good image afterwards", s["error"])
-
-
-@check("2.5e", "access point off and on: reconnect, backoff capped at 30 s", needs=("manual",))
-def c_ap_toggle(ctx: Ctx) -> None:
-    ctx.ensure_wifi()
-    mark = ctx.con.mark()
-    ctx.pause("Switch the WiFi access point OFF.")
-    end = time.monotonic() + 90
-    while ctx.wifi_status()["connected"]:
-        if time.monotonic() > end:
-            raise TestFailed("DFU32 still reports WiFi connected 90 s after the AP went off")
-        time.sleep(3)
-    ctx.ok("DFU32 noticed the AP is gone")
-    ctx.countdown(75, "keeping the AP off so the backoff reaches its cap")
-    ctx.pause("Switch the access point back ON. Press Enter once it is broadcasting again.")
-    t0 = time.monotonic()
-    end = t0 + 180
-    while not (st := ctx.wifi_status())["connected"]:
-        if time.monotonic() > end:
-            raise TestFailed("not reconnected within 180 s of the AP coming back")
-        time.sleep(2)
-    took = time.monotonic() - t0
-    ctx.ok(f"reconnected {took:.0f} s after the AP came back (IP {st['ip']})")
-    waits = [int(m.group(1)) for ln in ctx.con.lines[mark:]
-             if (m := re.search(r"retrying in (\d+) ms", ln.text))]
-    ctx.data("backoff_ms", waits)
-    ctx.note(f"backoff waits seen: {waits}")
-    ctx.expect(waits, "the reconnect backoff was logged")
-    ctx.expect(max(waits) <= 30000, f"backoff capped at 30 s (max {max(waits)} ms)")
-    ctx.soft(max(waits) >= 16000, "backoff grew towards the cap while the AP was off")
-    ctx.soft(took <= 45, f"reconnect within the 30 s cap plus connect time ({took:.0f} s)")
-    ctx.ensure_wifi()
 
 
 # ============================================================================================

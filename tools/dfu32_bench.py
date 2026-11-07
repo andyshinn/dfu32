@@ -42,7 +42,7 @@ MINIMUM = ["3.1", "3.2", "3.5", "5.1"]
 
 
 def matches(spec: str, tid: str) -> bool:
-    """'2.5' selects 2.5a-2.5e; '3' selects section 3; '3.1' selects only 3.1 (not 3.10)."""
+    """'2.5' selects 2.5a-2.5d; '3' selects section 3; '3.1' selects only 3.1 (not 3.10)."""
     spec = spec.strip()
     if not spec:
         return False
@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = ap.add_argument_group("what to run")
     g.add_argument("--list", action="store_true", help="list the checks and exit")
-    g.add_argument("--only", help="comma-separated check ids, e.g. 3.1,3.5 or 2.5 (all of 2.5a-e)")
+    g.add_argument("--only", help="comma-separated check ids, e.g. 3.1,3.5 or 2.5 (all of 2.5a-d)")
     g.add_argument("--sections", help="comma-separated sections, e.g. 1,3")
     g.add_argument("--skip", help="comma-separated check ids to leave out")
     g.add_argument("--minimum", action="store_true", help="only what unblocks M4: " + ", ".join(MINIMUM))

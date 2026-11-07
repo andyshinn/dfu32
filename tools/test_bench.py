@@ -29,7 +29,7 @@ from bench import parse  # noqa: E402
 from bench.api import retry_after  # noqa: E402
 from bench.console import Redactor, SerialConsole, quote_arg, split_incomplete_escape, strip_ansi  # noqa: E402
 from bench.fake_dfu32 import FakeDfu32  # noqa: E402
-from bench.runner import Ctx, Repeater  # noqa: E402
+from bench.runner import Ctx, Repeater, crash_excerpt  # noqa: E402
 from bench.site import FirmwareSite, flip_hex_digit  # noqa: E402
 from test_dfu32_pack import write_zip  # noqa: E402
 from test_stage_image import synthetic_package  # noqa: E402
@@ -189,6 +189,19 @@ class Console(unittest.TestCase):
                       b"waiting for download\n")
         with self.assertRaises(DownloadMode):
             self.con.wait_boot(len(self.con.boots), timeout=2, since=mark)
+
+    def test_crash_excerpt(self):
+        mark = self.con.mark()
+        self.con.feed(b"I (1) dfu_ble: progress  10% (1/2)\n"
+                      b"Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.\n"
+                      b"Backtrace: 0x400d1234:0x3ffb0000\nRebooting...\nets Jul 29 2019 12:21:46\n"
+                      b"I (5) dfu32: DFU32 v1 (ESP-IDF v6.1), board profile 'x'\n"
+                      b"W (9) dfu32: previous flash of F4 (\"v\") was interrupted by a reboot (PANIC)\n")
+        text = "\n".join(crash_excerpt(self.con, mark))
+        self.assertIn("LoadProhibited", text)
+        self.assertIn("Backtrace", text)
+        self.assertIn("(PANIC)", text)
+        self.assertNotIn("progress", text)
 
     def test_wait_line(self):
         mark = self.con.mark()

@@ -287,7 +287,7 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 `tools/dfu32_bench.py` runs everything in §6, plus the M2b run-record checks, from your computer. It types on DFU32's console over USB serial, calls the HTTP API, serves the firmware itself (with deliberately broken copies for the failure cases), and uses esptool when a check needs a different DFU32 build. It only stops for things it can't do:
 
 - **`start ota` on the repeater.** It rings the terminal bell, prints what to do, and carries on by itself once DFU32 sees the repeater. With `--repeater-port` it sends `start ota` over the repeater's USB console instead. Check 3.5, the M3 "done when", always asks you to send it **over LoRa from the companion app**.
-- **Switching the access point off and on** (2.5e and 3.12). It asks, and you press Enter. `--skip-manual` leaves these two out.
+- **Switching the access point off and on** for 3.12 (offline re-flash). It asks, and you press Enter. `--skip-manual` leaves it out.
 
 You need Python 3.8+ and esptool, which brings pyserial with it: `pip install esptool`. Close any serial monitor first, so the port is free.
 
@@ -306,7 +306,7 @@ python3 tools/dfu32_bench.py --port /dev/cu.usbserial-575E0522651 \
 - `--merged-bin` is the one-off flash for the new layout. It wipes NVS, so the script joins WiFi again with `--wifi-ssid`/`--wifi-pass` (or set `DFU32_WIFI_PASS`). Leave it out on later runs, and the app-only `--app-bin` is flashed instead, which keeps WiFi, the token and the target. Leave both out to test whatever is already on the board.
 - Section 4 flashes `--debug-app-bin` and puts `--app-bin` back afterwards. Without a debug build, section 4 is skipped.
 - The script serves the firmware on port 8000 (`--site-port`) at your computer's LAN address. If DFU32 can't reach it, pass `--host-ip`.
-- `python3 tools/dfu32_bench.py --list` lists the checks. `--only 3.1,3.5`, `--sections 1,2`, `--skip 2.5e` and `--minimum` pick a subset. `--minimum` is what unblocks M4: 3.1, 3.2, 3.5 and 5.1.
+- `python3 tools/dfu32_bench.py --list` lists the checks. `--only 3.1,3.5`, `--sections 1,2`, `--skip 3.12` and `--minimum` pick a subset. `--minimum` is what unblocks M4: 3.1, 3.2, 3.5 and 5.1.
 - `--compare-runs N` sets how many flashes 5.1 does per WiFi setting (default 5, so 10 flashes).
 
 A full run flashes the repeater about 25 times and takes roughly an hour and a half, most of it in transfers and waiting for `start ota`. Ctrl+C stops after cleaning up: it aborts a running flash at a safe point, the same as typing Ctrl+C on the console.

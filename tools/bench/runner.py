@@ -776,6 +776,7 @@ def run_checks(ctx: Ctx, selected: list[TestDef], hooks: dict) -> bool:
             print("\n" + _c(BOLD, f"[{td.id}] {td.title}"), flush=True)
             ctx.con.note(f"===== {td.id} {td.title} =====")
             t0 = time.monotonic()
+            line0 = ctx.con.mark()
             try:
                 if "manual" in td.needs and ctx.args.skip_manual:
                     raise TestSkipped("needs you to switch the access point off and on (--skip-manual)")
@@ -789,6 +790,9 @@ def run_checks(ctx: Ctx, selected: list[TestDef], hooks: dict) -> bool:
             except (ConsoleError, ApiUnreachable, FlashError) as e:
                 res.status = "ERROR"
                 res.notes.append(f"ERROR: {type(e).__name__}: {e}")
+                if isinstance(e, ConsoleRebooted):
+                    time.sleep(2)  # let the new boot print its reset reason
+                    res.notes += crash_excerpt(ctx.con, line0)
             except KeyboardInterrupt:
                 res.status = "ABORTED"
                 res.notes.append("interrupted with Ctrl+C")
@@ -818,6 +822,24 @@ def run_checks(ctx: Ctx, selected: list[TestDef], hooks: dict) -> bool:
         interrupted = True
     write_report(ctx, started, not interrupted)
     return not interrupted
+
+
+_CRASH = re.compile(r"Guru Meditation|panic|abort\(\)|assert|Backtrace|stack overflow|overflow|Rebooting|"
+                    r"rst:0x|interrupted by a reboot|Brownout|watchdog|no sign of life|E \(\d+\)")
+
+
+def crash_excerpt(con: SerialConsole, since: int) -> list:
+    """The lines around an unexpected reboot: what DFU32 printed just before it, and its reset reason."""
+    boots = [b["index"] for b in con.boots if b["index"] >= since]
+    if not boots:
+        return []
+    boot = boots[-1]
+    lines = con.lines
+    before = [ln.text for ln in lines[max(since, boot - 60):boot] if _CRASH.search(ln.text)]
+    after = [ln.text for ln in lines[boot:boot + 40] if "interrupted by a reboot" in ln.text]
+    out = ["DFU32 rebooted unexpectedly. Last log lines that look relevant (full log in serial.log):"]
+    out += [f"    {t}" for t in (before[-25:] + after)] or ["    (nothing obvious; see serial.log)"]
+    return out
 
 
 def cleanup(ctx: Ctx, interrupted: bool) -> None:
