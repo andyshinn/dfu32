@@ -31,8 +31,11 @@ Use your own serial port in place of `/dev/cu.usbmodem1101`.
 | `feather_esp32s3` (default) | Adafruit Feather ESP32-S3 #5477 | 4 MB / 2 MB |
 | `feather_esp32_v2` | Adafruit Feather ESP32 V2 | 8 MB / 2 MB |
 | `esp32s3_n16r8` | Generic ESP32-S3 N16R8 DevKitC | 16 MB / 8 MB |
+| `rak11200_rak19007` | RAKwireless WisBlock RAK11200 on a RAK19007 base | 4 MB / 8 MB (4 MB mapped) |
 
 PSRAM is required. A board without it won't boot this firmware.
+
+The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into download mode by itself. Pull BOOT0 to GND, press reset, flash, then release BOOT0 and press reset again. Its status LED is the green one (the RAK19007 has no NeoPixel), and with no user button you unclaim the API token through `POST /api/v1/system/token/rotate`.
 
 Change settings for a profile with `idf.py -B build/<profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
 
