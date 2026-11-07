@@ -36,7 +36,7 @@ PSRAM is required. A board without it won't boot this firmware.
 
 Change settings for a profile with `idf.py -B build/<profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
 
-After the first successful build, commit the generated `dependencies.lock`.
+Component versions are pinned per chip in `dependencies.lock.esp32` and `dependencies.lock.esp32s3`, and CI fails if a build changes them. After changing an `idf_component.yml`, build one profile for each chip and commit the updated lock files.
 
 Check the app against its size budget (90% of an OTA slot):
 

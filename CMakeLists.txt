@@ -24,4 +24,10 @@ set(SDKCONFIG_DEFAULTS
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# One Component Manager lock per chip. A single dependencies.lock records the
+# target it was solved for, so building an ESP32 profile after an ESP32-S3 one
+# would rewrite it. Commit every dependencies.lock.<target> file.
+idf_build_set_property(DEPENDENCIES_LOCK "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
+
 project(dfu32)
