@@ -12,6 +12,9 @@ build-host*/
 .idea/
 .DS_Store
 
+# Bench runner output (tools/dfu32_bench.py)
+bench-results/
+
 # Python
 __pycache__/
 *.pyc
