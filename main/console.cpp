@@ -515,17 +515,17 @@ int cmd_flash(int argc, char** argv) {
         o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
     }
 
-    // SPEC.md §7.1: WiFi off during the transfer is the provisional default;
-    // `--wifi on` keeps it up so the two can be compared in the run records.
-    // The console is attended, so it skips the M3b run deadline and simply
-    // restores WiFi afterwards.
+    // SPEC.md §7.1: WiFi stays up during the transfer by default (bench: about
+    // 47 s vs 39 s for the T096 image, no failures either way); `--wifi off`
+    // stops it. The console is attended, so it skips the M3b run deadline and
+    // simply restores WiFi afterwards.
     bool wifi_off = false;
     const char* wifi_opt = nullptr;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--wifi") == 0) wifi_opt = argv[i + 1];
     }
-    if (!(wifi_opt != nullptr && std::strcmp(wifi_opt, "on") == 0) && net::status().initialised) {
-        std::printf("WiFi is off until the flash finishes (--wifi on keeps it up).\n");
+    if (wifi_opt != nullptr && std::strcmp(wifi_opt, "off") == 0 && net::status().initialised) {
+        std::printf("WiFi is off until the flash finishes.\n");
         std::fflush(stdout);
         wifi_off = net::stop();
     }

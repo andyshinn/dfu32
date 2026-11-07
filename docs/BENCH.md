@@ -202,7 +202,7 @@ Tuning knobs:
 | `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval, then halves PRN. |
 | `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
-| `--wifi on\|off` | off | WiFi is stopped for the flash and restored afterwards (SPEC §7.1, provisional default). `--wifi on` keeps it up. The run record's `wifi_off` shows which was used, for the M3b on/off comparison. |
+| `--wifi on\|off` | on | WiFi stays up during the flash (SPEC §7.1). `--wifi off` stops it for the transfer and restores it afterwards. The run record's `wifi_off` shows which was used. |
 
 ## 6. Over the HTTP API (M3b)
 
@@ -280,7 +280,7 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
   - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 restarts WiFi and counts the restore as failed, retries once, then reboots. Each wait ends as soon as WiFi reconnects (60 s at most), so on a working network this takes seconds, not minutes. The run record is already written and WiFi comes back after the reboot.
   - `{"deadline_s":20}`: the run is aborted 20 s after the target is seen, recorded as `DEADLINE_EXCEEDED`, and WiFi is restored.
   - `{"stall_s":40}`: the DFU task blocks without a heartbeat; the stall watchdog reboots after about 30 s and the next boot records `ABORTED_BY_REBOOT`.
-- **WiFi on vs off:** at least 5 runs each with `"wifi_off":true` and `false`. Compare `rate_x10_kBps`, attempts and failures in `GET /targets/t096/runs`. This decides the shipped `wifi_off_dfu` default.
+- **WiFi on vs off:** at least 5 runs each with `"wifi_off":true` and `false`. Compare `rate_x10_kBps`, attempts and failures in `GET /targets/t096/runs`. Done 2026-11-07 (results below): WiFi off is about 20% faster, but both finish in under a minute with no failures, so `wifi_off_dfu` defaults to off (WiFi stays on).
 
 ## 7. Automated bench run
 
@@ -322,7 +322,7 @@ A full run flashes the repeater about 25 times and takes roughly an hour and a h
 
 Each run writes a new folder under `bench-results/` (`--out` overrides it):
 
-- `report.md`: one line per check (PASS, WARN, FAIL, SKIP or ERROR), then everything each check verified. 5.1 ends with the WiFi on/off table that decides `wifi_off_dfu`.
+- `report.md`: one line per check (PASS, WARN, FAIL, SKIP or ERROR), then everything each check verified. 5.1 ends with the WiFi on/off comparison table.
 - `report.json`: the same, with run records, timelines and samples.
 - `serial.log`: everything DFU32 printed, timestamped, with the script's own notes (`###`) in between.
 - `http.log`: every API call and its response.
@@ -358,6 +358,8 @@ Each check sets up what it needs (WiFi, token, target, staged image), so any of 
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 15 ms** (2 runs, both OK) | 27.9 s (14.8 kB/s) | |
 | 2026-11-05 | Feather V2 (1M PHY), **M2a retries** | Heltec T096, OTAFIX 2.3 | same | `--interval 8` | attempt 1: LINK_OR_OVERRUN after 27 KB; attempt 2 at 30 ms: 44.9 s | **61.0 s, recovered by itself** |
 | 2026-11-05 | Feather V2 (1M PHY), **M2a retries** | Heltec T096, OTAFIX 2.3, **power-cycled at ~12%** | same | default (20 ms) | attempt 1: link lost after 52 KB; attempt 2 found the bootloader at MAC+1, 30 ms: 45.2 s | **65.3 s, recovered by itself** |
+| 2026-11-07 | Feather V2 (1M PHY), API, **WiFi off** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | 413,680 B MeshCore repeater v1.18.1 | default (20 ms), staged | 12.3 kB/s mean, all first attempt | **39.0 s mean, 5/5** |
+| 2026-11-07 | Feather V2 (1M PHY), API, **WiFi on** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | same | default (20 ms), staged | 10.2 kB/s mean, all first attempt | **47.2 s mean, 5/5**: chosen default (live progress, under a minute) |
 
 PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash.
 

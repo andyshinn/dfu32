@@ -81,7 +81,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - arm timeout;
   - WiFi-restore watchdog (debug fault endpoint);
   - an offline re-flash from staging with the AP off;
-  - **WiFi on vs off during the transfer** (`wifi_off` per request): at least 5 runs each, comparing rate, PRN timeouts and failures in the run records. This sets the shipped `wifi_off_dfu` default.
+  - **WiFi on vs off during the transfer** (`wifi_off` per request): at least 5 runs each, comparing rate, PRN timeouts and failures in the run records. This sets the shipped `wifi_off_dfu` default. **Done 2026-11-07:** WiFi stays on by default (47 s vs 39 s, no failures either way).
 - **Done when:** a full flash is done end to end using only HTTP calls and `start ota` sent **remotely over LoRa** from a companion app.
 - **Split into two PRs:**
   - **M3a, fetch and stage (implemented):**

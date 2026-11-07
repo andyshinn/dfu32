@@ -320,7 +320,7 @@ Also: VERIFYING_STAGED → FAILED (nothing staged, re-hash fails), and RADIO_HAN
 - WiFi stays up during FETCHING and AWAITING_TARGET; scanning coexists through software coex.
 - **WiFi-off during the transfer is an option.** The device-level default is the `wifi_off_dfu` config value. Any flash request can override it with `"wifi_off": true|false`, and the UI has a checkbox next to **Flash**.
   - The value used is recorded in each run record (`wifi_off`) so that on/off runs can be compared.
-  - The shipped default is decided after bench comparison. The nRF52's flash writes are probably the bottleneck, so WiFi on/off may make little difference.
+  - **Default: WiFi stays on.** Bench, 2026-11-07, Feather V2 → Heltec T096 (OTAFIX), 413,680 B image, 5 runs each: WiFi off 12.3 kB/s, 39 s total; WiFi on 10.2 kB/s, 47 s total; no failures or retries either way. Under a minute either way, and keeping WiFi up keeps live progress in `/status`.
 - When the option is on and the target is found, DFU32 calls `esp_wifi_stop()` before connecting. The driver stays initialised, so restoring is just `esp_wifi_start()` plus reconnect.
 - While WiFi is off, the HTTP API can't be reached. The LED shows progress, and the run record captures it afterwards.
 - With the option off, WiFi stays up for live progress, and the §7.3 deadline/restore layers still apply. On S3 this relies on software coexistence; on a classic ESP32 it's expected to be slower.
@@ -407,7 +407,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `hostname` | str | Default `dfu32-XXXX` (last 2 bytes of MAC). Also the mDNS name. |
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
-| `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
+| `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Default 0 (WiFi stays on; bench comparison in §7.1). Per-request override: `wifi_off`. |
 | `dfu_deadline` | u32 | Cap on the §7.3 run deadline (`dfu_deadline_max_s`), default 1200, 120–7200. |
 | `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |

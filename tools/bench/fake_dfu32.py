@@ -320,14 +320,14 @@ class FakeDfu32:
             self.emit("Staged image failed checks: nothing staged. Nothing was touched.\n")
             return
         interval = int(argv[argv.index("--interval") + 1]) if "--interval" in argv else 20
-        wifi_on = "--wifi" in argv and argv[argv.index("--wifi") + 1] == "on"
+        wifi_on = not ("--wifi" in argv and argv[argv.index("--wifi") + 1] == "off")  # on by default
         self.lease = "console"
         try:
             self.emit(f"Staged image OK ({self.staged['size']} B, \"{self.staged['version']}\"). Waiting up to 300 s "
                       f"for {self.target['mac']}: run `start ota` on the repeater now. Up to 3 attempt(s).\n")
             wifi_off = not wifi_on
             if wifi_off:
-                self.emit("WiFi is off until the flash finishes (--wifi on keeps it up).\n")
+                self.emit("WiFi is off until the flash finishes.\n")
                 self.wifi_stopped = True
             r = self.do_flash(interval, abort=self.console_abort, trigger="console", wifi_off=wifi_off)
             if wifi_off:
@@ -640,7 +640,7 @@ class FakeDfu32:
                     return
             self.set_job(state="AWAITING_TARGET", phase="SCAN", bytes_total=self.staged["size"])
             arm = data.get("arm_timeout_s", 600)
-            wifi_off = data.get("wifi_off", True)
+            wifi_off = data.get("wifi_off", False)
             faults, self.faults = self.faults, {}
             timeout = threading.Event()
             deadline = threading.Event()

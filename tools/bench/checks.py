@@ -219,23 +219,23 @@ def c_stage(ctx: Ctx) -> None:
     ctx.expect(ctx.staged_matches(), "`staged` verifies the image")
 
 
-@check("2.4", "console flash: WiFi off (default), then --wifi on", needs=("repeater",))
+@check("2.4", "console flash: WiFi on (default), then --wifi off", needs=("repeater",))
 def c_console_flash_wifi(ctx: Ctx) -> None:
     ctx.ensure_wifi()
     ctx.ensure_target_console()
     ctx.ensure_staged()
     a = ctx.console_flash()
-    ctx.expect(a["ok"], "flash with WiFi off succeeded", a["error"])
-    ctx.expect(a["wifi_off"], "WiFi was stopped for the transfer")
-    ctx.expect(a["wifi_restored"], "WiFi was restored afterwards")
+    ctx.expect(a["ok"], "flash with the default (WiFi on) succeeded", a["error"])
+    ctx.expect(not a["wifi_off"], "WiFi stayed up by default")
+    b = ctx.console_flash("--wifi off")
+    ctx.expect(b["ok"], "flash with --wifi off succeeded", b["error"])
+    ctx.expect(b["wifi_off"], "--wifi off stopped WiFi for the transfer")
+    ctx.expect(b["wifi_restored"], "WiFi was restored afterwards")
     ctx.expect(ctx.ensure_wifi(wait=30)["connected"], "`wifi` is connected again")
-    b = ctx.console_flash("--wifi on")
-    ctx.expect(b["ok"], "flash with --wifi on succeeded", b["error"])
-    ctx.expect(not b["wifi_off"], "WiFi stayed up")
     ra = ctx.run_record(a["run"])[0] or {}
     rb = ctx.run_record(b["run"])[0] or {}
-    ctx.expect(ra.get("wifi_off") is True and rb.get("wifi_off") is False, "run records carry wifi_off true / false")
-    ctx.note(f"throughput: WiFi off {a['throughput_kBps']} kB/s, WiFi on {b['throughput_kBps']} kB/s")
+    ctx.expect(ra.get("wifi_off") is False and rb.get("wifi_off") is True, "run records carry wifi_off false / true")
+    ctx.note(f"throughput: WiFi on {a['throughput_kBps']} kB/s, WiFi off {b['throughput_kBps']} kB/s")
 
 
 def _stage_fault(ctx: Ctx, variant: str, code: str, *, keeps_old: bool, extra: str = "") -> None:

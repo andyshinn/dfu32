@@ -75,7 +75,7 @@ private:
 struct FlashRequest {
     Source source = Source::Manifest;
     uint32_t arm_timeout_s = 600;
-    bool wifi_off = true;
+    bool wifi_off = false;
 };
 
 /// Parses a flash request; `defaults` supplies the target's arm timeout and
