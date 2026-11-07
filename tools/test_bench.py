@@ -289,6 +289,29 @@ class RepeaterPort(unittest.TestCase):
         self.assertIn("OK", out)
         self.assertEqual(state["writes"], 3)
 
+    def test_stops_once_no_longer_needed(self):
+        # DFU32 found the repeater after the first unanswered try: no retry may land after the flash.
+        class Silent(FlakyUsbPort):
+            def read(self, n):
+                return b""
+
+        ports = []
+
+        def opener(p, b):
+            ports.append(Silent([]))
+            return ports[-1]
+
+        calls = {"n": 0}
+
+        def still_needed():
+            calls["n"] += 1
+            return calls["n"] == 1
+
+        r = Repeater("usb", 115200, lambda m: None, opener=opener)
+        with mock.patch("bench.runner.time.sleep"):
+            r.command("start ota", wait=0.02, expect="OK", window=30, should_continue=still_needed)
+        self.assertEqual(sum(p.written.count(b"start ota") for p in ports), 1)
+
     def test_gives_up_after_the_window(self):
         class Silent(FlakyUsbPort):
             def read(self, n):

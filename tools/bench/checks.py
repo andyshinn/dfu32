@@ -465,7 +465,7 @@ def c_abort_transfer(ctx: Ctx) -> None:
     ctx.ensure_staged()
     job, _ = ctx.api_flash({"wifi_off": False})
     wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
-    ctx.start_ota()
+    ctx.start_ota(still_needed=ctx.awaiting(job))
     end = time.monotonic() + ctx.args.start_ota_timeout + 180
     while True:
         st = api.status(timeout=3) or {}
@@ -695,7 +695,7 @@ def c_restore_fail(ctx: Ctx) -> None:
     mark, boots = ctx.con.mark(), len(ctx.con.boots)
     job, _ = ctx.api_flash({"source": "staged", "wifi_off": True})
     wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
-    ctx.start_ota()
+    ctx.start_ota(still_needed=ctx.awaiting(job))
     t = ctx.args.start_ota_timeout + 400
     a = ctx.con.wait_line(r"fault injection: treating WiFi restore as failed", t, since=mark)
     ctx.expect(a, "the transfer finished and the restore fault fired")
@@ -745,7 +745,7 @@ def c_stall(ctx: Ctx) -> None:
     mark, boots = ctx.con.mark(), len(ctx.con.boots)
     job, _ = ctx.api_flash({"source": "staged", "wifi_off": True})
     wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
-    ctx.start_ota()
+    ctx.start_ota(still_needed=ctx.awaiting(job))
     a = ctx.con.wait_line(r"fault injection: blocking the DFU task", ctx.args.start_ota_timeout + 60, since=mark)
     ctx.expect(a, "the DFU task blocked without a heartbeat")
     b = ctx.con.wait_line(r"no sign of life for \d+ s: rebooting", 90, since=a[0])

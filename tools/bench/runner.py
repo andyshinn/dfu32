@@ -158,14 +158,16 @@ class Repeater:
                 return buf.decode(errors="replace"), True
         return buf.decode(errors="replace"), False
 
-    def command(self, line: str, wait: float = 3.0, *, expect: str = "", window: float = 60.0) -> str:
+    def command(self, line: str, wait: float = 3.0, *, expect: str = "", window: float = 60.0,
+                should_continue: Optional[Callable[[], bool]] = None) -> str:
         """Sends one line and returns the reply.
 
         The port is opened fresh for every command: after a flash the repeater reboots and its
         USB port comes back as a new device, and an old handle can swallow a write silently.
         With `expect`, the line is sent again until a reply contains it, for up to `window` s,
-        which also covers the repeater still booting. Raises only if the line could never be
-        sent at all.
+        which also covers the repeater still booting. `should_continue` is asked before every
+        try; when it says no (DFU32 already has the repeater), nothing more is sent. Raises only
+        if the line could never be sent at all.
         """
         data = (line + "\r\n").encode()
         deadline = time.monotonic() + window
@@ -173,6 +175,9 @@ class Repeater:
         text = ""
         self._drop()
         while True:
+            if should_continue is not None and not should_continue():
+                self.log(f"repeater: not sending '{line}' (no longer needed)")
+                return text
             try:
                 self._send(data)
             except Exception as e:  # noqa: BLE001 - not enumerated yet, or a stale handle
@@ -289,7 +294,14 @@ class Ctx:
             time.sleep(min(1.0, left))
         print("\r" + " " * 60 + "\r", end="", flush=True)
 
-    def start_ota(self, *, lora: bool = False, wait_enter: bool = False, hint: str = "") -> None:
+    def start_ota(self, *, lora: bool = False, wait_enter: bool = False, hint: str = "",
+                  still_needed: Optional[Callable[[], bool]] = None) -> None:
+        """Gets `start ota` to the repeater: over its USB console when available, else by asking.
+
+        Retries stop as soon as `still_needed()` says DFU32 has found the repeater (see
+        awaiting()). Otherwise a retry that lands after the flash would put the freshly flashed
+        repeater straight back into OTA mode. Without it (e.g. before a BLE scan), it just retries.
+        """
         self.ota_pending = True
         if lora and self.args.unattended and self.repeater:
             self.note("--unattended: `start ota` sent over the repeater's USB console instead of LoRa, so the "
@@ -297,7 +309,8 @@ class Ctx:
             lora = False
         if self.repeater and not lora:
             try:
-                out = self.repeater.command("start ota", expect="OK")
+                out = self.repeater.command("start ota", expect="OK",
+                                            should_continue=still_needed)
             except Exception as e:  # couldn't even send it: ask the person instead
                 self.warn(f"couldn't send `start ota` over the repeater's USB port ({type(e).__name__}: {e})")
             else:
@@ -305,6 +318,9 @@ class Ctx:
                     self.say("sent `start ota` over the repeater's USB console (it replied OK)")
                     if wait_enter:
                         time.sleep(2)
+                    return
+                if still_needed is not None and not still_needed():
+                    self.say("DFU32 has already found the repeater; no `start ota` needed")
                     return
                 self.warn("the repeater never answered `start ota` with OK over USB (60 s of retries)")
         where = "OVER LoRa from the companion app (remote admin)" if lora else "to the repeater (LoRa or its USB console)"
@@ -314,8 +330,43 @@ class Ctx:
         else:
             self.action(msg + " The script carries on by itself once DFU32 sees the repeater.")
 
+    def awaiting(self, job_id: int) -> Callable[[], bool]:
+        """A still_needed() for start_ota: true while API job `job_id` hasn't found the repeater yet."""
+        def check() -> bool:
+            job = self.console_job()  # the console answers even while WiFi is off
+            if job.get("id") != job_id:
+                return True  # couldn't tell; keep trying
+            return job.get("state") in ("FETCHING", "VERIFYING_STAGED", "PRECHECK", "AWAITING_TARGET")
+        return check
+
+    def _target_advertising(self) -> Optional[bool]:
+        """A short BLE scan: is the repeater advertising (app in OTA mode, or its bootloader)? None if unknown."""
+        try:
+            r = self.ensure_token().post("/ble/scan", {"duration_s": 5, "dfu_only": True}, timeout=25)
+        except Exception:
+            return None
+        if r.status != 200:
+            return None
+        return any(d.get("matches_target") == self.tid for d in (r.get("devices") or []))
+
     def ensure_repeater_idle(self) -> None:
         """Checks that expect DFU32 *not* to find the repeater need it out of OTA mode."""
+        if self.repeater and self.api:
+            # Check rather than trust bookkeeping: scan, and reboot the repeater while it advertises.
+            for _ in range(3):
+                adv = self._target_advertising()
+                if adv is None:
+                    break
+                if not adv:
+                    self.ota_pending = False
+                    return
+                try:
+                    self.repeater.command("reboot", wait=1)
+                    self.say("the repeater was still advertising for OTA: rebooted it over USB")
+                except Exception as e:
+                    self.warn(f"repeater USB console failed ({type(e).__name__}: {e})")
+                    break
+                time.sleep(12)
         if not self.ota_pending:
             return
         rebooted = False
@@ -546,7 +597,8 @@ class Ctx:
         hit = self.con.wait_line(r"Waiting up to \d+ s for|failed checks|No target MAC|Busy:", 60, since=mark)
         if hit and "Waiting up to" in hit[1].text:
             if start_ota:
-                self.start_ota(lora=lora, hint=hint)
+                self.start_ota(lora=lora, hint=hint,
+                               still_needed=lambda: self.con.find_line(r"dfu_ble: found ", since=mark) is None)
             else:
                 self.say("no `start ota` needed: the repeater's bootloader is waiting for DFU (usually at MAC+1)")
             if until and until(mark):
@@ -709,7 +761,7 @@ class Ctx:
                 prompted["done"] = True
                 prompted["next"] = time.monotonic() + 60
                 if start_ota:
-                    self.start_ota(lora=lora, hint=hint)
+                    self.start_ota(lora=lora, hint=hint, still_needed=self.awaiting(job))
                 else:
                     self.say("no `start ota` needed: the repeater's bootloader is waiting for DFU (usually at MAC+1)")
 
