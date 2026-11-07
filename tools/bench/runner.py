@@ -136,26 +136,36 @@ class Repeater:
         if ser is not None:
             try:
                 ser.close()
-            except OSError:
+            except Exception:  # noqa: BLE001 - closing a vanished port can raise anything
                 pass
+
+    def _send(self, data: bytes) -> None:
+        if self.ser is None:
+            self._open(timeout=30)  # it re-enumerates after `start ota` or a reboot
+        self.ser.reset_input_buffer()
+        self.ser.write(data)
+        self.ser.flush()
 
     def command(self, line: str, wait: float = 3.0) -> str:
         """Sends one line and returns what came back. Raises only if it couldn't be sent."""
-        if self.ser is None:
-            self._open(timeout=30)  # it re-enumerates after `start ota` or a reboot
+        data = (line + "\r\n").encode()
         try:
-            self.ser.reset_input_buffer()
-            self.ser.write((line + "\r\n").encode())
-            self.ser.flush()
-        except OSError:
+            self._send(data)
+        except Exception as e:  # noqa: BLE001 - a stale handle after a USB re-enumeration raises
+            # OSError, SerialException or (macOS) termios.error: reopen once and retry.
+            self.log(f"repeater port stale ({type(e).__name__}: {e}); reopening")
             self._drop()
-            raise
+            try:
+                self._send(data)
+            except Exception:
+                self._drop()
+                raise
         end = time.monotonic() + wait
         buf = b""
         while time.monotonic() < end:
             try:
                 buf += self.ser.read(256)
-            except OSError as e:  # sent, then the port went away: normal for some boards
+            except Exception as e:  # noqa: BLE001 - sent, then the port went away: normal for some boards
                 self.log(f"repeater port dropped after '{line}' ({e}); reopening it next time")
                 self._drop()
                 break

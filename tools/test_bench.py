@@ -251,6 +251,25 @@ class RepeaterPort(unittest.TestCase):
         self.assertEqual(len(opened), 2)
         self.assertTrue(any("dropped" in m for m in logs))
 
+    def test_stale_handle_is_reopened(self):
+        import termios
+
+        class Stale(FlakyUsbPort):
+            def reset_input_buffer(self):
+                raise termios.error(6, "Device not configured")
+
+        opened = []
+
+        def opener(port, baud):
+            p = (Stale if not opened else FlakyUsbPort)(opened)
+            opened.append(p)
+            return p
+
+        r = Repeater("usb", 115200, lambda m: None, opener=opener)
+        r.command("start ota", wait=0.2)  # the first handle is stale: reopened and sent on the second
+        self.assertEqual(len(opened), 2)
+        self.assertEqual(opened[1].written, b"start ota\r\n")
+
     def test_interrupt_sends_ctrl_c_alone(self):
         port = FakePort()
         con = SerialConsole("fake", opener=lambda p, b: port)
