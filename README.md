@@ -14,27 +14,49 @@ DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
 ## Building the firmware
 
-You need ESP-IDF **v6.1** (for example installed with `eim`). Activate it in your shell, then pick a board profile. Each profile sets the chip target, flash size, partition table, PSRAM, console and pins, so **don't run `idf.py set-target`**. Give each profile its own build directory:
+You need ESP-IDF **v6.1** (for example installed with `eim`). Activate it in your shell, then pick a board profile with `--preset`. Each profile sets the chip target, flash size, partition table, PSRAM, console and pins, so **don't run `idf.py set-target`**. Each preset (see [CMakePresets.json](CMakePresets.json)) builds in its own directory, `build/<profile>`:
 
 ```bash
-idf.py -B build/feather_esp32s3 -DDFU32_BOARD=feather_esp32s3 build
+idf.py --preset feather_esp32s3 build
 ```
 
 ```bash
-idf.py -B build/feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
+idf.py --preset feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 ```
 
 Use your own serial port in place of `/dev/cu.usbmodem1101`.
 
+If you work on one board for a while, set `IDF_PRESET` once and drop `--preset`:
+
+```bash
+export IDF_PRESET=feather_esp32s3
+```
+
+```bash
+idf.py build flash monitor
+```
+
+Without `--preset` or `IDF_PRESET`, `idf.py` uses the first preset (`feather_esp32s3`) and prints a notice saying so. Use `--preset` rather than `-B`: with presets present, `idf.py -B <dir>` on its own applies that default preset when it configures.
+
+To build every profile in turn:
+
+```bash
+python3 tools/build_all.py
+```
+
+Arguments after the options go to `idf.py` in place of `build`, with `{preset}` replaced by the profile name, for example `python3 tools/build_all.py build merge-bin -o dfu32-{preset}-merged.bin`. Add `--only <profile>` (repeatable) to limit the run. A failed board doesn't stop the rest; the summary at the end lists each one.
+
 | Profile | Board | Flash / PSRAM |
 |---|---|---|
-| `feather_esp32s3` (default) | Adafruit Feather ESP32-S3 #5477 | 4 MB / 2 MB |
+| `feather_esp32s3` (first preset) | Adafruit Feather ESP32-S3 #5477 | 4 MB / 2 MB |
 | `feather_esp32_v2` | Adafruit Feather ESP32 V2 | 8 MB / 2 MB |
 | `esp32s3_n16r8` | Generic ESP32-S3 N16R8 DevKitC | 16 MB / 8 MB |
 
 PSRAM is required. A board without it won't boot this firmware.
 
-Change settings for a profile with `idf.py -B build/<profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
+Change settings for a profile with `idf.py --preset <profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
+
+To add a board, create `boards/<name>/sdkconfig.defaults` and a matching preset in `CMakePresets.json` (`binaryDir` `build/<name>`, `DFU32_BOARD` `<name>`). `python3 tools/check_presets.py` checks they agree, and CI builds every preset. Personal presets go in a `CMakeUserPresets.json`, which git ignores.
 
 After the first successful build, commit the generated `dependencies.lock`.
 

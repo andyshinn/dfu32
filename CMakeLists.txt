@@ -2,13 +2,14 @@
 #
 # Board profiles live in boards/<name>/sdkconfig.defaults. Each profile sets
 # CONFIG_IDF_TARGET, flash size, partition table, PSRAM mode, console and pins,
-# so do NOT run `idf.py set-target`; select a profile instead and give each
-# profile its own build directory:
+# so do NOT run `idf.py set-target`; pick the profile's preset instead:
 #
-#   idf.py -B build/feather_esp32s3 -DDFU32_BOARD=feather_esp32s3 build
+#   idf.py --preset feather_esp32s3 build
 #
-# The generated sdkconfig lives inside the build directory, so profiles never
-# clobber each other.
+# Each preset in CMakePresets.json sets DFU32_BOARD and its own build directory
+# (build/<name>), and the generated sdkconfig lives inside that directory, so
+# profiles never clobber each other. tools/check_presets.py keeps the presets
+# and boards/ in sync; tools/build_all.py builds every preset.
 cmake_minimum_required(VERSION 3.22)
 
 set(DFU32_BOARD "feather_esp32s3" CACHE STRING "DFU32 board profile (directory name under boards/)")

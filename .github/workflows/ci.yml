@@ -21,6 +21,9 @@ jobs:
       - name: Partition tables
         run: python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
 
+      - name: Board presets
+        run: python3 tools/check_presets.py
+
       - name: Python tool tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 
@@ -33,14 +36,27 @@ jobs:
       - name: Test
         run: ctest --test-dir build-host --output-on-failure
 
+  # The firmware matrix comes from CMakePresets.json, so a new board only needs
+  # its boards/<name>/ profile and a preset (the host job checks they match).
+  boards:
+    name: Board list
+    runs-on: ubuntu-24.04
+    outputs:
+      boards: ${{ steps.list.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: echo "boards=$(python3 tools/build_all.py --list --json)" >> "$GITHUB_OUTPUT"
+
   firmware:
     name: Firmware (${{ matrix.board }})
+    needs: boards
     runs-on: ubuntu-24.04
     container: espressif/idf:v6.1
     strategy:
       fail-fast: false
       matrix:
-        board: [feather_esp32s3, feather_esp32_v2, esp32s3_n16r8]
+        board: ${{ fromJSON(needs.boards.outputs.boards) }}
     defaults:
       run:
         shell: bash
@@ -88,7 +104,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
           ccache --zero-stats
-          idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
+          idf.py --preset "${{ matrix.board }}" build
 
       - name: ccache stats
         if: always()
@@ -109,7 +125,7 @@ jobs:
       - name: Merged image (single file, flash at 0x0)
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py -B "build/${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
+          idf.py --preset "${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
