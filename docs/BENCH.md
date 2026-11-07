@@ -14,13 +14,13 @@ Ideally the repeater is a sacrificial board on the OTAFIX bootloader. `flash` er
 Activate your ESP-IDF 6.1 environment first. Then build:
 
 ```bash
-idf.py -B build/feather_esp32s3 -DDFU32_BOARD=feather_esp32s3 build
+idf.py --preset feather_esp32s3 build
 ```
 
 Then flash and open the monitor (use your own port):
 
 ```bash
-idf.py -B build/feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
+idf.py --preset feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 ```
 
 The monitor shows the boot banner, "layout self-check OK", the NimBLE address, and a `dfu32>` prompt. Type `help` to list the commands.
