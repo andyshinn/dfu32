@@ -9,7 +9,7 @@ Each milestone ends with something demonstrable on the bench.
 
 ## M0: Skeleton (½ day)
 
-- IDF v6.1 project, `sdkconfig.defaults` plus the `feather_esp32s3` / `feather_esp32_v2` / `esp32s3_n16r8` profiles, `partitions/4mb.csv` and `8mb.csv`.
+- IDF v6.1 project, `sdkconfig.defaults` plus the `feather_esp32s3` / `feather_esp32_v2` / `esp32s3_n16r8` / `rak11200_rak19007` profiles, `partitions/4mb.csv` and `8mb.csv`.
 - `idf_component.yml` with `esp-nimble-cpp` pinned to 2.6.0.
 - GitHub Actions: build esp32s3 + esp32, enforce the app size budget (fail above 1.30 MB on the 4 MB profile), run host unit tests.
 - `components/dfu_proto` with CRC16, the `.dat` parser, the chunk planner and host tests (§14.1 subset).

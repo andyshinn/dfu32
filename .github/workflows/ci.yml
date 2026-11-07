@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        board: [feather_esp32s3, feather_esp32_v2, esp32s3_n16r8]
+        board: [feather_esp32s3, feather_esp32_v2, esp32s3_n16r8, rak11200_rak19007]
     defaults:
       run:
         shell: bash

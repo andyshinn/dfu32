@@ -104,8 +104,11 @@ Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top
 | `feather_esp32s3` (Adafruit #5477, **primary bench board**) | 4 MB / 2 MB quad PSRAM | `partitions/4mb.csv` | USB-Serial-JTAG | GPIO33 / GPIO21 | GPIO13 | BOOT GPIO0 |
 | `feather_esp32_v2` | 8 MB / 2 MB | `partitions/8mb.csv` | UART0 via USB bridge | GPIO0 / GPIO2 (shared with STEMMA I2C power) | GPIO13 | SW GPIO38 (input-only) |
 | `esp32s3_n16r8` | 16 MB / 8 MB | `partitions/8mb.csv` (8 MB is plenty) | USB-Serial-JTAG | GPIO48 / none *(varies by clone, verify)* | none | BOOT GPIO0 |
+| `rak11200_rak19007` (WisBlock RAK11200 core on a RAK19007 base) | 4 MB / 8 MB (ESP32-WROVER-B; 4 MB mapped) | `partitions/4mb.csv` | UART0 via the base board's USB-C | none | blue LED2 GPIO2 *(not red)* | none (reset only) |
 
 The Feather pins are verified against Adafruit's board definitions: arduino-esp32 `variants/adafruit_feather_esp32s3/pins_arduino.h` and `variants/adafruit_feather_esp32_v2/pins_arduino.h`, plus CircuitPython `ports/espressif/boards/adafruit_feather_esp32s3_4mbflash_2mbpsram/`. The NeoPixel power pin must be driven HIGH before the LED is used.
+
+The RAK11200 pins come from RAK's `WisCore_RAK11200_Board` variant (as carried in meshtastic/firmware `variants/esp32/rak11200/pins_arduino.h`): LED1 green on GPIO12, LED2 blue on GPIO2. The attention LED is LED2: GPIO2 is a strapping pin only in combination with GPIO0 low (download mode), so driving it high can't affect a normal boot. GPIO12 is the MTDI strapping pin that selects the flash voltage; if it were still driven high when the chip samples it across a reset, the WROVER-B's 3.3 V flash could get 1.8 V, so the firmware never drives it. The board has no auto-reset circuit, so flashing needs BOOT0 held low at reset. It has no NeoPixel, so its only indicator is the attention LED (§13.4). With no button, a lost token can only be recovered by reflashing with an NVS erase; `token/rotate` needs the current token (§9.3).
 
 Both button pins have quirks:
 - Feather S3 BOOT (GPIO0) is a strapping pin. A long-press is only interpreted once the app is running; holding it at reset enters the ROM download mode, as normal.
