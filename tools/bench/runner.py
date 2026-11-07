@@ -778,8 +778,6 @@ def run_checks(ctx: Ctx, selected: list[TestDef], hooks: dict) -> bool:
             t0 = time.monotonic()
             line0 = ctx.con.mark()
             try:
-                if "manual" in td.needs and ctx.args.skip_manual:
-                    raise TestSkipped("needs you to switch the access point off and on (--skip-manual)")
                 td.fn(ctx)
             except TestSkipped as e:
                 res.status = "SKIP"

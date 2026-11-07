@@ -72,7 +72,7 @@ python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
 
 ## Bench runner
 
-With DFU32 and a repeater on your desk, `tools/dfu32_bench.py` runs the bench checklist automatically through the serial console and the HTTP API. It stops only when you need to send `start ota` or switch the access point. See [docs/BENCH.md §7](docs/BENCH.md#7-automated-bench-run).
+With DFU32 and a repeater on your desk, `tools/dfu32_bench.py` runs the bench checklist automatically through the serial console and the HTTP API. It stops only when you need to send `start ota`. See [docs/BENCH.md §7](docs/BENCH.md#7-automated-bench-run).
 
 ## License
 

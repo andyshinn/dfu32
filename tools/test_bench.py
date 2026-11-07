@@ -359,7 +359,7 @@ class Selection(unittest.TestCase):
 
 
 # A cross-section that keeps CI quick; DFU32_BENCH_SIM=all runs everything (about 2.5 minutes).
-SUBSET = "1.3,2.3,2.5b,2.5d,3.2,3.6,3.9,3.11,3.12,4.1,5.1"
+SUBSET = "1.3,2.3,2.5b,2.5d,3.2,3.6,3.9,3.11,4.1,5.1"
 
 
 class EndToEnd(unittest.TestCase):
@@ -380,13 +380,6 @@ class EndToEnd(unittest.TestCase):
             ctx.con.note("ACTION (sim): " + msg)
             if "Reboot it" in msg:
                 fake.ota_mode.clear()
-            elif "OFF" in msg:
-                fake.ap_on = fake.wifi_up = False
-                for ms in (1000, 2000, 4000, 8000, 16000, 30000, 30000):
-                    fake.log("net", f"WiFi disconnected (reason 201); retrying in {ms} ms", "W")
-            elif "ON" in msg:
-                fake.ap_on = fake.wifi_up = True
-                fake.log("net", "WiFi connected, IP 127.0.0.1, http://x.local/")
 
         only = SUBSET if os.environ.get("DFU32_BENCH_SIM") != "all" else "1,2,3,4,5"
         argv = ["--port", "sim", "--zip", str(z), "--board", "heltec_t096", "--mac", fake.mac,

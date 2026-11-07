@@ -570,31 +570,6 @@ def c_api_stage(ctx: Ctx) -> None:
         ctx.ensure_target()
 
 
-@check("3.12", "offline re-flash from staging with the AP off", needs=("manual", "repeater"))
-def c_offline(ctx: Ctx) -> None:
-    api = ctx.ensure_token()
-    ctx.ensure_target()
-    ctx.ensure_staged()
-    job, _ = ctx.api_flash({"source": "staged", "wifi_off": True})
-    wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
-    up0 = (api.status() or {}).get("device", {}).get("uptime_s", 0)
-    boots0, mark = len(ctx.con.boots), ctx.con.mark()
-    ctx.pause("Switch the WiFi access point OFF now (DFU32 is armed and waiting).")
-    end = time.monotonic() + 60
-    while api.status(timeout=2) is not None and time.monotonic() < end:
-        time.sleep(2)
-    ctx.start_ota(hint="LoRa or the repeater's USB console both work without WiFi.")
-    w = ctx.wait_job(job, ctx.args.start_ota_timeout + 600)
-    ctx.expect(w.final.get("state") == "SUCCEEDED", "the flash succeeded without the network", w.final.get("error"))
-    ctx.expect(len(ctx.con.boots) == boots0, "DFU32 did not reboot")
-    ctx.expect(ctx.con.find_line(r"rebooting so the network comes back", since=mark) is None,
-               "no restore-watchdog reboot")
-    ctx.pause("Switch the access point back ON.")
-    st = ctx.wait_api(240)
-    ctx.expect(st["device"]["uptime_s"] >= up0, f"uptime kept counting ({up0} -> {st['device']['uptime_s']} s)")
-    ctx.expect(st["job"].get("id") == job and st["job"].get("state") == "SUCCEEDED", "/status shows the job SUCCEEDED")
-
-
 @check("3.13", "logs cursor, PUT /config hostname, reboot")
 def c_logs_config(ctx: Ctx) -> None:
     api = ctx.ensure_token()

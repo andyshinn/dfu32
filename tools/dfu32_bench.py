@@ -6,7 +6,7 @@ The script drives DFU32's USB-serial console and its HTTP API, serves the
 firmware (and broken variants of it) over HTTP itself, flashes DFU32 with
 esptool where a check needs a different build, and stops to ask you only for
 the things it can't do: sending `start ota` to the repeater (unless
---repeater-port is given), and switching the WiFi access point off and on.
+--repeater-port is given).
 
 Everything DFU32 prints goes to serial.log, every API call to http.log, and
 the results to report.md / report.json, in a new folder under bench-results/.
@@ -117,7 +117,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--sections", help="comma-separated sections, e.g. 1,3")
     g.add_argument("--skip", help="comma-separated check ids to leave out")
     g.add_argument("--minimum", action="store_true", help="only what unblocks M4: " + ", ".join(MINIMUM))
-    g.add_argument("--skip-manual", action="store_true", help="skip checks that need the AP switched off and on")
     g.add_argument("--compare-runs", type=int, default=5, help="flashes per WiFi setting in 5.1 (default 5)")
     g.add_argument("--start-ota-timeout", type=int, default=300,
                    help="how long DFU32 waits for `start ota` each time (default 300 s)")
@@ -161,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         for t in ordered():
             extra = f"  [{', '.join(t.needs)}]" if t.needs else ""
             print(f"{t.id:6} {t.title}{extra}")
-        print("\n[repeater] = needs a `start ota`; [manual] = needs the access point switched off and on.\n"
+        print("\n[repeater] = needs a `start ota`.\n"
               "3.3 runs right after 3.5, so the happy path really waits for a LoRa `start ota`.")
         return 0
     for need in ("port", "board"):
