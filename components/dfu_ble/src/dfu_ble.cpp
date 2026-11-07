@@ -160,7 +160,8 @@ private:
         hit_.connectable = dev->isConnectable();
         hit_plus_one_ = plus && !exact;
         found_ = true;
-        NimBLEDevice::getScan()->stop();
+        // Don't stop the scan here: this runs inside NimBLE's own report handler,
+        // which keeps using its scan state after we return. find_target() stops it.
         if (SemaphoreHandle_t d = done_.load()) xSemaphoreGive(d);
     }
 
@@ -205,6 +206,11 @@ bool find_target(const Mac& app, uint32_t timeout_ms, const char* what, Advert& 
     NimBLEScan* scan = NimBLEDevice::getScan();
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     g_scan_cb.arm(app, done);
+    // Passive: matching needs only the address. Active scanning parks scannable
+    // advertisers on esp-nimble-cpp's scan-response waiting list, and stopping the
+    // scan from this task while the host task handles a report raced with it
+    // (LoadProhibited in NimBLEScan::resetWaitingTimer, esp-nimble-cpp 2.6.0).
+    scan->setActiveScan(false);
     scan->clearResults();
     ESP_LOGI(TAG, "scanning up to %" PRIu32 " s for the %s at %s or MAC+1 %s", timeout_ms / 1000, what,
              app.str().c_str(), app.plus_one().str().c_str());
@@ -662,6 +668,11 @@ bool init() {
     scan->setActiveScan(true);
     scan->setInterval(100);
     scan->setWindow(100);
+    // No scan-response timer: with a timeout, NimBLEScan::resetWaitingTimer()
+    // reads the waiting-list head without a lock and crashes if stop() clears the
+    // list from another core meanwhile. With 0, pending devices are simply
+    // reported when the scan ends, which is all scan() needs.
+    scan->setScanResponseTimeout(0);
     ESP_LOGI(TAG, "NimBLE up, own address %s", NimBLEDevice::getAddress().toString().c_str());
     return true;
 }
@@ -669,6 +680,7 @@ bool init() {
 std::vector<Advert> scan(uint32_t duration_ms) {
     std::vector<Advert> out;
     NimBLEScan* s = NimBLEDevice::getScan();
+    s->setActiveScan(true);  // listing wants names, which some devices only send in the scan response
     s->clearResults();
     if (s->start(duration_ms, false, true)) {
         const uint32_t until = now_ms() + duration_ms + 1000;
