@@ -628,11 +628,17 @@ def c_run_fields(ctx: Ctx) -> None:
             bad.append(r["seq"])
     ctx.data("table", rows)
     ctx.expect(not bad, f"{len(new)} runs from this session have trigger, source and target_id", f"bad: {bad}")
-    zero = [r["seq"] for r in new if not r.get("started_unix")]
+    # Console runs in section 1 happen before 2.1 joins WiFi, so their clock isn't set yet;
+    # an API job needs WiFi, so by then SNTP should have synced.
+    zero_console = [r["seq"] for r in new if not r.get("started_unix") and r.get("trigger") == "console"]
+    zero_api = [r["seq"] for r in new if not r.get("started_unix") and r.get("trigger") == "api"]
     newest = max(new, key=lambda r: r["seq"])
     if synced:
         ctx.expect(newest.get("started_unix"), f"the newest run (#{newest['seq']}) has started_unix")
-        ctx.soft(not zero, "every run has a non-zero started_unix", f"zero on {zero} (started before SNTP synced?)")
+        ctx.soft(not zero_api, "every API-started run has a non-zero started_unix", f"zero on {zero_api}")
+        if zero_console:
+            ctx.note(f"console runs {zero_console} have started_unix 0: they ran before the clock was set (no WiFi "
+                     "yet), which is expected")
     else:
         ctx.warn("the clock isn't synced (SNTP), so started_unix can't be checked")
 

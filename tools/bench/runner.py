@@ -255,14 +255,14 @@ class Ctx:
 
     def expect(self, cond, msg: str, why: str = "") -> None:
         if not cond:
-            raise TestFailed(msg + (f" ({why})" if why else ""))
+            raise TestFailed(f"expected: {msg}" + (f"; got: {why}" if why else ""))
         self.ok(msg)
 
     def soft(self, cond, msg: str, why: str = "") -> bool:
         if cond:
             self.ok(msg)
         else:
-            self.warn(msg + (f" ({why})" if why else ""))
+            self.warn(f"expected: {msg}" + (f"; got: {why}" if why else ""))
         return bool(cond)
 
     def data(self, key: str, value) -> None:
@@ -581,7 +581,17 @@ class Ctx:
         api = self.ensure_token()
         body = dict(body or {})
         body.setdefault("arm_timeout_s", self.args.start_ota_timeout)
-        r = api.post(f"/targets/{self.tid}/flash", body)
+        before = ((api.status() or {}).get("job") or {}).get("id", 0)
+        try:
+            r = api.post(f"/targets/{self.tid}/flash", body)
+        except ApiUnreachable as e:
+            # The reply can get lost on the network even though the job started: look before failing.
+            st = self.wait_api(60)
+            job = st.get("job") or {}
+            if job.get("kind") == "flash" and job.get("id", 0) > before:
+                self.warn(f"POST /flash got no reply ({e}), but job #{job['id']} did start; following it")
+                return job["id"], None
+            raise
         if expect_status:
             self.expect(r.status == expect_status, f"POST /targets/{self.tid}/flash {json.dumps(body)} -> {expect_status}",
                         r.short())
@@ -668,18 +678,29 @@ class Ctx:
                            on_sample: Optional[Callable[[dict, str], None]] = None, poll: float = 1.0) -> JobWatch:
         """POST /flash, ask for `start ota` once armed, follow the job to its end."""
         job, _ = self.api_flash(body)
-        prompted = {"done": False}
+        prompted = {"done": False, "next": 0.0}
 
         def on_state(j: dict) -> None:
             if j.get("state") == "AWAITING_TARGET" and not prompted["done"]:
                 prompted["done"] = True
+                prompted["next"] = time.monotonic() + 60
                 if start_ota:
                     self.start_ota(lora=lora, hint=hint)
                 else:
                     self.say("no `start ota` needed: the repeater's bootloader is waiting for DFU (usually at MAC+1)")
 
+        def sample(j: dict, src: str) -> None:
+            # While DFU32 still waits for the repeater, remind once a minute how long is left.
+            if j.get("state") == "AWAITING_TARGET" and prompted["done"] and time.monotonic() >= prompted["next"]:
+                prompted["next"] = time.monotonic() + 60
+                left = j.get("arm_remaining_s")
+                self.say(f"still waiting for the repeater{f' ({left} s left)' if left is not None else ''}: "
+                         f"send `start ota`{' over LoRa' if lora else ''} if you haven't")
+            if on_sample:
+                on_sample(j, src)
+
         return self.wait_job(job, body.get("arm_timeout_s", self.args.start_ota_timeout) + 900, on_state=on_state,
-                             on_sample=on_sample, poll=poll)
+                             on_sample=sample, poll=poll)
 
     def recover_target_api(self) -> None:
         self.say("recovering the repeater: flashing the staged image again (source=staged)")
