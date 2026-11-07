@@ -158,35 +158,39 @@ class Repeater:
                 return buf.decode(errors="replace"), True
         return buf.decode(errors="replace"), False
 
-    def command(self, line: str, wait: float = 3.0, *, expect: str = "", window: float = 60.0,
-                tries: int = 3) -> str:
+    def command(self, line: str, wait: float = 3.0, *, expect: str = "", window: float = 60.0) -> str:
         """Sends one line and returns the reply.
 
-        Keeps trying for up to `window` s while the port can't be opened or written: right after
-        a flash the repeater is still rebooting and its USB port isn't back yet. With `expect`,
-        the line is sent again (up to `tries` times) when the port stays up but the reply lacks
-        it. Raises only if the line could never be sent.
+        The port is opened fresh for every command: after a flash the repeater reboots and its
+        USB port comes back as a new device, and an old handle can swallow a write silently.
+        With `expect`, the line is sent again until a reply contains it, for up to `window` s,
+        which also covers the repeater still booting. Raises only if the line could never be
+        sent at all.
         """
         data = (line + "\r\n").encode()
         deadline = time.monotonic() + window
         sent = 0
+        text = ""
+        self._drop()
         while True:
             try:
                 self._send(data)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - not enumerated yet, or a stale handle
                 self._drop()
                 if time.monotonic() >= deadline:
-                    self.log(f"repeater port still unavailable after {window:.0f} s ({type(e).__name__}: {e})")
+                    self.log(f"repeater port unavailable for {window:.0f} s ({type(e).__name__}: {e})")
+                    if sent:
+                        return text
                     raise
-                self.log(f"repeater port not ready ({type(e).__name__}: {e}); retrying")
                 time.sleep(1.5)
                 continue
             sent += 1
             text, dropped = self._read(wait)
             self.log(f"repeater> {line} (try {sent}){' [port dropped]' if dropped else ''}\n{text.strip()}")
-            if dropped or not expect or expect in text or sent >= tries or time.monotonic() >= deadline:
+            if not expect or expect in text or time.monotonic() >= deadline:
+                self._drop()
                 return text
-            self.log(f"repeater didn't answer '{expect}'; sending '{line}' again")
+            time.sleep(1.0)  # no reply yet (still booting, or the write went nowhere): send it again
 
 
 # ---- context ----------------------------------------------------------------------------
@@ -293,12 +297,10 @@ class Ctx:
             else:
                 if "OK" in out:
                     self.say("sent `start ota` over the repeater's USB console (it replied OK)")
-                else:
-                    self.say("sent `start ota` over the repeater's USB console (no reply read; the port may have "
-                             "dropped). If DFU32 doesn't see the repeater, send it yourself.")
-                if wait_enter:
-                    time.sleep(2)
-                return
+                    if wait_enter:
+                        time.sleep(2)
+                    return
+                self.warn("the repeater never answered `start ota` with OK over USB (60 s of retries)")
         where = "OVER LoRa from the companion app (remote admin)" if lora else "to the repeater (LoRa or its USB console)"
         msg = f"Send `start ota` {where}." + (f" {hint}" if hint else "")
         if wait_enter:

@@ -234,7 +234,7 @@ class FlakyUsbPort:
 
 
 class RepeaterPort(unittest.TestCase):
-    def test_port_dropping_after_write_is_not_an_error(self):
+    def test_each_command_opens_the_port_fresh(self):
         opened = []
 
         def opener(port, baud):
@@ -242,54 +242,48 @@ class RepeaterPort(unittest.TestCase):
             opened.append(p)
             return p
 
-        logs = []
-        r = Repeater("usb", 115200, logs.append, opener=opener)
-        self.assertEqual(r.command("start ota", wait=0.5), "")
-        self.assertEqual(opened[0].written, b"start ota\r\n")
-        self.assertIsNone(r.ser)  # dropped; reopened on the next command
-        r.command("reboot", wait=0.2)
-        self.assertEqual(len(opened), 2)
-        self.assertTrue(any("dropped" in m for m in logs))
-
-    def test_stale_handle_is_reopened(self):
-        import termios
-
-        class Stale(FlakyUsbPort):
-            def reset_input_buffer(self):
-                raise termios.error(6, "Device not configured")
-
-        opened = []
-
-        def opener(port, baud):
-            p = (Stale if not opened else FlakyUsbPort)(opened)
-            opened.append(p)
-            return p
-
         r = Repeater("usb", 115200, lambda m: None, opener=opener)
-        r.command("start ota", wait=0.2)  # the first handle is stale: reopened and sent on the second
-        self.assertEqual(len(opened), 2)
-        self.assertEqual(opened[1].written, b"start ota\r\n")
+        self.assertEqual(r.command("reboot", wait=0.2), "")  # the port dropping after the write isn't an error
+        self.assertEqual(opened[1].written, b"reboot\r\n")  # not the handle opened at start-up
+        r.command("reboot", wait=0.2)
+        self.assertEqual(len(opened), 3)
+        self.assertIsNone(r.ser)
 
-    def test_waits_for_the_port_to_come_back_and_resends_without_ok(self):
+    def test_resends_until_ok_while_the_repeater_reboots(self):
         import termios
-        state = {"opens": 0}
+        state = {"opens": 0, "writes": 0}
 
-        class Quiet(FlakyUsbPort):
+        class Booting(FlakyUsbPort):
+            """Swallows the first two writes (still booting), answers OK to the third."""
+
+            def write(self, b):
+                super().write(b)
+                state["writes"] += 1
+
             def read(self, n):
-                time.sleep(0.01)
-                return b""
+                time.sleep(0.005)
+                return b"OK - mac: F4:1C:36:A7:33:95\r\n" if state["writes"] >= 3 else b""
 
         def opener(port, baud):
             state["opens"] += 1
-            if 2 <= state["opens"] <= 3:  # still rebooting: the device node isn't back yet
+            if 2 <= state["opens"] <= 3:  # the device node isn't back yet
                 raise termios.error(2, "No such file or directory")
-            return Quiet([]) if state["opens"] > 1 else FlakyUsbPort([])
+            return Booting([])
 
         r = Repeater("usb", 115200, lambda m: None, opener=opener)
-        r.ser = None  # as after a drop
-        with mock.patch.object(time, "sleep"):
-            r.command("start ota", wait=0.05, expect="OK", window=30)
-        self.assertEqual(r.ser.written, b"start ota\r\n" * 3)  # no OK: sent three times
+        with mock.patch("bench.runner.time.sleep"):
+            out = r.command("start ota", wait=0.05, expect="OK", window=10)
+        self.assertIn("OK", out)
+        self.assertEqual(state["writes"], 3)
+
+    def test_gives_up_after_the_window(self):
+        class Silent(FlakyUsbPort):
+            def read(self, n):
+                return b""
+
+        r = Repeater("usb", 115200, lambda m: None, opener=lambda p, b: Silent([]))
+        with mock.patch("bench.runner.time.sleep"):
+            self.assertEqual(r.command("start ota", wait=0.02, expect="OK", window=0.3), "")
 
     def test_interrupt_sends_ctrl_c_alone(self):
         port = FakePort()
