@@ -28,6 +28,7 @@ namespace {
 constexpr const char* TAG = "job";
 constexpr uint32_t kTaskStack = 12288;        // HTTP client + manifest parse + BLE flash
 constexpr uint32_t kRestoreWaitMs = 60000;    // SPEC.md §7.3 layer 4
+constexpr int64_t kReplyGraceMs = 1500;        // let the POST /flash reply out before stopping WiFi
 constexpr int64_t kStallUs = 30LL * 1000000;  // stall watchdog (layer 3)
 constexpr uint64_t kStallCheckUs = 5ULL * 1000000;
 
@@ -48,6 +49,7 @@ const char* g_holder = nullptr;
 uint32_t g_next_id = 0;
 Faults g_faults;
 int64_t g_stream_t0_us = 0;
+std::atomic<int64_t> g_submit_us{0};  // when the current job was accepted
 
 QueueHandle_t g_queue = nullptr;
 esp_timer_handle_t g_deadline_timer = nullptr;
@@ -242,6 +244,13 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
         }
         const net::Status ns = net::status();
         if (q.flash.wifi_off && ns.initialised && !ns.stopped) {
+            // A target that is already advertising (e.g. a bootloader waiting at
+            // MAC+1) is seen within milliseconds of POST /flash. Give the 202
+            // reply time to leave before WiFi goes, or the client never gets it.
+            const int64_t since_submit_ms = (esp_timer_get_time() - g_submit_us.load()) / 1000;
+            if (since_submit_ms < kReplyGraceMs) {
+                vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(kReplyGraceMs - since_submit_ms)));
+            }
             wifi_was_connected = ns.connected;
             wifi_stopped = net::stop();
         }
@@ -465,6 +474,7 @@ SubmitResult submit(std::unique_ptr<Request> q, std::string& why, uint32_t& job_
         g_snap.max_attempts = q->target.max_attempts;
         g_snap.wifi_off = q->kind == Kind::Flash && q->flash.wifi_off;
         g_stream_t0_us = 0;
+        g_submit_us = esp_timer_get_time();
         job_id = g_snap.id;
         // Clear the abort flags before the job becomes visible, so an abort
         // that sees it active is never wiped (abort() sets them under g_mu).

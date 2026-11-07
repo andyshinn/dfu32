@@ -169,7 +169,10 @@ private:
         const bool secure = dev->isAdvertisingService(secure_dfu_uuid());
         const std::string name = dev->haveName() ? dev->getName() : "";
         const bool dfu_name = name.find("DFU") != std::string::npos || name.find("dfu") != std::string::npos;
-        if (!has_uuid && !secure && !dfu_name) return;
+        // MeshCore apps in `start ota` mode advertise as "<name>_OTA": one we don't
+        // expect usually means `start ota` went to a different repeater.
+        const bool ota_name = name.size() > 4 && name.compare(name.size() - 4, 4, "_OTA") == 0;
+        if (!has_uuid && !secure && !dfu_name && !ota_name) return;
         const Mac m = from_nimble(dev->getAddress());
         const size_t n = notable_count();
         for (size_t i = 0; i < n; ++i) {

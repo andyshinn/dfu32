@@ -342,6 +342,11 @@ class Ctx:
 
     def ensure_wifi(self, wait: float = 30) -> dict:
         st = self.wifi_status()
+        end = time.monotonic() + 300
+        while st.get("stopped") and time.monotonic() < end:
+            # WiFi is off for a transfer: re-joining now would disturb it; wait for the restore.
+            time.sleep(3)
+            st = self.wifi_status()
         if not st["connected"] and self.args.wifi_ssid and st.get("ssid") != self.args.wifi_ssid:
             st = self.join_wifi()
         end = time.monotonic() + wait
@@ -585,9 +590,9 @@ class Ctx:
         try:
             r = api.post(f"/targets/{self.tid}/flash", body)
         except ApiUnreachable as e:
-            # The reply can get lost on the network even though the job started: look before failing.
-            st = self.wait_api(60)
-            job = st.get("job") or {}
+            # The reply can get lost even though the job started (WiFi may already be off for the
+            # transfer): ask the console, which always answers, before failing.
+            job = self.console_job()
             if job.get("kind") == "flash" and job.get("id", 0) > before:
                 self.warn(f"POST /flash got no reply ({e}), but job #{job['id']} did start; following it")
                 return job["id"], None
@@ -660,10 +665,23 @@ class Ctx:
         raise TestFailed(f"the API did not answer within {timeout:.0f} s")
 
     def abort_leftover_job(self) -> None:
-        if not self.api:
-            return
-        st = self.api.status(timeout=3)
+        st = self.api.status(timeout=3) if self.api else None
         if not st:
+            # API silent: a job may be mid-transfer with WiFi off. Don't start the next check on
+            # top of it; follow it on the console until it ends (or DFU32 reboots).
+            job = self.console_job()
+            if job.get("id") and job.get("state") not in TERMINAL and job.get("state") not in ("IDLE", ""):
+                self.say(f"job #{job['id']} is still running ({job['state']}); waiting for it to finish")
+                end = time.monotonic() + 600
+                while time.monotonic() < end:
+                    time.sleep(3)
+                    try:
+                        job = self.console_job()
+                    except ConsoleRebooted:
+                        self.con.wait_prompt_after_boot()
+                        return
+                    if job.get("state") in TERMINAL or not job.get("id"):
+                        return
             return
         job = st.get("job") or {}
         if job.get("state") not in TERMINAL and job.get("state") not in ("IDLE", None):
