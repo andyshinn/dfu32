@@ -100,7 +100,7 @@ Items are ranked by how much the design changes if the answer differs from the a
     - DFU32 doesn't care. But if your habit is to "run it again to be sure", we should check that it doesn't hang the repeater.
     - *Impact:* operator docs only.
 
-11. **Q — Improv implementation.** The plan is a small in-tree implementation of the Improv Serial and BLE protocols, rather than depending on `improv-wifi/sdk-cpp`. I haven't checked its license or IDF fit yet. OK to decide during M3?
+11. **A — Improv implementation: use `improv-wifi/sdk-cpp`** (SPEC §4.1), not an in-tree protocol implementation. DFU32 writes only the transports: NimBLE GATT in M4, the console port in M5. Confirm its IDF fit when it's vendored in M4.
 
 12. **A — No HTTPS in v1.**
     - `CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n` saves roughly 100+ KB.

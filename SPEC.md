@@ -87,7 +87,7 @@ Registry components are declared in the `idf_component.yml` of the component tha
 | `espressif/cjson` | ^1.7.19 | Manifest, API bodies, target record | M3a (in use) |
 | `espressif/button` (esp-iot-solution) | 4.2.x | Debounce, long-press events for the 5 s unclaim and 15 s factory reset (§9.3) | M4 |
 | `espressif/led_indicator` (esp-iot-solution) on `espressif/led_strip` | 2.1.x / 3.1.x | NeoPixel and red-LED patterns with priorities (§13.4) | M4 |
-| `improv-wifi/sdk-cpp` (not in the registry; vendored or fetched) | 1.2.x | Improv packet parsing and checksums; DFU32 supplies the serial and BLE transports (§9.2) | M4 |
+| `improv-wifi/sdk-cpp` (not in the registry; vendored or fetched) | 1.2.x | Improv packet parsing and checksums; DFU32 supplies the serial and BLE transports (§9.2) | M4 (BLE), M5 (Serial) |
 | `espressif/mqtt` (esp-mqtt) | 1.x | MQTT + Home Assistant discovery (§10.3) | post-v1 |
 | `espressif/libsodium` | 1.0.x | Ed25519 verification for signed manifests (§11); PSA in IDF 6 has no Ed25519 | post-v1 |
 
@@ -421,8 +421,12 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
 
-- **Improv Serial** (M4, together with ESP Web Tools; until then the `wifi <ssid> <password>` console command stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
-- Both transports use the Improv project's C++ SDK (`improv-wifi/sdk-cpp`, §4.1) for packet parsing; DFU32 provides the UART/USB and NimBLE GATT plumbing.
+- **Improv Serial** (M5, with the browser installer in §9.4; until then the `wifi <ssid> <password>` console command stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 at 115200 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
+  - It shares the port with the REPL. One reader sends frames that start with `IMPROV` to the Improv parser and everything else to the line editor, in place of `esp_console_new_repl_stdio`.
+  - **Resync:** the reader holds bytes while they match the `IMPROV` header and hands them back to the line editor at the first mismatch. Once the header is complete, the frame is dropped and the reader returns to line mode on a checksum failure, a length over the maximum frame size, or 250 ms without a byte. A malformed or cut-off frame can't wedge the REPL or swallow the next typed command.
+  - Only input is parsed. Log output on the port is harmless, because ESP Web Tools ignores bytes outside Improv frames. On the classic ESP32, the ROM and second-stage bootloader print to UART0 before the app starts (115200 with the usual 40 MHz crystal). That output is outside DFU32's control and is ignored the same way.
+  - It stays on after provisioning, so the installer page can recognise DFU32 and offer to change WiFi. Anyone with USB access can already do that with the `wifi` command.
+- Both transports use the Improv project's C++ SDK (`improv-wifi/sdk-cpp`, §4.1) for packet parsing, behind one transport-agnostic Improv core (M4): save the credentials, wait for the connection, then report provisioned with the redirect URL, or an error. DFU32 provides the UART/USB and NimBLE GATT plumbing.
 - **Improv BLE** runs only while unprovisioned, or for 5 min after a 2 s button press. It uses a NimBLE GATT server and advertising. It is fully torn down when provisioning finishes or the window expires, and a DFU can't start while it is active.
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
@@ -436,6 +440,24 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 - On boards with no button, use `POST /api/v1/system/token/rotate` while authenticated, or reflash with an NVS erase.
 
 ---
+
+### 9.4 Browser installer (M5)
+
+A static page on GitHub Pages flashes DFU32 and sets its WiFi in one session. It is built on ESP Web Tools (`<esp-web-install-button>`), which uses Web Serial, so it needs desktop Chrome or Edge. Other browsers see a "not supported" message.
+
+- **Page:** `web/index.html` plus a little CSS. No framework and no build step. ESP Web Tools is loaded from a CDN at an exact pinned version. A board picker sets the button's `manifest` attribute.
+- **Manifests:** one per board profile (`manifest-<board>.json`), because ESP Web Tools picks a build by `chipFamily`, and two profiles are `ESP32-S3`. `tools/dfu32_web_manifest.py` generates them from each build's `flasher_args.json`:
+  - `name: "DFU32"`, `version` (the firmware's `git describe` string, as in `/api/v1/status`), and `new_install_prompt_erase: true`. ESP Web Tools also offers the erase option when reinstalling, so the page warns next to the button that erasing removes WiFi, the token and the target;
+  - the separate parts at their flash offsets (bootloader, partition table, otadata, app), **not** the merged `.bin`. A raw merged image fills the gaps between parts with `0xFF`, so flashing it wipes NVS (WiFi, token hash, target) and `runlog`. Separate parts leave NVS, `runlog` and `staging` alone. Writing `ota_data_initial.bin` sends the next boot to `ota_0`, which holds the new app, even if a self-OTA had been running from `ota_1`.
+- **Partition layout is part of the update contract.** Settings survive an update only if `nvs`, `runlog` and `staging` keep their offsets and sizes. A release that moves or resizes any of them is breaking and needs an erase: its release notes and the page must say so. `tools/check_partitions.py` gains a check against a committed baseline of those three partitions per table, so CI fails on an accidental change. A deliberate change updates the baseline in the same PR.
+- **Provisioning:** after flashing, ESP Web Tools resets the board and talks Improv Serial (§9.2). The user enters the SSID and passphrase, and "Visit device" opens `http://<ip>/` on the claim screen (§9.3).
+- **Publishing:** a `pages` job in `ci.yml`:
+  - **Triggers:** `release: published` and `workflow_dispatch`. A release run builds the firmware matrix from the tag in the same workflow run, and `pages` (which `needs` the host and firmware jobs) downloads that run's artifacts. Nothing is reused from an earlier run.
+  - **Which release is live:** Pages holds one site, so the page tracks the latest stable release. The job deploys only when the release isn't a pre-release and its tag is the repository's latest release (checked with the GitHub API), so a pre-release or a patch to an older line never replaces it. Pre-v1.0 tags (`v0.x`) are published as normal releases. `concurrency: { group: pages, cancel-in-progress: false }` stops two deployments racing.
+  - **Manual runs** deploy from `main`, the only branch the environment allows. That is how M5 is benched before the first release (the version then reads like `v0.3.0-12-gabc1234`). Afterwards, it is only used to redeploy.
+  - It generates the manifests and deploys `web/` plus the parts with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files are served from Pages, on the same origin as the page, because release-asset downloads don't send CORS headers. The merged `.bin` files are attached to the release for esptool users, documented as fresh-install images that reset settings.
+  - **One-time repo settings:** Pages → Source → "GitHub Actions". In the `github-pages` environment, add a tag rule `v*` to the deployment branches and tags, because by default it only accepts the default branch and rejects a tag-ref deployment.
+- Apart from manual deployments of `main` before the first release, the page only offers released builds. Developers flash with `idf.py` as before.
 
 ## 10. Control interface
 
@@ -653,7 +675,7 @@ Managed components (`main/idf_component.yml`):
 - `espressif/mdns`
 - `espressif/led_strip`
 
-For Improv, a small local implementation of the Improv Serial and BLE protocols is planned (see the open questions on reusing the upstream SDK).
+Improv uses `improv-wifi/sdk-cpp` (§4.1). It isn't in the registry, so it is vendored or fetched rather than listed here.
 
 ---
 
@@ -789,6 +811,8 @@ dfu32/
     runlog/              log ring + run-record partition
     api/                 esp_http_server routes, claim / bearer auth; embedded UI in M4
     indicator/           (M4) LED + button
+    improv/              (M4) Improv core + BLE transport; Serial transport in M5
+  web/                   (M5) static browser installer page for GitHub Pages
   tools/                 dfu32_pack.py, dfu32_stage_image.py, layout and size checks
   test/host/             Catch2 tests for the pure components
   docs/
@@ -809,6 +833,7 @@ dfu32/
 | espressif/cjson (cJSON) | MIT | Dependency |
 | espressif/button, espressif/led_indicator (esp-iot-solution), espressif/led_strip | Apache-2.0 | Dependency (M4) |
 | improv-wifi/sdk-cpp | Apache-2.0 | Dependency (M4); keep its LICENSE alongside if vendored |
+| esphome/esp-web-tools | Apache-2.0 | Loaded by the installer page (M5) from a CDN; not in the firmware |
 | espressif/libsodium (libsodium) | ISC | Dependency (post-v1) |
 
-Apache-2.0 dependencies are compatible with DFU32's MIT licence. Binary releases (the merged `.bin`, ESP Web Tools) should ship a `THIRD_PARTY_NOTICES` file listing these licences; generating it from the build's `dependencies.lock` is an M5 task.
+Apache-2.0 dependencies are compatible with DFU32's MIT licence. Binary releases (the merged `.bin`, ESP Web Tools) should ship a `THIRD_PARTY_NOTICES` file listing these licences; generating it from the build's `dependencies.lock` is part of M5, the first milestone that publishes binaries (§9.4).
