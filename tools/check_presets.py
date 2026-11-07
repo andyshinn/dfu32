@@ -20,9 +20,23 @@ PRESETS_FILE = "CMakePresets.json"
 
 
 def load_presets(project_dir: Path) -> list[dict]:
-    """Return the configure presets from <project_dir>/CMakePresets.json, in file order."""
+    """Return the configure presets from <project_dir>/CMakePresets.json, in file order.
+
+    Raises OSError if the file can't be read and ValueError if it isn't a JSON
+    object with a "configurePresets" list.
+    """
     data = json.loads((project_dir / PRESETS_FILE).read_text())
-    return list(data.get("configurePresets", []))
+    if not isinstance(data, dict):
+        raise ValueError("top level is not a JSON object")
+    presets = data.get("configurePresets", [])
+    if not isinstance(presets, list):
+        raise ValueError('"configurePresets" is not a list')
+    return presets
+
+
+def cache_value(value: object) -> object:
+    """Unwrap CMake's {"type": ..., "value": ...} cacheVariables form."""
+    return value.get("value") if isinstance(value, dict) else value
 
 
 def board_names(project_dir: Path) -> list[str]:
@@ -31,18 +45,23 @@ def board_names(project_dir: Path) -> list[str]:
 
 def check(project_dir: Path) -> list[str]:
     """Return a list of problems; empty means presets and boards agree."""
-    errors: list[str] = []
     try:
         presets = load_presets(project_dir)
     except (OSError, ValueError) as e:
         return [f"cannot read {PRESETS_FILE}: {e}"]
 
+    errors: list[str] = []
     boards = board_names(project_dir)
+    if not presets:
+        errors.append(f"{PRESETS_FILE} has no configure presets")
     seen: set[str] = set()
-    for p in presets:
+    for i, p in enumerate(presets):
+        if not isinstance(p, dict):
+            errors.append(f"configurePresets[{i}] is not an object")
+            continue
         name = p.get("name")
-        if not name:
-            errors.append("preset without a name")
+        if not isinstance(name, str) or not name:
+            errors.append(f"configurePresets[{i}] has no name")
             continue
         if name in seen:
             errors.append(f"duplicate preset '{name}'")
@@ -53,7 +72,8 @@ def check(project_dir: Path) -> list[str]:
             errors.append(f"preset '{name}' uses 'inherits', which idf.py does not support")
         if p.get("binaryDir") != f"build/{name}":
             errors.append(f"preset '{name}': binaryDir must be 'build/{name}', got {p.get('binaryDir')!r}")
-        board = p.get("cacheVariables", {}).get("DFU32_BOARD")
+        cache = p.get("cacheVariables")
+        board = cache_value(cache.get("DFU32_BOARD")) if isinstance(cache, dict) else None
         if board != name:
             errors.append(f"preset '{name}': cacheVariables.DFU32_BOARD must be '{name}', got {board!r}")
     for b in boards:

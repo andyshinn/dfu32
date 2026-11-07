@@ -44,7 +44,9 @@ To build every profile in turn:
 python3 tools/build_all.py
 ```
 
-Arguments after the options go to `idf.py` in place of `build`, with `{preset}` replaced by the profile name, for example `python3 tools/build_all.py build merge-bin -o dfu32-{preset}-merged.bin`. Add `--only <profile>` (repeatable) to limit the run. A failed board doesn't stop the rest; the summary at the end lists each one.
+The script's own options (`--only <profile>`, repeatable, limits the run) come first. Everything after them goes to `idf.py` in place of `build`, with `{preset}` replaced by the profile name, for example `python3 tools/build_all.py build merge-bin -o dfu32-{preset}-merged.bin`. Put `--` before `idf.py` arguments that start with a dash: `python3 tools/build_all.py --only esp32s3_n16r8 -- -p PORT flash`. A failed board doesn't stop the rest; the summary at the end lists each one.
+
+Build directories from the older `idf.py -B build/<profile> -DDFU32_BOARD=<profile>` commands are the same directories the presets use, so they keep working with `--preset`. If a build directory named after one profile ends up configured for another, CMake stops with an error telling you which `--preset` to use.
 
 | Profile | Board | Flash / PSRAM |
 |---|---|---|
