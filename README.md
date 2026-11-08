@@ -12,6 +12,18 @@ DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 - [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md): verified protocol facts, with source citations
 - [docs/BENCH.md](docs/BENCH.md): bench guide for staging, probing and flashing a repeater
 
+## Install from your browser
+
+The installer page at **[andyshinn.github.io/dfu32](https://andyshinn.github.io/dfu32/)** flashes DFU32 over USB from a desktop browser with Web Serial (Chrome, Edge, or Firefox 151 or later); no toolchain needed. Pick your board and click Install. Updating from the page keeps WiFi, the API token, the target and the staged image, unless you choose "Erase device". Until v1.0 the page serves the latest `main` build; after that, the latest release.
+
+WiFi setup from the page itself (Improv Serial) arrives later in M5. Until then, after installing, set WiFi over Improv BLE (Home Assistant or [improv-wifi.com](https://www.improv-wifi.com/)) or with the `wifi <ssid> <password>` console command.
+
+To flash without the page, each release carries a merged image per board, `dfu32-<board>-merged.bin`. It's a full image for a fresh install: it **resets saved settings** (WiFi, token, target and run log). Flash it at offset 0:
+
+```bash
+esptool.py --chip auto -p PORT write_flash 0x0 dfu32-feather_esp32s3-merged.bin
+```
+
 ## Building the firmware
 
 You need ESP-IDF **v6.1** (for example installed with `eim`). Activate it in your shell, then pick a board profile with `--preset`. Each profile sets the chip target, flash size, partition table, PSRAM, console and pins, so **don't run `idf.py set-target`**. Each preset (see [CMakePresets.json](CMakePresets.json)) builds in its own directory, `build/<profile>`:

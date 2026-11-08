@@ -123,7 +123,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
 ## M5: Browser installer (2–3 days)
 
-A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi with Improv Serial in the same session. It needs desktop Chrome or Edge and a USB cable, and no toolchain. Details in SPEC §9.4.
+A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi with Improv Serial in the same session. It needs a desktop browser with Web Serial (Chrome, Edge or Firefox 151+) and a USB cable, and no toolchain. Details in SPEC §9.4.
 
 - **Improv Serial in firmware**, on the console port (USB-Serial-JTAG on the S3, UART0 at 115200 on the classic ESP32), using the M4 Improv core:
   - the REPL currently uses `esp_console_new_repl_stdio`, so linenoise owns stdin. Replace it with a small reader: frames that start with `IMPROV` go to the Improv parser, and everything else goes to the line editor and `esp_console_run`. Typing in a terminal must work as it does today;
@@ -142,9 +142,9 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
   - `version` is the M4 firmware version string.
 - **Partition baseline:** `tools/check_partitions.py` checks `nvs`, `runlog` and `staging` against a committed baseline, so a layout change that would break keep-settings updates can't land by accident (SPEC §9.4).
 - **CI**: a `pages` job in `ci.yml` (details in SPEC §9.4):
-  - triggers on `release: published` and `workflow_dispatch`. A release run builds the firmware from the tag in the same run and uses that run's artifacts;
+  - triggers on `push` to `main` (until v1.0), `release: published` and `workflow_dispatch`. Each run builds the firmware (a release run from the tag) and uses that run's artifacts;
   - deploys only for the latest stable release, never a pre-release or a patch to an older line, under a `pages` concurrency group;
-  - manual runs deploy from `main`. This is the path to bench M5 before the first release;
+  - pushes and manual runs deploy from `main`, so the page serves the latest `main` build before v1.0. This is the path to bench M5;
   - generates the manifests and copies `web/`, the parts and the manifests into one directory;
   - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
   - it also attaches the merged `.bin` files to the release for esptool users;
@@ -164,7 +164,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 - Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX.
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
 - `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API).
-- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0, which also publishes the installer page.
+- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Remove the `pages` job's push-to-`main` trigger, so the installer page serves releases only. Tag v1.0, which also publishes the installer page.
 
 ## Later (post-v1, in rough priority order)
 
