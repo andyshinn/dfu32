@@ -221,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
     selected = select(args)
     if not selected:
         ap.error("no checks selected")
+    if args.soak and not any(t.section == "6" for t in selected):
+        ap.error("--soak was given, but the checks selected leave out the soak (6.1): add it to --only or "
+                 "--sections, or drop --minimum")
     try:
         site = FirmwareSite.from_package(args.zip, args.bin, args.dat, board=args.board, version=args.version,
                                          port=args.site_port)

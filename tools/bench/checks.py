@@ -1042,26 +1042,38 @@ def c_soak(ctx: Ctx) -> None:
         ctx.warn("no --repeater-port: you'll be asked for `start ota` on every run")
     rows: list = []
     fields = ["i", "version", "fault", "fault_result", "recovery", "ok", "why", "attempts", "runs", "seconds", "ver"]
-    with open(ctx.out / "soak.csv", "w", newline="") as f:
-        cw = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        cw.writeheader()
-        for i, variant, fault in plan:
-            ctx.say(f"--- soak run {i}/{n}: {ctx.site.version_of(variant)}{', fault ' + fault if fault else ''}")
-            try:
-                row = soak_run(ctx, api, i, variant, fault)
-            except (TestFailed, ConsoleError, ApiUnreachable) as e:
-                row = {"i": i, "version": ctx.site.version_of(variant), "fault": fault or "-", "ok": False,
-                       "why": f"{type(e).__name__}: {e}", "runs": [], "fault_result": "", "recovery": ""}
-                cleanup(ctx, False)
-            rows.append(row)
-            cw.writerow({**row, "runs": " ".join(map(str, row.get("runs", [])))})
-            f.flush()
-            ctx.say(f"run {i}: {'OK' if row['ok'] else 'NOT RECOVERED: ' + row['why']}"
-                    f"{'  [' + row['fault_result'] + ']' if row.get('fault_result') else ''}")
-            if not row["ok"] and ctx.repeater_alive() is False:
-                ctx.warn(f"the repeater stopped answering on its USB console after run {i}: it looks hung; "
-                         "stopping the soak")
-                break
+    try:
+        with open(ctx.out / "soak.csv", "w", newline="") as f:
+            cw = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            cw.writeheader()
+            for i, variant, fault in plan:
+                ctx.say(f"--- soak run {i}/{n}: {ctx.site.version_of(variant)}{', fault ' + fault if fault else ''}")
+                try:
+                    row = soak_run(ctx, api, i, variant, fault)
+                except (TestFailed, ConsoleError, ApiUnreachable) as e:
+                    row = {"i": i, "version": ctx.site.version_of(variant), "fault": fault or "-", "ok": False,
+                           "why": f"{type(e).__name__}: {e}", "runs": [], "fault_result": "", "recovery": ""}
+                    try:
+                        cleanup(ctx, False)
+                    except Exception as ce:  # noqa: BLE001 - keep soaking; the next run sets up again
+                        ctx.say(f"cleanup after run {i} failed: {type(ce).__name__}: {ce}")
+                rows.append(row)
+                cw.writerow({**row, "runs": " ".join(map(str, row.get("runs", [])))})
+                f.flush()
+                ctx.say(f"run {i}: {'OK' if row['ok'] else 'NOT RECOVERED: ' + row['why']}"
+                        f"{'  [' + row['fault_result'] + ']' if row.get('fault_result') else ''}")
+                if not row["ok"] and ctx.repeater_alive() is False:
+                    ctx.warn(f"the repeater stopped answering on its USB console after run {i}: it looks hung; "
+                             "stopping the soak")
+                    break
+    finally:
+        _soak_summary(ctx, rows)  # also when the soak stops early (Ctrl+C, a runner error)
+    bad = [r["i"] for r in rows if not r["ok"]]
+    ctx.expect(not bad, f"zero unrecovered failures in {len(rows)} runs", f"runs {bad}")
+    ctx.expect(len(rows) == n, f"all {n} runs ran", f"stopped after {len(rows)}")
+
+
+def _soak_summary(ctx: Ctx, rows: list) -> None:
     table = ["| # | image | fault | fault result | recovery | attempts | result |", "|---|---|---|---|---|---|---|"]
     for r in rows:
         table.append(f"| {r['i']} | {r['version']} | {r['fault']} | {r.get('fault_result') or ''} | "
@@ -1076,9 +1088,6 @@ def c_soak(ctx: Ctx) -> None:
     ctx.note(f"{len(rows)} runs, {len(injected)} with a fault injected, {retried} needed more than one attempt")
     ctx.soft(not clean_failed, "every run without a fault succeeded first time (no recovery flash)",
              f"runs {clean_failed} needed a recovery flash")
-    bad = [r["i"] for r in rows if not r["ok"]]
-    ctx.expect(not bad, f"zero unrecovered failures in {len(rows)} runs", f"runs {bad}")
-    ctx.expect(len(rows) == n, f"all {n} runs ran", f"stopped after {len(rows)}")
 
 
 HOOKS = {"enter": {"4": enter_debug, "6": enter_soak}, "leave": {"4": leave_debug, "6": leave_soak}}

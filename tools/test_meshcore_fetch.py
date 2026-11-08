@@ -166,9 +166,10 @@ class Fetch(unittest.TestCase):
         rel = mf.GitHub(self.gh.base).latest_release(REPO, "repeater")
         self.assertEqual(rel["tag_name"], "repeater-v1.18.0")
 
-    def test_latest_pages_until_found(self):
-        filler = [release(f"companion-v1.{i}.0", []) for i in range(mf.PER_PAGE)]
-        self.gh.releases = filler + self.gh.releases
+    def test_latest_reads_every_page(self):
+        # A backport created last sits on page 1; the newest version is on page 2.
+        filler = [release(f"companion-v1.{i}.0", []) for i in range(mf.PER_PAGE - 1)]
+        self.gh.releases = [release("repeater-v1.17.1", [])] + filler + self.gh.releases
         rel = mf.GitHub(self.gh.base).latest_release(REPO, "repeater")
         self.assertEqual(rel["tag_name"], "repeater-v1.18.0")
         pages = [p for p, _ in self.gh.requests if "page=" in p]
@@ -209,6 +210,20 @@ class Fetch(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("doesn't match the release's", se)
         self.assertFalse((self.dir / "o").exists())
+
+    def test_no_digest_or_size_warns_but_downloads(self):
+        rel = self.gh.releases[2]
+        rel["assets"][0].pop("digest")
+        rel["assets"][0].pop("size")
+        rc, _, se = self.run_tool("--tag", "repeater-v1.18.0", "--env", "RAK_4631_repeater", "--board", "b",
+                                  "--out", str(self.dir / "o"))
+        self.assertEqual(rc, 0, se)
+        self.assertIn("lists no sha256", se)
+        self.assertNotIn("its size and", se)
+        rc, _, se = self.run_tool("--tag", "repeater-v1.18.0", "--env", "Xiao_nrf52_repeater", "--board", "b",
+                                  "--out", str(self.dir / "x"))
+        self.assertEqual(rc, 0, se)
+        self.assertIn("checked only by its size and", se)
 
     def test_token_goes_to_the_api_only(self):
         gh = mf.GitHub(self.gh.base, token="secret-token")

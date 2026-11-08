@@ -386,6 +386,10 @@ class Selection(unittest.TestCase):
         self.assertEqual(sel("--soak", "20"), ["6.1"])
         self.assertIn("6.1", sel("--soak", "20", "--sections", "3,6"))
         self.assertIn("3.5", sel("--soak", "20", "--sections", "3,6"))
+        for extra in (["--minimum"], ["--only", "3.5"], ["--sections", "3"]):
+            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                dfu32_bench.main(["--port", "p", "--board", "b", "--zip", "z.zip", "--soak", "5", *extra])
+            self.assertIn("leave out the soak", err.getvalue())
 
     def test_soak_faults_arg(self):
         parse_args = dfu32_bench.build_parser().parse_args

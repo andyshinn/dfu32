@@ -116,13 +116,13 @@ class GitHub:
             raise
 
     def latest_release(self, repo: str, kind: str, *, prerelease: bool = False) -> dict:
-        """The highest `<kind>-v<version>` release. The list comes newest first, so the first page that
-        has any release of this kind has the latest one."""
+        """The highest `<kind>-v<version>` release, by version rather than by date (a backport can be
+        created after a newer release). Reads every page, up to MAX_PAGES x PER_PAGE releases."""
+        found = []
         for page in range(1, MAX_PAGES + 1):
             rels = self.get_json(f"/repos/{repo}/releases?per_page={PER_PAGE}&page={page}")
             if not isinstance(rels, list):
                 raise FetchError("GitHub API: unexpected reply listing releases")
-            found = []
             for r in rels:
                 m = TAG_RE.match(r.get("tag_name") or "")
                 if not m or m["kind"] != kind or r.get("draft"):
@@ -130,10 +130,10 @@ class GitHub:
                 if r.get("prerelease") and not prerelease:
                     continue
                 found.append((version_key(m["version"]), r))
-            if found:
-                return max(found, key=lambda x: x[0])[1]
             if len(rels) < PER_PAGE:
                 break
+        if found:
+            return max(found, key=lambda x: x[0])[1]
         raise FetchError(f"no published '{kind}-v…' release in {repo}"
                          + ("" if prerelease else " (pre-releases skipped; --prerelease includes them)"))
 
@@ -153,11 +153,16 @@ class GitHub:
             raise FetchError(f"downloading {asset.name}: HTTP {e.code}") from e
         except (urllib.error.URLError, OSError) as e:
             raise FetchError(f"downloading {asset.name}: {getattr(e, 'reason', e)}") from e
-        if n != asset.size:
+        if asset.size > 0 and n != asset.size:
             raise FetchError(f"{asset.name}: downloaded {n} B, the release says {asset.size} B")
         algo, _, want = asset.digest.partition(":")
-        if algo == "sha256" and want and h.hexdigest() != want.lower():
-            raise FetchError(f"{asset.name}: sha256 {h.hexdigest()} doesn't match the release's {want}")
+        if algo == "sha256" and want:
+            if h.hexdigest() != want.lower():
+                raise FetchError(f"{asset.name}: sha256 {h.hexdigest()} doesn't match the release's {want}")
+        else:
+            print(f"warning: the release lists no sha256 for {asset.name}, so the download is checked only by "
+                  f"{'its size and ' if asset.size > 0 else ''}dfu32_pack.py's CRC16 and .dat checks",
+                  file=sys.stderr)
 
 
 def dfu_assets(release: dict) -> dict[str, Asset]:
