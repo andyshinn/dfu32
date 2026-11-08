@@ -118,8 +118,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--skip", help="comma-separated check ids to leave out")
     g.add_argument("--minimum", action="store_true", help="only what unblocks M4: " + ", ".join(MINIMUM))
     g.add_argument("--compare-runs", type=int, default=5, help="flashes per WiFi setting in 5.1 (default 5)")
-    g.add_argument("--start-ota-timeout", type=int, default=300,
-                   help="how long DFU32 waits for `start ota` each time (default 300 s)")
+    g.add_argument("--start-ota-timeout", type=int, default=0,
+                   help="how long DFU32 waits for `start ota` each time (default 300 s, or 120 s with "
+                        "--repeater-port, where the runner sends it at once)")
 
     g = ap.add_argument_group("behaviour")
     g.add_argument("--unattended", action="store_true",
@@ -171,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"--{need} is required")
     if not (args.zip or (args.bin and args.dat)):
         ap.error("give the repeater firmware: --zip, or --bin and --dat")
+    if not args.start_ota_timeout:
+        args.start_ota_timeout = 120 if args.repeater_port else 300
     if args.unattended and not args.repeater_port:
         ap.error("--unattended needs --repeater-port, so the runner can send `start ota` itself")
     if args.unattended and (args.manual_reset or args.power_cycle):

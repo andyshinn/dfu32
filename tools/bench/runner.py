@@ -195,7 +195,11 @@ class Repeater:
             if not expect or expect in text or time.monotonic() >= deadline:
                 self._drop()
                 return text
-            time.sleep(1.0)  # no reply yet (still booting, or the write went nowhere): send it again
+            # No reply yet. If the write went out with the port up, the line probably arrived and the
+            # reply is just slow: give it time (and should_continue a chance to see DFU32 find the
+            # repeater) before sending again. A second `start ota` to a repeater already in OTA mode
+            # re-runs Bluefruit.begin() in MeshCore, which isn't safe.
+            time.sleep(1.0 if dropped else 10.0)
 
 
 # ---- context ----------------------------------------------------------------------------
@@ -329,6 +333,16 @@ class Ctx:
             self.pause(msg + " Then press Enter once it has replied OK.")
         else:
             self.action(msg + " The script carries on by itself once DFU32 sees the repeater.")
+
+    def repeater_alive(self) -> Optional[bool]:
+        """Does the repeater's own console answer `ver`? None when there is no --repeater-port."""
+        if not self.repeater:
+            return None
+        try:
+            out = self.repeater.command("ver", wait=2, window=20)
+        except Exception:
+            return False
+        return bool(out.strip())
 
     def awaiting(self, job_id: int) -> Callable[[], bool]:
         """A still_needed() for start_ota: true while API job `job_id` hasn't found the repeater yet."""

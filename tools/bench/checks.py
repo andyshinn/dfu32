@@ -787,6 +787,11 @@ def c_wifi_compare(ctx: Ctx) -> None:
         rows.append({"i": i + 1, "wifi_off": off, "state": job.get("state"), "run": job.get("run"), "rec": rec})
         if job.get("state") != "SUCCEEDED" and job.get("target_erased"):
             ctx.recover_target_api()
+        if job.get("state") != "SUCCEEDED" and ctx.repeater_alive() is False:
+            # A hung repeater fails every remaining run after a full arm timeout each: stop here.
+            ctx.warn("the repeater stopped answering on its USB console after run "
+                     f"{i + 1}: it looks hung. Power-cycle it, then re-run 5.1")
+            break
     table = ["| # | wifi_off | result | duration | stream rate | attempts | failure kinds |",
              "|---|---|---|---|---|---|---|"]
     with open(ctx.out / "wifi_compare.csv", "w", newline="") as f:
