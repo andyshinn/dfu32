@@ -128,7 +128,9 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
 A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi with Improv Serial in the same session. It needs a desktop browser with Web Serial (Chrome, Edge or Firefox 151+) and a USB cable, and no toolchain. Details in SPEC §9.4.
 
-- **Improv Serial in firmware**, on the console port (USB-Serial-JTAG on the S3, UART0 at 115200 on the classic ESP32), using the M4 Improv core:
+**Status:** everything below is implemented; the bench is next ([BENCH.md §10](BENCH.md#10-improv-serial-and-the-browser-installer-m5)).
+
+- **Improv Serial in firmware** (implemented: `main/console_io.cpp`, `improv/serial_frame.hpp`, `improv/src/improv_serial.cpp`; SPEC §9.2), on the console port (USB-Serial-JTAG on the S3, UART0 at 115200 on the classic ESP32), using the M4 Improv core:
   - the REPL currently uses `esp_console_new_repl_stdio`, so linenoise owns stdin. Replace it with a small reader: frames that start with `IMPROV` go to the Improv parser, and everything else goes to the line editor and `esp_console_run`. Typing in a terminal must work as it does today;
   - resync as in SPEC §9.2: a partial header goes back to the line editor; after the header, a bad checksum, an oversized length or 250 ms of silence drops the frame. The framing state machine is pure and host-tested;
   - it starts early enough in boot to answer within ESP Web Tools' post-install wait (10 s by default);
@@ -152,7 +154,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
   - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
   - it also attaches the merged `.bin` files to the release for esptool users;
   - one-time repo settings: Pages → Source → "GitHub Actions", and a `v*` tag rule in the `github-pages` environment's deployment branches and tags (by default it rejects tag refs).
-- `THIRD_PARTY_NOTICES`, generated from `dependencies.lock`, ships on the page and with each release (moved here from M6, because this is the first milestone that publishes binaries).
+- `THIRD_PARTY_NOTICES`, generated from `dependencies.lock`, ships on the page and with each release (moved here from M6, because this is the first milestone that publishes binaries). **Implemented:** `tools/dfu32_notices.py` (with tests) writes it from the lock files, the vendored Improv SDK and the pinned ESP Web Tools version, plus ESP-IDF's copyright list for the locked release. It is committed; CI fails when it is stale or a dependency has no license entry. The page links `THIRD_PARTY_NOTICES.txt`, and releases carry it.
 - README: an "Install from your browser" link, and a note that the merged `.bin` is for fresh installs and resets settings.
 - **Bench:**
   - from a manual `pages` deployment of `main`: Feather S3 (erased) and Feather V2: install, enter the SSID and passphrase, then "Visit device" opens the claim screen;

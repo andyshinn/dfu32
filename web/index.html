@@ -213,7 +213,7 @@ footer a { color: var(--muted); }
       <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver.</dd></div>
       <div><dt>ESP32-S3 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Install again.</dd></div>
       <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Install. Afterwards, release BOOT0 and press RESET again.</dd></div>
-      <div><dt>WiFi failed</dt><dd>DFU32 joins 2.4 GHz networks only. Check the password and retry.</dd></div>
+      <div><dt>WiFi failed</dt><dd>DFU32 joins 2.4 GHz WPA2-Personal and open networks (WPA2/WPA3 mixed works, WPA3-only doesn’t). Check the password and retry.</dd></div>
       <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network.</dd></div>
     </dl>
   </details>
@@ -223,6 +223,7 @@ footer a { color: var(--muted); }
     <a href="https://github.com/andyshinn/dfu32/blob/main/docs/OPERATOR.md">Operator guide</a>
     <a href="https://github.com/andyshinn/dfu32/blob/main/docs/RECOVERY.md">Recovery guide</a>
     <a href="https://github.com/andyshinn/dfu32/blob/main/LICENSE">MIT licence</a>
+    <a href="THIRD_PARTY_NOTICES.txt">Third-party notices</a>
   </footer>
 </main>
 

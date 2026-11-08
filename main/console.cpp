@@ -14,12 +14,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
 #include "api/api.hpp"
+#include "console_io.hpp"
 #include "config/config.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "fetch/fetch.hpp"
@@ -29,6 +29,7 @@
 #include "dfu_proto/protocol.hpp"
 #include "dfu_proto/retry.hpp"
 #include "esp_console.h"
+#include "linenoise/linenoise.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -46,24 +47,18 @@ constexpr const char* TAG = "console";
 // ---- helpers ------------------------------------------------------------------
 
 // While a command runs, the REPL is not reading the console, so Ctrl+C would
-// just sit in the input buffer. This watcher polls stdin without blocking (the
-// same way linenoise probes the terminal) and turns Ctrl+C (0x03) or Ctrl+D
-// (0x04) into ble::request_abort(). An abort can leave the target erased, so a
-// read counts only if it holds nothing but those bytes: a paste or escape
-// sequence that happens to contain one doesn't abort. Other keys typed
-// meanwhile are discarded so they don't run as a command afterwards. Construct it on the command's
-// stack; the destructor stops the watcher before the REPL reads input again.
+// just sit in the input buffer. This watcher reads the console input (from the
+// reader in console_io, which has already taken out any Improv frames) and
+// turns Ctrl+C (0x03) or Ctrl+D (0x04) into ble::request_abort(). An abort can
+// leave the target erased, so a read counts only if it holds nothing but those
+// bytes: a paste or escape sequence that happens to contain one doesn't abort.
+// Other keys typed meanwhile are discarded so they don't run as a command
+// afterwards. Construct it on the command's stack; the destructor stops the
+// watcher before the REPL reads input again.
 class AbortOnCtrlC {
 public:
     AbortOnCtrlC() {
         ble::clear_abort();
-        fd_ = fileno(stdin);
-        flags_ = fcntl(fd_, F_GETFL);
-        if (flags_ < 0 || fcntl(fd_, F_SETFL, flags_ | O_NONBLOCK) < 0) {
-            ESP_LOGW(TAG, "console input can't be polled; Ctrl+C won't abort this command");
-            flags_ = -1;
-            return;
-        }
         done_ = xSemaphoreCreateBinary();
         if (done_ == nullptr || xTaskCreate(&AbortOnCtrlC::run, "ctrl_c", 3072, this, uxTaskPriorityGet(nullptr),
                                             nullptr) != pdPASS) {
@@ -81,7 +76,6 @@ public:
             xSemaphoreTake(done_, portMAX_DELAY);
             vSemaphoreDelete(done_);
         }
-        if (flags_ >= 0) fcntl(fd_, F_SETFL, flags_);
     }
     AbortOnCtrlC(const AbortOnCtrlC&) = delete;
     AbortOnCtrlC& operator=(const AbortOnCtrlC&) = delete;
@@ -99,12 +93,9 @@ private:
         bool announced = false;
         while (!self->stop_.load()) {
             char buf[16];
-            const ssize_t n = read(self->fd_, buf, sizeof(buf));
-            if (n <= 0) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-                continue;
-            }
-            if (!announced && only_abort_keys(buf, static_cast<size_t>(n))) {
+            const size_t n = console_io::read(buf, sizeof(buf), pdMS_TO_TICKS(50));
+            if (n == 0) continue;
+            if (!announced && only_abort_keys(buf, n)) {
                 ESP_LOGW(TAG, "abort requested from the console; stopping at the next safe point");
                 ble::request_abort();
                 announced = true;
@@ -114,8 +105,6 @@ private:
         vTaskDelete(nullptr);
     }
 
-    int fd_ = -1;
-    int flags_ = -1;
     SemaphoreHandle_t done_ = nullptr;
     std::atomic<bool> stop_{false};
 };
@@ -760,6 +749,7 @@ int cmd_improv(int argc, char** argv) {
     } else {
         std::printf("Improv BLE closed (`improv start` opens it)\n");
     }
+    std::printf("Improv Serial always on, on this port (the installer page uses it)\n");
     return 0;
 }
 
@@ -784,16 +774,90 @@ void reg(const char* name, const char* help, const char* hint, esp_console_cmd_f
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
 }
 
+// ---- REPL ----------------------------------------------------------------------
+//
+// esp_console_new_repl_stdio would let linenoise read stdin itself; here it
+// reads from console_io instead, whose reader has already taken out any
+// Improv Serial frames (SPEC.md §9.2). The loop is the stock REPL's.
+
+constexpr size_t kMaxLine = 256;
+constexpr const char* kPromptPlain = "dfu32> ";
+#if CONFIG_LOG_COLORS
+constexpr const char* kPromptColor = LOG_COLOR_I "dfu32> " LOG_RESET_COLOR;
+#else
+constexpr const char* kPromptColor = "dfu32> ";
+#endif
+
+/// linenoiseProbe() through console_io: asks the terminal for its status
+/// (ESC [5n) and waits up to 500 ms for ESC [0n. No answer means no escape
+/// sequences, so line editing is off, as with the stock REPL.
+bool terminal_answers() {
+    std::fputs("\x1b[5n", stdout);
+    std::fflush(stdout);
+    fsync(fileno(stdout));
+    const int64_t until_us = esp_timer_get_time() + 500000;
+    size_t got = 0;
+    while (got < 4) {
+        const int64_t left_us = until_us - esp_timer_get_time();
+        if (left_us <= 0) return false;
+        char c = 0;
+        if (console_io::read(&c, 1, pdMS_TO_TICKS(left_us / 1000) + 1) == 0) continue;
+        if (got == 0 && c != 0x1b) continue;  // something else first: keep waiting
+        ++got;
+    }
+    return true;
+}
+
+void repl_task(void*) {
+    const bool smart = terminal_answers();
+    if (!smart) linenoiseSetDumbMode(1);
+    const char* prompt = smart ? kPromptColor : kPromptPlain;
+    std::printf("\nType 'help' to get the list of commands.\n"
+                "Use UP/DOWN arrows to navigate through command history.\n"
+                "Press TAB when typing command name to auto-complete.\n");
+    if (!smart) {
+        std::printf("\nYour terminal application does not support escape sequences.\n"
+                    "Line editing and history features are disabled.\n");
+    }
+    std::fflush(stdout);
+    for (;;) {
+        char* line = linenoise(prompt);
+        if (line == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(10));  // input backend gone (USB host lost): don't spin
+            continue;
+        }
+        linenoiseHistoryAdd(line);
+        int ret = 0;
+        const esp_err_t err = esp_console_run(line, &ret);
+        if (err == ESP_ERR_NOT_FOUND) {
+            std::printf("Unrecognized command\n");
+        } else if (err == ESP_OK && ret != ESP_OK) {
+            std::printf("Command returned non-zero error code: 0x%x (%s)\n", ret, esp_err_to_name(ret));
+        } else if (err != ESP_OK && err != ESP_ERR_INVALID_ARG) {  // INVALID_ARG: empty line
+            std::printf("Internal error: %s\n", esp_err_to_name(err));
+        }
+        linenoiseFree(line);
+    }
+}
+
 }  // namespace
 
 void start_console() {
-    esp_console_repl_t* repl = nullptr;
-    esp_console_repl_config_t cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    cfg.prompt = "dfu32> ";
-    cfg.task_stack_size = 12288;  // HTTP client + manifest parsing run here
-    cfg.max_cmdline_length = 256;
-    ESP_ERROR_CHECK(esp_console_new_repl_stdio(&cfg, &repl));
+    esp_console_config_t cc = ESP_CONSOLE_CONFIG_DEFAULT();
+    cc.max_cmdline_length = kMaxLine;
+#if CONFIG_LOG_COLORS
+    cc.hint_color = std::atoi(LOG_COLOR_CYAN);
+#else
+    cc.hint_color = -1;
+#endif
+    ESP_ERROR_CHECK(esp_console_init(&cc));
     ESP_ERROR_CHECK(esp_console_register_help_command());
+    linenoiseSetMultiLine(1);
+    linenoiseSetCompletionCallback(&esp_console_get_completion);
+    linenoiseSetHintsCallback(reinterpret_cast<linenoiseHintsCallback*>(&esp_console_get_hint));
+    linenoiseHistorySetMaxLen(32);
+    linenoiseSetMaxLineLen(kMaxLine);
+    linenoiseSetReadFunction(&console_io::linenoise_read);
 
     reg("target", "Show or set the target: BLE MAC (app address), board, manifest URL, id, max app size.",
         "[<MAC> [random|public] | board <name> | url <manifest-url> | id <slug> | maxapp <bytes> | clear]",
@@ -821,10 +885,14 @@ void start_console() {
         &cmd_blreset);
     reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
     reg("token", "API token: show claim state, issue a new token, or unclaim.", "[rotate | clear]", &cmd_token);
-    reg("improv", "Improv BLE WiFi provisioning: show state, open it, or close it.", "[start | stop]", &cmd_improv);
+    reg("improv", "Improv WiFi provisioning: show state, open or close Improv BLE.", "[start | stop]", &cmd_improv);
 
+    // HTTP client and manifest parsing run on this task.
+    if (xTaskCreate(&repl_task, "console_repl", 12288, nullptr, 2, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "console task failed to start");
+        return;
+    }
     ESP_LOGI(TAG, "console ready; type 'help'");
-    ESP_ERROR_CHECK(esp_console_start_repl(repl));
 }
 
 }  // namespace dfu32

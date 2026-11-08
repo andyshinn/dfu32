@@ -87,7 +87,7 @@ Registry components are declared in the `idf_component.yml` of the component tha
 | `espressif/cjson` | ^1.7.19 | Manifest, API bodies, target record | M3a (in use) |
 | `espressif/button` (esp-iot-solution) | 4.2.x | Debounce and press timing for the 2 s / 5 s / 15 s holds (§9.3) | M4a (in use) |
 | `espressif/led_indicator` (esp-iot-solution) on `espressif/led_strip` | 2.1.x / 3.1.x | NeoPixel and red-LED blink patterns (§13.4) | M4a (in use) |
-| `improv-wifi/sdk-cpp` (not in the registry; vendored in `components/improv/third_party/sdk-cpp`, 1.2.7) | 1.2.x | Improv packet parsing and RPC results; DFU32 supplies the serial and BLE transports (§9.2) | M4a (BLE, in use), M5 (Serial) |
+| `improv-wifi/sdk-cpp` (not in the registry; vendored in `components/improv/third_party/sdk-cpp`, 1.2.7) | 1.2.x | Improv packet parsing and RPC results; DFU32 supplies the serial and BLE transports (§9.2) | M4a (BLE), M5 (Serial); both in use |
 | `espressif/mqtt` (esp-mqtt) | 1.x | MQTT + Home Assistant discovery (§10.3) | post-v1 |
 | `espressif/libsodium` | 1.0.x | Ed25519 verification for signed manifests (§11); PSA in IDF 6 has no Ed25519 | post-v1 |
 
@@ -424,9 +424,13 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
 
-- **Improv Serial** (M5, with the browser installer in §9.4; until then the `wifi <ssid> <password>` console command stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 at 115200 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
-  - It shares the port with the REPL. One reader sends frames that start with `IMPROV` to the Improv parser and everything else to the line editor, in place of `esp_console_new_repl_stdio`.
-  - **Resync:** the reader holds bytes while they match the `IMPROV` header and hands them back to the line editor at the first mismatch. Once the header is complete, the frame is dropped and the reader returns to line mode on a checksum failure, a length over the maximum frame size, or 250 ms without a byte. A malformed or cut-off frame can't wedge the REPL or swallow the next typed command.
+- **Improv Serial** (implemented in M5, with the browser installer in §9.4; the `wifi <ssid> <password>` console command also stores credentials) runs on the console port: USB-Serial-JTAG on S3, UART0 at 115200 on classic. It works with ESP Web Tools, so flashing DFU32 and setting WiFi happen in one browser session. After provisioning, it returns the URL `http://<ip>/`.
+  - It shares the port with the REPL. One reader task (`main/console_io.cpp`) sends frames that start with `IMPROV` to the Improv parser and everything else to the line editor, in place of `esp_console_new_repl_stdio`. It reads the driver directly (`usb_serial_jtag_read_bytes` / `uart_read_bytes`), not stdin, because stdin's input translation turns CR into LF and would corrupt a frame byte that happens to be 0x0D; the reader does that translation itself for console bytes only. linenoise reads through `linenoiseSetReadFunction`, and the REPL loop and the terminal probe are DFU32's own, so nothing else reads the port.
+  - **Resync** (the framer is pure and host-tested, `improv/serial_frame.hpp`): the reader holds bytes while they match the `IMPROV` header and hands them back to the line editor at the first mismatch, or after 100 ms without a byte (a client sends a frame in one write; a typed `I` echoes at most 100 ms late). Once the header is complete, the frame is dropped and the reader returns to line mode on a checksum failure, an unknown version, a length over 200 bytes, or 250 ms without a byte. An oversized frame is still read to its declared end, so its data can't reach the line editor. The newline the client sends after each frame is swallowed. A bad checksum or an oversized frame is answered with `INVALID_RPC`, so the client doesn't wait for its own timeout. A malformed or cut-off frame can't wedge the REPL or swallow the next typed command.
+  - **Output:** each frame goes on a line of its own (a newline before and after it: the browser client only looks for frames at the start of a line), in a single `write()` with the console's `\n` → `\r\n` translation switched off for that write. The driver holds its write lock for the whole call, so log output can't land inside a frame. It starts quietly: nothing is sent until a client asks.
+  - **RPCs:** get current state (provisioned plus the URL while DFU32 has an IP, otherwise ready), device info (as for BLE), WiFi networks (a scan: one entry per SSID at its strongest, at most 20, hidden ones left out; an empty list while a flash or console operation holds the BLE lease, or while a stored network is being joined), and WiFi settings, handled as for BLE below but waiting 25 s for an IP (under the client's 30 s timeout).
+  - Improv BLE and Serial share one connection attempt at a time. A Serial attempt takes the BLE lease as `improv-serial` for its duration if nobody holds it (no flash can stop WiFi underneath it), and is refused while a flash or console operation holds it. If Improv BLE holds it, the attempt runs on that lease, and a BLE window that closes mid-attempt (its 5 minutes, `improv stop`) hands the lease to the attempt instead of releasing it. No WiFi scan runs while an attempt from either transport is joining. After provisioning over Serial, an open Improv BLE window closes, because it holds the lease.
+  - It starts right after the network stack, well inside ESP Web Tools' 10 s post-install wait (the client asks again every second).
   - Only input is parsed. Log output on the port is harmless, because ESP Web Tools ignores bytes outside Improv frames. On the classic ESP32, the ROM and second-stage bootloader print to UART0 before the app starts (115200 with the usual 40 MHz crystal). That output is outside DFU32's control and is ignored the same way.
   - It stays on after provisioning, so the installer page can recognise DFU32 and offer to change WiFi. Anyone with USB access can already do that with the `wifi` command.
 - Both transports use the Improv project's C++ SDK (`improv-wifi/sdk-cpp`, §4.1) for packet parsing, behind one transport-agnostic Improv core (M4): save the credentials, wait for the connection, then report provisioned with the redirect URL, or an error. DFU32 provides the UART/USB and NimBLE GATT plumbing.
@@ -824,7 +828,7 @@ The setup:
 ```
 dfu32/
   CMakeLists.txt, sdkconfig.defaults, partitions/{4mb,8mb}.csv, boards/<profile>/sdkconfig.defaults
-  main/                  app_main, bench console, Kconfig.projbuild
+  main/                  app_main, bench console (REPL + console_io, the console reader shared with Improv Serial), Kconfig.projbuild
   components/
     dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, transfer engine, retry policy, staging format
     dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config,
@@ -832,15 +836,15 @@ dfu32/
     dfu_ble/             ITransport on esp-nimble-cpp; scan, probe, flash with retries
     staging/             staging partition reader + partition / PSA SHA-256 adapters for the writer
     fetch/               esp_http_client: manifest, .dat, .bin streamed into staging
-    net/                 WiFi STA, stop/restore, mDNS, SNTP
+    net/                 WiFi STA, stop/restore, scan, mDNS, SNTP
     config/              NVS settings: target record, device settings, token hash
     job/                 orchestrator task, busy lease, handover, deadline, stall watchdog, restore check
     runlog/              log ring + run-record partition
     api/                 esp_http_server routes, claim / bearer auth, firmware upload; ui/index.html (embedded web UI)
     indicator/           LEDs + button (led_indicator, button); pure pattern/hold logic
-    improv/              Improv core + BLE transport (vendored sdk-cpp); Serial transport in M5
-  web/                   (M5) static browser installer page for GitHub Pages
-  tools/                 dfu32_pack.py, dfu32_stage_image.py, layout and size checks
+    improv/              Improv core, Serial framing (pure), BLE and Serial transports (vendored sdk-cpp)
+  web/                   static browser installer page for GitHub Pages
+  tools/                 dfu32_pack.py, dfu32_stage_image.py, dfu32_notices.py, layout and size checks
   test/host/             Catch2 tests for the pure components
   docs/
 ```
@@ -860,7 +864,7 @@ dfu32/
 | espressif/cjson (cJSON) | MIT | Dependency |
 | espressif/button, espressif/led_indicator (esp-iot-solution), espressif/led_strip | Apache-2.0 | Dependency (M4) |
 | improv-wifi/sdk-cpp | Apache-2.0 | Dependency (M4); keep its LICENSE alongside if vendored |
-| esphome/esp-web-tools | Apache-2.0 | Loaded by the installer page (M5) from a CDN; not in the firmware |
+| esphome/esp-web-tools | Apache-2.0 | Served with the installer page (M5), vendored at deploy time (§9.4); not in the firmware |
 | espressif/libsodium (libsodium) | ISC | Dependency (post-v1) |
 
-Apache-2.0 dependencies are compatible with DFU32's MIT licence. Binary releases (the merged `.bin`, ESP Web Tools) should ship a `THIRD_PARTY_NOTICES` file listing these licences; generating it from the build's `dependencies.lock` is part of M5, the first milestone that publishes binaries (§9.4).
+Apache-2.0 dependencies are compatible with DFU32's MIT licence. Binary releases ship `THIRD_PARTY_NOTICES` (M5, the first milestone that publishes binaries): `tools/dfu32_notices.py` generates it from the `dependencies.lock.*` files, the vendored Improv SDK and the pinned ESP Web Tools version, and adds ESP-IDF's own copyright list for the locked release (`tools/notices/`) and the license texts. It is committed at the root; CI fails if it is stale or if a dependency has no license entry in the tool. The installer page serves it as `THIRD_PARTY_NOTICES.txt`, and every release carries it next to the merged images.

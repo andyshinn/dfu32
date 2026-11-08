@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 
 #include "improv/core.hpp"
 
@@ -42,5 +43,28 @@ bool active();
 
 /// True for 10 s after an Improv "identify" request (the LED blinks white).
 bool identifying();
+
+}  // namespace dfu32::improv
+
+// ---- Improv Serial (SPEC.md §9.2) -------------------------------------------------------
+//
+// Always on, on the console port: the console reader hands it frames, and it
+// answers through `write`. It stays on after provisioning, so the browser
+// installer can recognise DFU32 and change its WiFi.
+
+namespace dfu32::improv {
+
+/// Sends one encoded frame (from encode_serial_frame) to the console port.
+using SerialWriteFn = void (*)(std::span<const uint8_t> frame);
+
+/// Starts the Improv Serial task. Call once, after net::init().
+bool serial_start(SerialWriteFn write);
+
+/// A complete frame from the console reader; copied, never blocks.
+void serial_deliver(uint8_t type, std::span<const uint8_t> data);
+
+/// The reader dropped a frame (bad checksum, too long): answers INVALID_RPC,
+/// so the client doesn't wait for its timeout.
+void serial_invalid_frame();
 
 }  // namespace dfu32::improv

@@ -1,4 +1,4 @@
-# Bench guide (M1–M4b)
+# Bench guide (M1–M5)
 
 This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
@@ -409,6 +409,32 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
    - Switch the access point off as soon as the upload finishes. After 90 s the console says "confirmed: WiFi works but … isn't reachable" (a router outage is not the firmware's fault), and it stays on the new version once the access point is back.
    - A real rollback needs a build that breaks itself, which a normal build can't do. Use the console log: a self-check failure, or "shows no WiFi activity", followed by "rolling back to the previous image", and the page reports the old version.
 10. **Busy:** while a flash runs, **Install** answers busy.
+
+## 10. Improv Serial and the browser installer (M5)
+
+Improv Serial shares the console port with the REPL (SPEC §9.2). Before the installer page serves a build with it (it deploys from `main`), the PR build can be checked with https://www.improv-wifi.com/ in desktop Chrome or Edge: **Connect device to Wi-Fi → via USB/Serial**. Close any serial monitor first; only one program can hold the port.
+
+1. **Fresh device:** `idf.py -p PORT erase-flash`, then flash the build. Connect from improv-wifi.com: within a couple of seconds it shows DFU32, the version, the chip and the hostname, and lists nearby networks. Pick yours, enter the passphrase: it shows success and a link to `http://<ip>/`. The console log says "joined …; provisioned", and `improv` shows Improv BLE "closed" (it had opened because no network was stored).
+2. **Wrong passphrase:** after `wifi forget`, try a wrong one. After about 25 s the page shows "unable to connect"; the right one then works. With a network stored beforehand, `wifi` shows it again after the failed attempt.
+3. **Already provisioned:** connect again. The page shows the device as connected, with its link, and offers to change WiFi; changing it works.
+4. **Terminal still works:** close the browser tab and open a monitor (`idf.py -p PORT monitor`). The prompt, arrow-key history, Tab completion and hints work as before. Typing a command that starts with a capital `I` (`Improv` → "Unrecognized command") echoes the `I` at most 0.1 s late.
+5. **Cut-off frame:** with the monitor closed, send half a frame and then a command (opening the port this way doesn't reset the board):
+
+   ```bash
+   python3 -c "import serial,time; s=serial.Serial(); s.port='PORT'; s.baudrate=115200; s.dtr=False; s.rts=False; s.open(); s.write(b'IMPROV\x01\x03\x05ab'); time.sleep(1); s.write(b'wifi\r'); time.sleep(2); print(s.read(s.in_waiting).decode(errors='replace'))"
+   ```
+
+   The output has "dropped a cut-off Improv frame" and then the `wifi` status: the command after the broken frame ran.
+6. **During a flash:** while an API flash is armed or transferring, WiFi settings from improv-wifi.com fail with "unable to connect" and the log says the radio is in use; the network list is empty. Nothing else changes.
+7. **BLE window closing mid-attempt:** with no network stored (Improv BLE opens by itself), send WiFi settings for an unreachable network from improv-wifi.com, and run `improv stop` within the 25 s. The log says "the attempt keeps the BLE lease", and a `POST /flash` meanwhile answers `409` until the attempt fails; then it is accepted.
+8. **Ctrl+C:** `scan 20` in the monitor, then Ctrl+C: it still aborts.
+9. **Feather V2** (UART console): repeat 1, 4 and 5 on it.
+
+Once `main` has it, the installer page itself (MILESTONES M5 bench):
+
+10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens the claim screen.
+11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
+12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 
 ## Bench results so far
 
