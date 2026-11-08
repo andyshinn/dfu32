@@ -1,0 +1,439 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT
+     DFU32 web UI (SPEC.md §10.2). One file, no framework, no build step beyond
+     gzip (tools/dfu32_ui.py). Everything goes through the JSON API, and every
+     value from the device or a BLE advertiser is put in the page as text. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DFU32</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1c1f24;--mute:#68707c;--line:#dde1e6;--acc:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--info:#0e7490;--chip:#eef1f5;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#111316;--card:#1a1d21;--fg:#e6e8eb;--mute:#9aa3ae;--line:#2c3138;--acc:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--info:#22d3ee;--chip:#23272d;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;padding:.7rem 1rem;background:var(--card);border-bottom:1px solid var(--line)}
+header b{font-size:1.1rem;letter-spacing:.02em}
+header .sp{flex:1}
+nav{display:flex;gap:.25rem;padding:.4rem 1rem;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
+nav a{padding:.35rem .7rem;border-radius:6px;color:var(--mute);text-decoration:none;white-space:nowrap}
+nav a.on{background:var(--chip);color:var(--fg);font-weight:600}
+main{max-width:60rem;margin:0 auto;padding:1rem}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem;margin-bottom:1rem}
+h2{font-size:1rem;margin:0 0 .75rem}
+h3{font-size:.9rem;margin:1rem 0 .5rem;color:var(--mute)}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+.grid{display:grid;grid-template-columns:max-content 1fr;gap:.3rem 1rem}
+.grid dt{color:var(--mute)}
+.grid dd{margin:0;word-break:break-all}
+.mute{color:var(--mute)}
+.small{font-size:.85rem}
+.badge{display:inline-block;padding:.1rem .5rem;border-radius:99px;font-size:.8rem;font-weight:600;background:var(--chip)}
+.b-ok{color:var(--ok)}.b-bad{color:var(--bad)}.b-warn{color:var(--warn)}.b-info{color:var(--info)}.b-acc{color:var(--acc)}
+.bar{height:.6rem;background:var(--chip);border-radius:99px;overflow:hidden;margin:.6rem 0 .3rem}
+.bar i{display:block;height:100%;background:var(--acc);transition:width .4s}
+.note{padding:.6rem .8rem;border-radius:8px;background:var(--chip);margin:.6rem 0}
+.n-bad{border-left:4px solid var(--bad)}.n-warn{border-left:4px solid var(--warn)}.n-info{border-left:4px solid var(--info)}
+button,.btn{font:inherit;padding:.45rem .9rem;border-radius:7px;border:1px solid var(--line);background:var(--chip);color:var(--fg);cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.dng{color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+input,select{font:inherit;padding:.4rem .5rem;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);min-width:0}
+label{display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;color:var(--mute)}
+label.chk{flex-direction:row;align-items:center;gap:.4rem;color:var(--fg);font-size:.95rem}
+.form{display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:.7rem}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:500}
+tr.click{cursor:pointer}
+tr.click:hover{background:var(--chip)}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:.6rem;overflow:auto;max-height:28rem;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;margin:0}
+code{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--chip);padding:.05rem .3rem;border-radius:4px}
+details summary{cursor:pointer;color:var(--mute);margin:.5rem 0}
+#toast{position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.6rem 1rem;border-radius:8px;max-width:90vw;display:none}
+.center{max-width:28rem;margin:3rem auto}
+@media (max-width:40rem){.grid{grid-template-columns:1fr}.grid dt{margin-top:.3rem}}
+</style>
+</head>
+<body>
+<header><b>DFU32</b><span id="hdr" class="mute small"></span><span class="sp"></span><span id="hjob"></span></header>
+<nav id="nav" hidden>
+<a href="#status">Status</a><a href="#target">Target</a><a href="#runs">Runs</a><a href="#logs">Logs</a><a href="#system">System</a>
+</nav>
+<main id="main"></main>
+<div id="toast"></div>
+<script>
+"use strict";
+// ---- tiny helpers -------------------------------------------------------------------
+const $ = (s) => document.querySelector(s);
+// h("div.cls", {attr}, child...) builds elements; strings become text nodes.
+function h(tag, attrs, ...kids) {
+  const [name, ...cls] = tag.split(".");
+  const e = document.createElement(name);
+  if (cls.length) e.className = cls.join(" ");
+  if (attrs && (typeof attrs !== "object" || attrs instanceof Node || Array.isArray(attrs))) { kids.unshift(attrs); attrs = null; }
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "value") e.value = v;
+    else if (k === "checked") e.checked = !!v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k instanceof Node ? k : String(k));
+  return e;
+}
+const kB = (n) => n >= 1048576 ? (n / 1048576).toFixed(2) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " kB" : n + " B";
+const dur = (ms) => ms >= 60000 ? Math.floor(ms / 60000) + " min " + Math.round(ms % 60000 / 1000) + " s" : (ms / 1000).toFixed(1) + " s";
+const when = (unix) => unix ? new Date(unix * 1000).toLocaleString() : "";
+const short = (hex) => hex ? hex.slice(0, 12) + "…" : "";
+function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = "none", ms); }
+function badge(text, kind) { return h("span.badge" + (kind ? ".b-" + kind : ""), text); }
+function dl(pairs) { const d = h("dl.grid"); for (const [k, v] of pairs) if (v !== undefined && v !== null && v !== "") d.append(h("dt", k), h("dd", v)); return d; }
+function note(kind, ...kids) { return h("div.note.n-" + kind, ...kids); }
+
+// ---- API --------------------------------------------------------------------------------
+const TOKEN_KEY = "dfu32.token";
+let token = "";
+try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) {}
+function setToken(t) { token = t; try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+class ApiError extends Error { constructor(status, body) { super((body && (body.detail || body.error)) || "HTTP " + status); this.status = status; this.body = body; } }
+async function api(method, path, body) {
+  const headers = {};
+  if (token) headers.Authorization = "Bearer " + token;
+  let data;
+  if (body !== undefined) { headers["Content-Type"] = "application/json"; data = JSON.stringify(body); }
+  const r = await fetch("/api/v1" + path, { method, headers, body: data, cache: "no-store" });
+  let j = null;
+  if (r.status !== 204) { try { j = await r.json(); } catch (e) {} }
+  if (r.status === 401) { setToken(""); route(); throw new ApiError(401, j); }
+  if (!r.ok) throw new ApiError(r.status, j);
+  return j;
+}
+// Runs an action, reports errors as a toast, and disables the button meanwhile.
+async function act(btn, fn) {
+  if (btn) btn.disabled = true;
+  try { return await fn(); }
+  catch (e) { if (e.status !== 401) toast(e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// ---- state ------------------------------------------------------------------------------
+let status = null, cfg = null, view = "", timer = 0;
+const STATE_KIND = { IDLE: "", SUCCEEDED: "ok", STAGED: "ok", FAILED: "bad", AWAITING_TARGET: "info", DFU_RUNNING: "acc", RADIO_HANDOVER: "acc", RESTORING: "acc" };
+const active = (j) => j && !["IDLE", "SUCCEEDED", "FAILED", "STAGED"].includes(j.state);
+const targetId = () => status && status.targets && status.targets[0] ? status.targets[0].id : "";
+
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    status = await (await fetch("/api/v1/status", { cache: "no-store" })).json();
+    header();
+    if (view === "status") renderStatus();
+  } catch (e) { $("#hdr").textContent = "offline: retrying…"; }
+  timer = setTimeout(refresh, active(status && status.job) ? 1000 : 10000);
+}
+function header() {
+  const d = status.device || {}, w = d.wifi || {};
+  $("#hdr").textContent = [d.hostname, d.version, w.connected ? ((cfg && cfg.wifi_ssid) || "WiFi") + " " + w.rssi + " dBm" : "WiFi down"].filter(Boolean).join(" · ");
+  const j = status.job;
+  $("#hjob").replaceChildren(j && j.id ? badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]) : "");
+}
+
+// ---- router -----------------------------------------------------------------------------
+const VIEWS = { status: viewStatus, target: viewTarget, runs: viewRuns, logs: viewLogs, system: viewSystem };
+async function route() {
+  stopLogs();
+  if (!status) await refresh();
+  if (!status) return;
+  if (!status.device.claimed) return viewClaim();
+  if (!token) return viewToken();
+  $("#nav").hidden = false;
+  if (!cfg) cfg = await api("GET", "/config").catch(() => null);
+  const [name, arg] = (location.hash.slice(1) || "status").split("/");
+  view = VIEWS[name] ? name : "status";
+  for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("on", a.getAttribute("href") === "#" + view);
+  VIEWS[view](arg);
+}
+window.addEventListener("hashchange", route);
+
+// ---- claim / token ----------------------------------------------------------------------
+function viewClaim() {
+  $("#nav").hidden = true;
+  const btn = h("button.pri", { onclick: () => act(btn, async () => {
+    const r = await api("POST", "/claim");
+    setToken(r.token);
+    status.device.claimed = true;
+    $("#main").replaceChildren(h("section.center", h("h2", "Device claimed"),
+      h("p", "This is the API token. This browser remembers it; copy it now for scripts or Home Assistant: it is never shown again."),
+      h("pre", r.token), h("p", h("button.pri", { onclick: () => { location.hash = "#status"; route(); } }, "Continue"))));
+  }) }, "Claim this device");
+  $("#main").replaceChildren(h("section.center", h("h2", "Claim this DFU32"),
+    h("p", "Nobody has claimed this device yet. Claiming creates the API token that every other page and script needs."),
+    btn));
+}
+function viewToken() {
+  $("#nav").hidden = true;
+  const inp = h("input", { placeholder: "API token", autocomplete: "off", spellcheck: "false" });
+  const btn = h("button.pri", { onclick: () => act(btn, async () => {
+    setToken(inp.value.trim());
+    try { await api("GET", "/config"); } catch (e) { setToken(""); throw new Error(e.status === 429 ? e.message : "That token was not accepted."); }
+    route();
+  }) }, "Sign in");
+  $("#main").replaceChildren(h("section.center", h("h2", "Sign in"),
+    h("p", "Paste the API token from when this device was claimed."),
+    h("div.row", inp, btn),
+    h("p.mute.small", "Lost it? On the console run ", h("code", "token rotate"), ", or hold the button 5–15 s to unclaim and claim again.")));
+}
+
+// ---- status -----------------------------------------------------------------------------
+let checkResult = null;
+function viewStatus() { renderStatus(); }
+function renderStatus() {
+  const j = status.job || {}, tid = targetId(), busy = active(j);
+  const out = [];
+  const sec = h("section", h("h2", "Job"));
+  if (!j.id) sec.append(h("p.mute", "No job since boot."));
+  else {
+    sec.append(h("div.row", badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]), h("span.mute", j.kind + " from " + j.source + (j.target ? " · " + j.target : "") + (j.phase ? " · " + j.phase : ""))));
+    if (j.bytes_total) {
+      const pct = Math.min(100, Math.round(100 * j.bytes_done / j.bytes_total));
+      sec.append(h("div.bar", h("i", { style: "width:" + pct + "%" })), h("div.small.mute", kB(j.bytes_done) + " of " + kB(j.bytes_total) + " (" + pct + "%)" + (j.rate_bps ? " · " + (j.rate_bps / 1000).toFixed(1) + " kB/s" : "") + (j.attempt ? " · attempt " + j.attempt + " of " + j.max_attempts : "")));
+    }
+    if (j.state === "AWAITING_TARGET") sec.append(note("info", "Run ", h("code", "start ota"), " on the repeater now (USB, or remotely over LoRa from the companion app). Giving up in " + j.arm_remaining_s + " s."));
+    if (j.wifi_off && busy && ["RADIO_HANDOVER", "DFU_RUNNING"].includes(j.state)) sec.append(note("info", "WiFi is off for the transfer; this page catches up when it is back."));
+    if (j.error) sec.append(note("bad", j.error));
+    if (j.target_erased && j.state !== "SUCCEEDED") sec.append(note("warn", "The repeater's app was erased. It waits in its bootloader (usually at MAC+1): flash again with source \"staged\" to recover."));
+    if (j.version) sec.append(dl([["Image", j.version], ["Bootloader", j.bootloader], ["Run", j.run ? h("a", { href: "#runs/" + j.run }, "#" + j.run) : ""]]));
+  }
+  out.push(sec);
+
+  const a = h("section", h("h2", "Actions"));
+  if (!tid) a.append(h("p", "No target yet. ", h("a", { href: "#target" }, "Set one up"), " first."));
+  else {
+    const c = actionControls(tid);
+    c.bCheck.disabled = c.bStage.disabled = c.bFlash.disabled = busy;
+    c.bAbort.disabled = !busy;
+    a.append(c.row1, c.row2);
+    if (checkResult) {
+      const r = checkResult;
+      a.append(h("h3", "Manifest"), dl([["Version", r.version + (r.update_available ? " (new)" : " (already flashed)")], ["Boards", (r.boards || []).join(", ") + (r.board_ok ? "" : " — does not include " + r.target_board)], ["Image", r.bin ? kB(r.bin.size) + " · sha256 " + short(r.bin.sha256) : ""], ["Staged", r.staged_same ? "same image" : r.staged_version || "nothing"], ["Created", r.created], ["Notes", r.notes]]));
+      if (!r.board_ok) a.append(note("bad", "This manifest is not for the target's board (\"" + r.target_board + "\"): staging and flashing would stop with BOARD_MISMATCH."));
+    }
+  }
+  out.push(a);
+
+  const s = status.staged, t = status.targets && status.targets[0];
+  out.push(h("section", h("h2", "Staged image"), s ? dl([["Version", s.version], ["Board", s.board], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["From", s.manifest_url]]) : h("p.mute", "Nothing staged.")));
+  if (t) out.push(h("section", h("h2", "Target"), dl([["Id", t.id], ["Name", t.name], ["Board", t.board], ["Last flashed", t.last_ok_version ? t.last_ok_version + (t.last_ok_at ? " · " + when(t.last_ok_at) : "") : "never (by this DFU32)"]])));
+  $("#main").replaceChildren(...out);
+}
+
+// The action controls are built once per target and reused, so the 1 s status
+// refresh never resets what someone is in the middle of choosing.
+let actCtl = null;
+function actionControls(tid) {
+  if (actCtl && actCtl.tid === tid) return actCtl;
+  const c = { tid };
+  c.force = h("input", { type: "checkbox" });
+  c.source = h("select", h("option", { value: "manifest" }, "manifest (fetch)"), h("option", { value: "staged" }, "staged image"));
+  c.wifiOff = h("input", { type: "checkbox", checked: cfg && cfg.wifi_off_dfu });
+  c.arm = h("input", { type: "number", min: 10, max: 3600, placeholder: "default", style: "width:7rem" });
+  c.bCheck = h("button", { onclick: () => act(c.bCheck, async () => { checkResult = await api("POST", "/targets/" + tid + "/check"); renderStatus(); }) }, "Check");
+  c.bStage = h("button", { onclick: () => act(c.bStage, async () => { await api("POST", "/targets/" + tid + "/stage", { force: c.force.checked }); toast("Staging…"); refresh(); }) }, "Stage");
+  c.bFlash = h("button.pri", { onclick: () => act(c.bFlash, async () => {
+    const body = { source: c.source.value, wifi_off: c.wifiOff.checked };
+    if (c.arm.value) body.arm_timeout_s = Number(c.arm.value);
+    await api("POST", "/targets/" + tid + "/flash", body);
+    toast("Armed: run start ota on the repeater");
+    refresh();
+  }) }, "Flash");
+  c.bAbort = h("button.dng", { onclick: () => {
+    const j = status.job || {};
+    if (j.target_erased || j.state === "DFU_RUNNING") {
+      if (!confirm("The transfer has started: aborting leaves the repeater erased until it is flashed again. Abort?")) return;
+    }
+    act(c.bAbort, async () => { const r = await api("POST", "/jobs/current/abort"); if (r.warning) toast(r.warning, 8000); refresh(); });
+  } }, "Abort");
+  c.row1 = h("div.row", c.bCheck, c.bStage, h("label.chk", c.force, "re-download"), c.bFlash, c.bAbort);
+  c.row2 = h("div.row", { style: "margin-top:.7rem" }, h("label", "Flash from", c.source), h("label", "Arm timeout (s)", c.arm), h("label.chk", c.wifiOff, "WiFi off during the transfer"));
+  return (actCtl = c);
+}
+
+// ---- target -----------------------------------------------------------------------------
+const NUM = ["addr_type", "max_app_size", "prn", "max_attempts", "arm_timeout_s", "start_settle_ms", "prn_timeout_ms"];
+async function viewTarget() {
+  const tid = targetId();
+  let t = {};
+  if (tid) t = await api("GET", "/targets/" + tid).catch((e) => { toast(e.message); return {}; });
+  const f = {};
+  const field = (k, label, attrs = {}) => { f[k] = h("input", Object.assign({ value: t[k] ?? "" }, attrs)); return h("label", label, f[k]); };
+  f.addr_type = h("select", h("option", { value: 1 }, "random"), h("option", { value: 0 }, "public"));
+  f.addr_type.value = String(t.addr_type ?? 1);
+  const save = h("button.pri", { onclick: () => act(save, async () => {
+    const id = f.id.value.trim();
+    if (!id) throw new Error("Give the target an id (a-z, 0-9, -)");
+    const body = {};
+    for (const [k, el] of Object.entries(f)) { if (k === "id") continue; const v = el.value.trim(); if (v === "" && NUM.includes(k)) continue; body[k] = NUM.includes(k) ? Number(v) : v; }
+    await api("PUT", "/targets/" + encodeURIComponent(id), body);
+    toast("Saved"); await refresh(); viewTarget();
+  }) }, "Save");
+  const del = h("button.dng", { hidden: !tid, onclick: () => { if (confirm("Delete target \"" + tid + "\"?")) act(del, async () => { await api("DELETE", "/targets/" + tid); toast("Deleted"); await refresh(); viewTarget(); }); } }, "Delete");
+  const form = h("section", h("h2", tid ? "Target " + tid : "New target"),
+    h("div.form", field("id", "Id", { readonly: !!tid, placeholder: "attic-repeater" }), field("name", "Name"), field("board", "Board (matches the manifest)", { placeholder: "rak4631" }),
+      field("mac", "App MAC (from start ota)", { placeholder: "AA:BB:CC:DD:EE:FF" }), h("label", "Address type", f.addr_type),
+      field("manifest_url", "Manifest URL", { placeholder: "http://server/rak4631/manifest.json" })),
+    h("details", h("summary", "Tuning"), h("div.form", field("prn", "PRN (1-8)", { type: "number" }), field("max_attempts", "Attempts (1-10)", { type: "number" }),
+      field("arm_timeout_s", "Arm timeout (s)", { type: "number" }), field("start_settle_ms", "START settle (ms)", { type: "number" }),
+      field("prn_timeout_ms", "Receipt timeout (ms)", { type: "number" }), field("max_app_size", "Max app size (B, 0 = default)", { type: "number" }))),
+    h("div.row", { style: "margin-top:.8rem" }, save, del),
+    tid ? null : h("p.mute.small", "DFU32 v1 handles one target. Saving creates it."));
+  $("#main").replaceChildren(form, scanSection((mac, type) => { f.mac.value = mac; f.addr_type.value = type === "public" ? "0" : "1"; toast("Filled in the MAC: save to keep it"); }));
+}
+function scanSection(use) {
+  const secs = h("input", { type: "number", value: 10, min: 1, max: 30, style: "width:5rem" });
+  const dfuOnly = h("input", { type: "checkbox", checked: true });
+  const list = h("div");
+  const btn = h("button", { onclick: () => act(btn, async () => {
+    list.replaceChildren(h("p.mute", "Scanning for " + secs.value + " s…"));
+    const r = await api("POST", "/ble/scan", { duration_s: Number(secs.value), dfu_only: dfuOnly.checked });
+    if (!r.devices.length) return list.replaceChildren(h("p.mute", "Nothing found. " + (r.hint || "")));
+    list.replaceChildren(h("table", h("tr", h("th", "Address"), h("th", "Name"), h("th", "RSSI"), h("th", "Looks like"), h("th", "")),
+      r.devices.map((d) => h("tr", h("td", h("code", d.addr)), h("td", d.name || h("span.mute", "—")), h("td", d.rssi + " dBm"),
+        h("td", d.dfu ? d.dfu.replace("_", " ") : "", d.matches_target ? [" ", badge("target", "ok")] : ""),
+        h("td", h("button", { onclick: () => use(d.addr, d.addr_type) }, "Use as target"))))));
+  }) }, "Scan");
+  return h("section", h("h2", "Find the repeater"),
+    h("p.mute.small", "Run ", h("code", "start ota"), " on the repeater first: MeshCore repeaters don't advertise otherwise."),
+    h("div.row", h("label", "Seconds", secs), h("label.chk", dfuOnly, "DFU-looking only"), btn), list);
+}
+
+// ---- runs -------------------------------------------------------------------------------
+const RESULT_KIND = { SUCCEEDED: "ok", FAILED: "bad", ABORTED_BY_REBOOT: "warn" };
+async function viewRuns(seq) {
+  if (seq) return viewRun(seq);
+  const tid = targetId();
+  if (!tid) return $("#main").replaceChildren(h("section", h("p", "No target yet.")));
+  const r = await api("GET", "/targets/" + tid + "/runs").catch((e) => { toast(e.message); return { runs: [] }; });
+  r.runs = r.runs || [];
+  $("#main").replaceChildren(h("section", h("h2", "Runs"), !r.runs.length ? h("p.mute", "No runs recorded yet.") :
+    h("table", h("tr", h("th", "#"), h("th", "Result"), h("th", "When"), h("th", "Took"), h("th", "Image / error")),
+      r.runs.map((x) => h("tr.click", { onclick: () => location.hash = "#runs/" + x.seq },
+        h("td", x.seq), h("td", badge(String(x.result).toLowerCase().replace(/_/g, " "), RESULT_KIND[x.result]), x.target_erased === "yes" && x.result !== "SUCCEEDED" ? [" ", badge("erased", "warn")] : ""),
+        h("td.small", x.started_unix ? when(x.started_unix) : "uptime " + x.started_uptime_s + " s"), h("td", dur(x.duration_ms || 0)),
+        h("td.small", x.error || x.image_version))))));
+}
+async function viewRun(seq) {
+  const r = await api("GET", "/runs/" + seq).catch((e) => { toast(e.message); return null; });
+  if (!r) return;
+  const x = r.run;
+  $("#main").replaceChildren(h("section", h("p", h("a", { href: "#runs" }, "← Runs")), h("h2", "Run #" + x.seq + " "), badge(x.result.toLowerCase().replace(/_/g, " "), RESULT_KIND[x.result]),
+    dl([["Error", x.error], ["Started", x.started_unix ? when(x.started_unix) : "uptime " + x.started_uptime_s + " s"], ["Took", dur(x.duration_ms)], ["Trigger", [x.trigger, x.source].filter(Boolean).join(", ")],
+      ["Image", x.image_version + " · " + kB(x.image_size)], ["Target", [x.target_id, x.target].filter(Boolean).join(" · ")], ["Target erased", x.target_erased],
+      ["Bootloader", x.bootloader + (x.bootloader_class ? " (" + x.bootloader_class + ")" : "")], ["Link", x.mtu ? "MTU " + x.mtu + ", " + x.packet_size + " B packets, interval " + (x.conn_interval_x125 * 1.25) + " ms" : ""],
+      ["Throughput", x.rate_x10_kBps ? (x.rate_x10_kBps / 10) + " kB/s" : ""], ["WiFi", x.wifi_off ? "off during the transfer" : "on"], ["Last phase", x.last_phase]]),
+    x.attempts && x.attempts.length ? [h("h3", "Attempts"), h("table", h("tr", h("th", "#"), h("th", "Interval"), h("th", "PRN"), h("th", "Outcome"), h("th", "Acked")),
+      x.attempts.map((t) => h("tr", h("td", t.n), h("td", t.interval_ms + " ms"), h("td", t.prn), h("td.small", t.outcome + (t.kind && t.kind !== "NONE" ? " [" + t.kind + "]" : "")), h("td", kB(t.bytes_acked)))))] : "",
+    h("h3", "Log"), h("pre", r.log || "(no log)")));
+}
+
+// ---- logs -------------------------------------------------------------------------------
+let logTimer = 0, logNext = null, logPaused = false;
+function stopLogs() { clearTimeout(logTimer); logTimer = 0; }
+function viewLogs() {
+  const pre = h("pre", { style: "max-height:70vh" });
+  const pause = h("button", { onclick: () => { logPaused = !logPaused; pause.textContent = logPaused ? "Resume" : "Pause"; if (!logPaused) poll(); } }, logPaused ? "Resume" : "Pause");
+  $("#main").replaceChildren(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Log"), pause, h("button", { onclick: () => pre.textContent = "" }, "Clear")), h("div", { style: "margin-top:.7rem" }, pre)));
+  logNext = null;
+  async function poll() {
+    stopLogs();
+    if (view !== "logs" || logPaused) return;
+    try {
+      const r = await api("GET", "/logs" + (logNext === null ? "" : "?since=" + logNext));
+      logNext = r.next;
+      if (r.text) {
+        const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+        pre.append(r.text);
+        if (pre.textContent.length > 200000) pre.textContent = pre.textContent.slice(-150000);
+        if (atEnd) pre.scrollTop = pre.scrollHeight;
+      }
+    } catch (e) {}
+    logTimer = setTimeout(poll, 2000);
+  }
+  poll();
+}
+
+// ---- system -----------------------------------------------------------------------------
+async function viewSystem() {
+  cfg = await api("GET", "/config").catch(() => cfg);
+  if (!cfg) return $("#main").replaceChildren(h("section", h("p", "Could not load the settings.")));
+  const d = status.device, w = d.wifi || {};
+  const host = h("input", { value: cfg.hostname, placeholder: cfg.hostname_active });
+  const ntp = h("input", { value: cfg.ntp_server, placeholder: "pool.ntp.org" });
+  const wifiOff = h("input", { type: "checkbox", checked: cfg.wifi_off_dfu });
+  const deadline = h("input", { type: "number", value: cfg.dfu_deadline_max_s, min: 120, max: 7200 });
+  const save = h("button.pri", { onclick: () => act(save, async () => {
+    cfg = await api("PUT", "/config", { hostname: host.value.trim(), ntp_server: ntp.value.trim(), wifi_off_dfu: wifiOff.checked, dfu_deadline_max_s: Number(deadline.value) });
+    toast(cfg.reboot_required ? "Saved: reboot for the new hostname / NTP server" : "Saved", 6000);
+  }) }, "Save");
+
+  const file = h("input", { type: "file", accept: ".bin" });
+  const force = h("input", { type: "checkbox" });
+  const prog = h("div");
+  const upload = h("button.pri", { onclick: () => {
+    const f = file.files[0];
+    if (!f) return toast("Choose dfu32.bin first (the app image, not the merged one)");
+    if (!confirm("Install " + f.name + " (" + kB(f.size) + ") and reboot?")) return;
+    upload.disabled = true;
+    const bar = h("i", { style: "width:0" });
+    prog.replaceChildren(h("div.bar", bar), h("div.small.mute", "Uploading…"));
+    const x = new XMLHttpRequest();
+    x.open("POST", "/api/v1/system/ota" + (force.checked ? "?force=1" : ""));
+    x.setRequestHeader("Authorization", "Bearer " + token);
+    x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(100 * e.loaded / e.total) + "%"; };
+    x.onload = () => {
+      let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status !== 200) { upload.disabled = false; prog.replaceChildren(note("bad", j.detail || j.error || "Upload failed (HTTP " + x.status + ")")); return; }
+      prog.replaceChildren(note("info", "Installed " + j.version + ". Rebooting; waiting for it to come back…"));
+      waitBack(j.version, prog);
+    };
+    x.onerror = () => { upload.disabled = false; prog.replaceChildren(note("bad", "Upload failed (connection lost)")); };
+    x.send(f);
+  } }, "Install");
+
+  const tok = h("div");
+  const rotate = h("button", { onclick: () => { if (confirm("Issue a new API token? The old one stops working everywhere (scripts, Home Assistant).")) act(rotate, async () => {
+    const r = await api("POST", "/system/token/rotate"); setToken(r.token);
+    tok.replaceChildren(note("info", "New token (saved in this browser; copy it for scripts):"), h("pre", r.token));
+  }); } }, "Rotate token");
+  const reboot = h("button.dng", { onclick: () => { if (confirm("Reboot DFU32?")) act(reboot, async () => {
+    await api("POST", "/system/reboot" + (active(status.job) ? "?force=1" : "")); toast("Rebooting…"); setTimeout(refresh, 8000);
+  }); } }, "Reboot");
+
+  $("#main").replaceChildren(
+    h("section", h("h2", "Device"), dl([["Firmware", d.version + (cfg.partition ? " (" + cfg.partition + ")" : "")], ["Board", d.board], ["Hostname", d.hostname + ".local"], ["Uptime", dur(d.uptime_s * 1000)],
+      ["WiFi", w.connected ? (cfg.wifi_ssid || "") + " · " + w.ip + " · " + w.rssi + " dBm" : "not connected"], ["Clock", d.unix_time ? when(d.unix_time) : "not synced"], ["BLE", d.busy ? "in use: " + d.busy : "free"]])),
+    h("section", h("h2", "Settings"), h("div.form", h("label", "Hostname (blank = default)", host), h("label", "NTP server (blank = pool.ntp.org)", ntp), h("label", "Run deadline cap (s)", deadline)),
+      h("div.row", { style: "margin-top:.7rem" }, h("label.chk", wifiOff, "Stop WiFi during transfers by default"), save)),
+    h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload dfu32.bin from a CI build or release for this board. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),
+      h("div.row", file, h("label.chk", force, "allow another board's build"), upload), prog),
+    h("section", h("h2", "Access"), h("div.row", rotate, h("button", { onclick: () => { setToken(""); route(); } }, "Sign out of this browser"), reboot), tok));
+}
+async function waitBack(version, prog) {
+  const until = Date.now() + 150000;
+  await new Promise((r) => setTimeout(r, 5000));
+  while (Date.now() < until) {
+    try {
+      const s = await (await fetch("/api/v1/status", { cache: "no-store" })).json();
+      status = s; header();
+      prog.replaceChildren(note(s.device.version === version ? "info" : "warn", s.device.version === version ? "Back up on " + version + "." : "Back up, but on " + s.device.version + ": the new firmware rolled back. Check the console log."));
+      return;
+    } catch (e) { await new Promise((r) => setTimeout(r, 3000)); }
+  }
+  prog.replaceChildren(note("warn", "No answer after 2.5 minutes. Check the device's console."));
+}
+
+route();
+</script>
+</body>
+</html>

@@ -38,6 +38,7 @@ enum class Route : uint8_t {
     Config,        // GET/PUT /api/v1/config
     Reboot,        // POST /api/v1/system/reboot
     TokenRotate,   // POST /api/v1/system/token/rotate
+    SystemOta,     // POST /api/v1/system/ota (raw firmware image)
     DebugFault,    // POST /api/v1/debug/fault (CONFIG_DFU32_DEBUG_ENDPOINTS only)
 };
 

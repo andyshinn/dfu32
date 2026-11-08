@@ -41,6 +41,9 @@ public:
     Lease(const Lease&) = delete;
     Lease& operator=(const Lease&) = delete;
     bool ok() const { return ok_; }
+    /// Keep holding it past this object (e.g. until a reboot that is about to
+    /// happen): the destructor then leaves it alone.
+    void keep() { ok_ = false; }
 
 private:
     bool ok_;

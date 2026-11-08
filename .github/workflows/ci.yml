@@ -21,6 +21,9 @@ jobs:
       - name: Partition tables
         run: python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
 
+      - name: Web UI size budget
+        run: python3 tools/dfu32_ui.py check components/api/ui/index.html
+
       - name: Python tool tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 
@@ -179,6 +182,11 @@ jobs:
       - name: App size budget
         if: matrix.variant == 'release'
         run: python3 tools/check_app_size.py "$BUILD_DIR"
+
+      # The firmware upload checks this tag at a fixed offset; prove the
+      # linker put it there in the real image.
+      - name: Board tag in dfu32.bin
+        run: python3 tools/check_board_tag.py "build/${{ matrix.board }}/dfu32.bin" "${{ matrix.board }}"
 
       - name: Merged image (single file, flash at 0x0)
         if: matrix.variant == 'release'
