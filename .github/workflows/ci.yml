@@ -131,7 +131,7 @@ jobs:
       - name: Build debug variant (bench only)
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py -B "build/${{ matrix.board }}-debug" -DDFU32_BOARD=${{ matrix.board }} -DDFU32_DEBUG_ENDPOINTS=ON build
+          idf.py --preset "${{ matrix.board }}" -B "build/${{ matrix.board }}-debug" -DDFU32_DEBUG_ENDPOINTS=ON build
           grep -q '^CONFIG_DFU32_DEBUG_ENDPOINTS=y' "build/${{ matrix.board }}-debug/sdkconfig"
           cp "build/${{ matrix.board }}-debug/dfu32.bin" "build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin"
 

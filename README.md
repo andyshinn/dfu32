@@ -36,7 +36,7 @@ export IDF_PRESET=feather_esp32s3
 idf.py build flash monitor
 ```
 
-Without `--preset` or `IDF_PRESET`, `idf.py` uses the first preset (`feather_esp32s3`) and prints a notice saying so. Use `--preset` rather than `-B`: with presets present, `idf.py -B <dir>` on its own applies that default preset when it configures.
+Without `--preset` or `IDF_PRESET`, `idf.py` uses the first preset (`feather_esp32s3`) and prints a notice saying so. Always pass `--preset`, even when you add `-B` for a separate directory such as the bench debug build (`idf.py --preset <profile> -B build/<profile>-debug -DDFU32_DEBUG_ENDPOINTS=ON build`): with presets present, `idf.py -B <dir>` on its own applies that default preset when it configures.
 
 To build every profile in turn:
 
