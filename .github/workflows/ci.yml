@@ -57,7 +57,7 @@ jobs:
 
   firmware:
     # The release name is unchanged so existing required checks still match.
-    name: Firmware (${{ matrix.board }}${{ matrix.variant == 'debug' && ', debug' || '' }})
+    name: Firmware (${{ matrix.board }}${{ matrix.variant == 'debug' && '-debug' || '' }})
     needs: boards
     runs-on: ubuntu-24.04
     container: espressif/idf:v6.1
