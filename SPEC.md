@@ -614,7 +614,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - **App size budget:** CI fails a build above **1.30 MB**, which is 90% of a slot.
 - Estimated footprint: WiFi + NimBLE (central + peripheral) + httpd + http_client (no TLS) + cJSON + mDNS + UI comes to about 1.0–1.2 MB **[bench]**.
 - If the budget is blown, the levers are: trim NimBLE roles, drop mDNS, move the UI into its own partition.
-- **M4a:** Improv BLE (NimBLE GATT server and advertising), `led_indicator` + `led_strip` (RMT) and `button` added about 97 KB and took the Feather S3 to 92.4%. Pulled in first, because DFU32 uses none of it: Wi-Fi soft-AP, WPA2/3-Enterprise (and its GMAC suites), OWE, and lwIP IPv6 (`sdkconfig.defaults`). WPA3-Personal stays. CI prints `idf.py size-components` before the budget check.
+- **M4a:** Improv BLE (NimBLE GATT server and advertising), `led_indicator` + `led_strip` (RMT) and `button` added about 97 KB and took the Feather S3 to 92.4%. Pulled in first, because DFU32 uses none of it: Wi-Fi soft-AP, WPA2/3-Enterprise (and its GMAC suites), OWE, and lwIP IPv6 (`sdkconfig.defaults`). WPA3-Personal stays. That saved about 80 KB: the Feather S3 app went from 1,392,064 B to 1,312,144 B (87.1%, about 44 KB under budget). CI prints `idf.py size-components` before the budget check. The next levers, if M4b's UI needs them: WPA3-SAE off (TF-PSA crypto is 107 KB of code, mostly its elliptic-curve maths), mDNS (33 KB), or fewer INFO log strings (the merged string pool, about 137 KB, which the size tool charges to `esp_stdio`).
 
 ### 12.2 `partitions/8mb.csv` (8 MB and 16 MB boards)
 
