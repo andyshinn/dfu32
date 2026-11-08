@@ -308,9 +308,9 @@ python3 tools/dfu32_bench.py --port /dev/cu.usbserial-575E0522651 \
 - Section 4 flashes `--debug-app-bin` and puts `--app-bin` back afterwards. Without a debug build, section 4 is skipped.
 - The script serves the firmware on port 8000 (`--site-port`) at your computer's LAN address. If DFU32 can't reach it, pass `--host-ip`.
 - `python3 tools/dfu32_bench.py --list` lists the checks. `--only 3.1,3.5`, `--sections 1,2`, `--skip 3.11` and `--minimum` pick a subset. `--minimum` is what unblocks M4: 3.1, 3.2, 3.5 and 5.1.
-- `--compare-runs N` sets how many flashes 5.1 does per WiFi setting (default 5, so 10 flashes).
+- `--compare-runs N` sets how many flashes 5.1 does per WiFi setting (default 3, so 6 flashes; the WiFi default is already decided, so this now only watches for regressions).
 
-A full run flashes the repeater about 25 times and takes roughly an hour and a half, most of it in transfers and waiting for `start ota`. Ctrl+C stops after cleaning up: it aborts a running flash at a safe point, the same as typing Ctrl+C on the console.
+A full run flashes the repeater about 20 times and takes roughly an hour, most of it in transfers and waiting for `start ota`. Ctrl+C stops after cleaning up: it aborts a running flash at a safe point, the same as typing Ctrl+C on the console.
 
 ### What it changes on DFU32
 

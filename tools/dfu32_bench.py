@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--sections", help="comma-separated sections, e.g. 1,3")
     g.add_argument("--skip", help="comma-separated check ids to leave out")
     g.add_argument("--minimum", action="store_true", help="only what unblocks M4: " + ", ".join(MINIMUM))
-    g.add_argument("--compare-runs", type=int, default=5, help="flashes per WiFi setting in 5.1 (default 5)")
+    g.add_argument("--compare-runs", type=int, default=3, help="flashes per WiFi setting in 5.1 (default 3)")
     g.add_argument("--start-ota-timeout", type=int, default=0,
                    help="how long DFU32 waits for `start ota` each time (default 300 s, or 120 s with "
                         "--repeater-port, where the runner sends it at once)")
