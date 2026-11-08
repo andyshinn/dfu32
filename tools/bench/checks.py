@@ -22,17 +22,25 @@ WRONG_BOARD = "not_this_board"
 
 
 def wait_state(ctx: Ctx, job_id: int, states: set, timeout: float, *, poll: float = 0.5) -> dict:
-    """Polls /status until job `job_id` reaches one of `states` (or ends)."""
+    """Polls job `job_id` until it reaches one of `states` or a later one (or ends).
+
+    With the repeater already advertising, a job can pass AWAITING_TARGET in milliseconds and
+    stop WiFi; when /status doesn't answer, the console's `job` is used instead.
+    """
+    order = ["FETCHING", "VERIFYING_STAGED", "PRECHECK", "AWAITING_TARGET", "RADIO_HANDOVER", "DFU_RUNNING",
+             "RESTORING"]
+    first = min((order.index(s) for s in states if s in order), default=len(order))
     end = time.monotonic() + timeout
     last = None
     while time.monotonic() < end:
         st = ctx.api.status(timeout=3) if ctx.api else None
-        job = (st or {}).get("job") or {}
+        job = ((st or {}).get("job") or {}) if st else ctx.console_job()
         if job.get("id") == job_id:
-            if job.get("state") != last:
-                last = job.get("state")
+            state = job.get("state")
+            if state != last:
+                last = state
                 ctx.say(f"job #{job_id}: {last}{' / ' + job['phase'] if job.get('phase') else ''}")
-            if job.get("state") in states or job.get("state") in TERMINAL:
+            if state in states or state in TERMINAL or (state in order and order.index(state) >= first):
                 return job
         time.sleep(poll)
     raise TestFailed(f"job #{job_id} never reached {'/'.join(sorted(states))} within {timeout:.0f} s (last {last})")
@@ -352,7 +360,8 @@ def c_target(ctx: Ctx) -> None:
 def c_scan(ctx: Ctx) -> None:
     api = ctx.ensure_token()
     ctx.ensure_target()
-    ctx.start_ota(wait_enter=True)
+    if not ctx.prime_repeater():
+        ctx.start_ota(wait_enter=True)
     r = api.post("/ble/scan", {"duration_s": 10, "dfu_only": True}, timeout=40)
     ctx.expect(r.status == 200, "scan returned 200", r.short())
     devs = r.get("devices") or []
@@ -388,7 +397,10 @@ def c_happy_path(ctx: Ctx) -> None:
     w = ctx.api_flash_and_wait({"wifi_off": True}, lora=True)
     ctx.data("timeline", w.timeline)
     job = final_job(ctx, w)
-    ctx.expect(w.saw("AWAITING_TARGET"), "the job armed (AWAITING_TARGET)")
+    # A repeater put into OTA mode before arming is found within a scan or two, so the poll may
+    # never catch AWAITING_TARGET itself; any armed-or-later state shows the job armed.
+    armed = any(w.saw(s) for s in ("AWAITING_TARGET", "RADIO_HANDOVER", "DFU_RUNNING", "RESTORING"))
+    ctx.expect(armed, "the job armed and found the repeater")
     ctx.expect(job.get("state") == "SUCCEEDED", "the job SUCCEEDED", job.get("error"))
     ctx.soft(w.silent_s > 5, f"the API went quiet for {w.silent_s:.0f} s while WiFi was off")
     g = api.get(f"/targets/{ctx.tid}")
@@ -463,6 +475,7 @@ def c_abort_transfer(ctx: Ctx) -> None:
     api = ctx.ensure_token()
     ctx.ensure_target()
     ctx.ensure_staged()
+    ctx.prime_repeater()
     job, _ = ctx.api_flash({"wifi_off": False})
     wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
     ctx.start_ota(still_needed=ctx.awaiting(job))
@@ -693,6 +706,7 @@ def _arm_fault(ctx: Ctx, fault: dict):
 def c_restore_fail(ctx: Ctx) -> None:
     _arm_fault(ctx, {"restore_fail": True})
     mark, boots = ctx.con.mark(), len(ctx.con.boots)
+    ctx.prime_repeater()
     job, _ = ctx.api_flash({"source": "staged", "wifi_off": True})
     wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
     ctx.start_ota(still_needed=ctx.awaiting(job))
@@ -743,6 +757,7 @@ def c_deadline(ctx: Ctx) -> None:
 def c_stall(ctx: Ctx) -> None:
     _arm_fault(ctx, {"stall_s": 40})
     mark, boots = ctx.con.mark(), len(ctx.con.boots)
+    ctx.prime_repeater()
     job, _ = ctx.api_flash({"source": "staged", "wifi_off": True})
     wait_state(ctx, job, {"AWAITING_TARGET"}, 120)
     ctx.start_ota(still_needed=ctx.awaiting(job))

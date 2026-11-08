@@ -428,5 +428,74 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn(fake.token_hash, logs)
 
 
+
+class FakeRepeaterPort:
+    """The repeater's USB console as the runner sees it: `start ota`, `ver`, `reboot`."""
+
+    def __init__(self, fake):
+        self.fake = fake
+        self.reply = b""
+
+    def reset_input_buffer(self):
+        self.reply = b""
+
+    def write(self, b):
+        line = b.decode().strip()
+        if line == "start ota":
+            self.fake.start_ota()
+            self.reply = f"start ota\r\n  -> OK - mac: {self.fake.mac}\r\n".encode()
+        elif line == "ver":
+            self.reply = b"v1.18.1\r\n"
+        elif line == "reboot":
+            self.fake.ota_mode.clear()
+            self.reply = b""
+
+    def flush(self):
+        pass
+
+    def read(self, n):
+        out, self.reply = self.reply, b""
+        if not out:
+            time.sleep(0.01)
+        return out
+
+    def close(self):
+        pass
+
+
+class EndToEndUnattended(unittest.TestCase):
+    """--repeater-port + --unattended: the runner sends `start ota` itself, before arming DFU32."""
+
+    def test_unattended_with_repeater_port(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        bin_data, dat = synthetic_package(4096)
+        z = d / "Heltec_T096_repeater-v1.18.0.zip"
+        write_zip(z, bin_data, dat)
+        fake = FakeDfu32()
+        port = fake.start_http()
+        self.addCleanup(fake.stop)
+        argv = ["--port", "sim", "--repeater-port", "sim-rep", "--unattended", "--zip", str(z),
+                "--board", "heltec_t096", "--mac", fake.mac, "--device-ip", f"127.0.0.1:{port}",
+                "--host-ip", "127.0.0.1", "--site-port", "0", "--compare-runs", "1", "--start-ota-timeout", "60",
+                "--out", str(d / "out"), "--only", "1.1,3.5,3.3,3.6,3.7,3.9,4.1,5.1"]
+        real_console = dfu32_bench.SerialConsole
+        with mock.patch.object(dfu32_bench, "SerialConsole",
+                               lambda *a, **kw: real_console(*a, opener=fake.opener, **kw)), \
+                mock.patch.object(Repeater, "_pyserial", lambda self, p, b: FakeRepeaterPort(fake)), \
+                mock.patch.object(Ctx, "countdown", lambda self, s, w: None), \
+                mock.patch.object(Ctx, "resolve", staticmethod(lambda name, timeout=8: None)), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = dfu32_bench.main(argv)
+        report = json.loads((d / "out" / "report.json").read_text())
+        bad = {r["id"]: r["notes"][-3:] for r in report["results"] if r["status"] not in ("PASS", "WARN")}
+        self.assertEqual(bad, {}, out.getvalue()[-3000:])
+        self.assertEqual(rc, 0)
+        notes = "\n".join(n for r in report["results"] for n in r["notes"])
+        self.assertIn("LoRa) path was not tested", notes)
+        log = (d / "out" / "serial.log").read_text()
+        self.assertIn("before arming DFU32", log)
+
 if __name__ == "__main__":
     unittest.main()

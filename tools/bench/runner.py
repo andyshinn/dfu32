@@ -235,6 +235,7 @@ class Ctx:
         self.repeater: Optional[Repeater] = None
         self.debug_build = False
         self.ota_pending = False  # `start ota` sent and no flash has consumed it yet
+        self._primed = False  # prime_repeater() already put the repeater in OTA mode for this flash
         if args.repeater_port:
             self.repeater = Repeater(args.repeater_port, args.repeater_baud, self.con.note)
         if self.device_ip:
@@ -306,6 +307,9 @@ class Ctx:
         awaiting()). Otherwise a retry that lands after the flash would put the freshly flashed
         repeater straight back into OTA mode. Without it (e.g. before a BLE scan), it just retries.
         """
+        if self._primed:  # prime_repeater() already did it, before DFU32 started looking
+            self._primed = False
+            return
         self.ota_pending = True
         if lora and self.args.unattended and self.repeater:
             self.note("--unattended: `start ota` sent over the repeater's USB console instead of LoRa, so the "
@@ -333,6 +337,54 @@ class Ctx:
             self.pause(msg + " Then press Enter once it has replied OK.")
         else:
             self.action(msg + " The script carries on by itself once DFU32 sees the repeater.")
+
+    def prime_repeater(self, *, lora: bool = False) -> bool:
+        """With --repeater-port: put the repeater in OTA mode *before* DFU32 is armed.
+
+        A `start ota` that reaches the repeater while DFU32 is doing the buttonless jump wedges
+        the T096 (bench, 5.1: OK reply, then no bootloader and a dead USB console until it was
+        power-cycled). MeshCore advertises until something connects, so sending it first and
+        arming afterwards leaves nothing to race. It is only sent when the repeater isn't
+        already advertising (app in OTA mode, or its bootloader waiting at MAC+1).
+        Returns True when the repeater is ready; start_ota() then has nothing left to do.
+        """
+        self._primed = False
+        if not self.repeater or (lora and not self.args.unattended):
+            return False
+        if lora:
+            self.note("--unattended: `start ota` sent over the repeater's USB console instead of LoRa, so the "
+                      "remote (LoRa) path was not tested")
+        adv = self._target_advertising_any()
+        if adv:
+            self.say("the repeater is already advertising for DFU: not sending `start ota`")
+        else:
+            try:
+                out = self.repeater.command("start ota", expect="OK")
+            except Exception as e:
+                self.warn(f"couldn't send `start ota` over the repeater's USB port ({type(e).__name__}: {e})")
+                return False
+            if "OK" not in out:
+                self.warn("the repeater never answered `start ota` with OK over USB (60 s of retries)")
+                return False
+            self.say("sent `start ota` over the repeater's USB console before arming DFU32 (it replied OK)")
+            time.sleep(1)
+        self.ota_pending = True
+        self._primed = True
+        return True
+
+    def _target_advertising_any(self) -> Optional[bool]:
+        """Is the repeater advertising? Over the API when it answers, else with the console's `scan`."""
+        if self.api and self.api.status(timeout=3):
+            return self._target_advertising()
+        try:
+            out = self.con.cmd("scan 5", 25).upper()
+        except ConsoleError:
+            return None
+        if "BUSY:" in out:
+            return None
+        mac = self.need_mac()
+        last = (int(mac[-2:], 16) + 1) & 0xFF
+        return mac in out or f"{mac[:-2]}{last:02X}" in out
 
     def repeater_alive(self) -> Optional[bool]:
         """Does the repeater's own console answer `ver`? None when there is no --repeater-port."""
@@ -365,6 +417,7 @@ class Ctx:
 
     def ensure_repeater_idle(self) -> None:
         """Checks that expect DFU32 *not* to find the repeater need it out of OTA mode."""
+        self._primed = False
         if self.repeater and self.api:
             # Check rather than trust bookkeeping: scan, and reboot the repeater while it advertises.
             for _ in range(3):
@@ -605,6 +658,8 @@ class Ctx:
     def console_flash(self, extra: str = "", *, wait: Optional[int] = None, start_ota: bool = True,
                       lora: bool = False, hint: str = "", until: Optional[Callable[[int], bool]] = None) -> dict:
         wait = wait or self.args.start_ota_timeout
+        if start_ota:
+            self.prime_repeater(lora=lora)
         mark = self.con.mark()
         line = f"flash --yes --wait {wait} {extra}".strip()
         start = self.con.send(line)
@@ -767,6 +822,8 @@ class Ctx:
     def api_flash_and_wait(self, body: dict, *, lora: bool = False, hint: str = "", start_ota: bool = True,
                            on_sample: Optional[Callable[[dict, str], None]] = None, poll: float = 1.0) -> JobWatch:
         """POST /flash, ask for `start ota` once armed, follow the job to its end."""
+        if start_ota:
+            self.prime_repeater(lora=lora)
         job, _ = self.api_flash(body)
         prompted = {"done": False, "next": 0.0}
 
@@ -953,6 +1010,7 @@ def crash_excerpt(con: SerialConsole, since: int) -> list:
 
 def cleanup(ctx: Ctx, interrupted: bool) -> None:
     """Leaves the device idle between checks: no job running, console at its prompt."""
+    ctx._primed = False
     try:
         ctx.con.sync(attempts=2)
     except ConsoleError:
