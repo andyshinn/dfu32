@@ -86,7 +86,6 @@ section { display: flex; flex-direction: column; gap: 14px; }
 .btn { all: unset; box-sizing: border-box; width: 100%; text-align: center; cursor: pointer; font-weight: 600; padding: 12px 20px; border-radius: var(--radius); background: var(--accent); color: var(--on-accent); }
 .btn:hover { filter: brightness(1.08); }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.btn:disabled { cursor: not-allowed; filter: none; background: var(--surface-2); color: var(--muted); border: 1px dashed var(--border-strong); }
 esp-web-install-button { display: block; }
 .action .hint { font-size: 12.5px; color: var(--muted); }
 .action .hint.mono { font-size: 12px; }
@@ -163,11 +162,11 @@ footer a { color: var(--muted); }
   </section>
 
   <section id="install">
-    <div class="sh"><h2>Install</h2></div>
+    <div class="sh"><h2>Connect and install</h2></div>
 
     <ol class="steps web-only">
-      <li>Connect the board with a USB data cable and click Install.</li>
-      <li><span>Pick the serial port, and it flashes <span class="muted">(about a minute)</span>.</span></li>
+      <li><span>Plug the board in with a USB data cable and click <strong>Connect device</strong>.</span></li>
+      <li><span>Pick the serial port, then choose <strong>Install DFU32</strong>.</span></li>
       <li><span>Enter your WiFi network name and password, then click <strong>Visit device</strong> to open DFU32’s own web UI and claim it.</span></li>
     </ol>
 
@@ -176,10 +175,10 @@ footer a { color: var(--muted); }
     <div class="panel install web-only">
       <div class="action">
         <esp-web-install-button id="esp">
-          <button slot="activate" class="btn" id="install-btn" disabled>Choose a board</button>
+          <button slot="activate" class="btn" id="install-btn">Connect device</button>
           <span slot="unsupported"></span><span slot="not-allowed"></span>
         </esp-web-install-button>
-        <span class="hint" id="install-hint">Select a board above to continue.</span>
+        <span class="hint" id="install-hint">No board chosen: you can manage a device, but installing needs a board.</span>
       </div>
       <div class="erase">
         <strong>About “Erase device”</strong>
@@ -204,15 +203,16 @@ footer a { color: var(--muted); }
 
     <div class="plain notallowed-only">This page needs HTTPS to reach USB devices. Open <a class="mono" href="https://dfu32.app/">https://dfu32.app</a> instead.</div>
 
-    <p class="note web-only"><strong>Already installed?</strong> The same button detects DFU32 and offers to update or change WiFi. Settings are kept unless you erase.</p>
+    <p class="note web-only"><strong>Already installed?</strong> Connect without choosing a board to change WiFi, open the device’s page or use the console. To update, choose its board first. Settings are kept unless you erase.</p>
   </section>
 
   <details>
     <summary>Troubleshooting</summary>
     <dl>
       <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver.</dd></div>
-      <div><dt>ESP32-S3 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Install again.</dd></div>
-      <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Install. Afterwards, release BOOT0 and press RESET again.</dd></div>
+      <div><dt>ESP32-S3 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Connect device again.</dd></div>
+      <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Connect device and Install DFU32. Afterwards, release BOOT0 and press RESET again.</dd></div>
+      <div><dt>“Your ESP32 board is not supported”</dt><dd>No board is chosen, so the page has no image to install. Close the dialog, choose your board above and connect again.</dd></div>
       <div><dt>WiFi failed</dt><dd>DFU32 joins 2.4 GHz WPA2-Personal and open networks (WPA2/WPA3 mixed works, WPA3-only doesn’t). Check the password and retry.</dd></div>
       <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network.</dd></div>
     </dl>
@@ -231,7 +231,6 @@ footer a { color: var(--muted); }
   // One manifest per board profile, next to this page: manifest-<id>.json,
   // written by tools/dfu32_web_manifest.py in the CI pages job.
   const esp = document.getElementById('esp');
-  const btn = document.getElementById('install-btn');
   const hint = document.getElementById('install-hint');
   const download = document.getElementById('download');
   const dlBoard = document.getElementById('download-board');
@@ -247,6 +246,12 @@ footer a { color: var(--muted); }
     { id: 'rak11200_rak19007', name: 'RAKwireless WisBlock RAK11200 (RAK19007 base)', short: 'RAK11200', spec: 'ESP32 · 4 MB flash · 8 MB PSRAM' },
   ];
   const manifestUrl = id => `manifest-${id}.json`;
+  // With no board chosen the button still connects, so an installed DFU32 can
+  // be managed (WiFi, its page, the console). This manifest has no builds:
+  // installing needs a board, because two profiles share each chip family.
+  const boardlessManifest = () => 'data:application/json,' + encodeURIComponent(JSON.stringify({
+    name: 'DFU32', version: rawVersion, new_install_prompt_erase: true, builds: [],
+  }));
   const imageUrl = id => `https://github.com/andyshinn/dfu32/releases/latest/download/dfu32-${id}-merged.bin`;
 
   const picker = document.getElementById('picker');
@@ -257,7 +262,7 @@ footer a { color: var(--muted); }
   const listbox = document.getElementById('listbox');
   const empty = document.getElementById('empty');
   document.getElementById('count').textContent = BOARDS.length + ' boards ▾';
-  let selected = null, results = BOARDS, active = 0, version = '';
+  let selected = null, results = BOARDS, active = 0, version = '', rawVersion = '';
 
   const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
   const tokens = q => q.trim().split(/\s+/).filter(Boolean).map(norm).filter(Boolean);
@@ -304,10 +309,12 @@ footer a { color: var(--muted); }
   // `git describe` strings: add a "v" only to a bare release number, never to a hash.
   const fmtVersion = v => /^\d+\.\d+/.test(v) ? 'v' + v : v;
   function showVersion(v) {
-    version = v ? fmtVersion(String(v)) : '';
+    rawVersion = v ? String(v) : '';
+    version = rawVersion ? fmtVersion(rawVersion) : '';
     versionEl.textContent = version;
     versionEl.hidden = !version;
     if (selected) hint.textContent = version ? `${selected.short} · ${version}` : selected.short;
+    else esp.setAttribute('manifest', boardlessManifest());
   }
   // no-cache revalidates, so the copy ESP Web Tools fetches next is the same one.
   async function loadManifest(id) {
@@ -322,10 +329,8 @@ footer a { color: var(--muted); }
     triggerLabel.className = '';
     triggerLabel.innerHTML = `<b>${esc(board.name)}</b><small>${esc(board.spec)}</small>`;
     esp.setAttribute('manifest', manifestUrl(board.id));
-    btn.disabled = false;
-    btn.textContent = 'Install DFU32';
     hint.className = 'hint mono';
-    showVersion(version);
+    showVersion(rawVersion);
     dlBoard.textContent = board.short;
     download.href = imageUrl(board.id);
     eraseNotice.hidden = true;
@@ -341,6 +346,7 @@ footer a { color: var(--muted); }
     } catch (e) { /* keep the version shown */ }
   }
 
+  esp.setAttribute('manifest', boardlessManifest());
   // All boards share one version, so the first board's manifest fills the pill.
   loadManifest(BOARDS[0].id).then(m => { if (m.version && !version) showVersion(m.version); }).catch(() => {});
 </script>

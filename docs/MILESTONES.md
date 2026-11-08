@@ -138,6 +138,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 - **`web/`**: `index.html` plus a little CSS. No framework and no build step.
   - The `<esp-web-install-button>` comes from ESP Web Tools, pinned to an exact version.
   - A board picker sets the button's `manifest`. One manifest can't serve every board, because the Feather S3 and the N16R8 are both `ESP32-S3`.
+  - With no board chosen, the button ("Connect device") still connects with a board-less manifest, so an installed DFU32 can be managed without knowing its board.
   - The button's `unsupported` slot shows a message in browsers without Web Serial.
   - A warning next to the button: choosing "Erase device" removes WiFi, the token and the target.
   - Links to the README, `OPERATOR.md` and `RECOVERY.md`.
