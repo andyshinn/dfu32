@@ -130,6 +130,12 @@ jobs:
           path: .ccache
           key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
+      # Where the bytes go, so a budget failure (next step) says what grew.
+      - name: Size by component
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -B "build/${{ matrix.board }}" size-components 2>/dev/null | head -45
+
       - name: App size budget
         run: python3 tools/check_app_size.py "build/${{ matrix.board }}"
 

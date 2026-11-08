@@ -614,6 +614,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - **App size budget:** CI fails a build above **1.30 MB**, which is 90% of a slot.
 - Estimated footprint: WiFi + NimBLE (central + peripheral) + httpd + http_client (no TLS) + cJSON + mDNS + UI comes to about 1.0–1.2 MB **[bench]**.
 - If the budget is blown, the levers are: trim NimBLE roles, drop mDNS, move the UI into its own partition.
+- **M4a:** Improv BLE (NimBLE GATT server and advertising), `led_indicator` + `led_strip` (RMT) and `button` added about 97 KB and took the Feather S3 to 92.4%. Pulled in first, because DFU32 uses none of it: Wi-Fi soft-AP, WPA2/3-Enterprise (and its GMAC suites), OWE, and lwIP IPv6 (`sdkconfig.defaults`). WPA3-Personal stays. CI prints `idf.py size-components` before the budget check.
 
 ### 12.2 `partitions/8mb.csv` (8 MB and 16 MB boards)
 
