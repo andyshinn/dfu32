@@ -256,8 +256,16 @@ jobs:
               echo "$REF is not main: page left alone"
             fi
           elif [ "$EVENT" = release ]; then
+            # A SemVer pre-release tag (v0.4.0-rc.1) counts even when the
+            # release wasn't ticked as a pre-release: the flag is read at
+            # publish time, and ticking it afterwards doesn't stop this run.
+            # The regex lives in a variable because bash would take a quoted
+            # one literally.
+            semver_pre='^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'
             if [ "$PRERELEASE" = true ]; then
               echo "$TAG is a pre-release: page left alone"
+            elif [[ "$TAG" =~ $semver_pre ]]; then
+              echo "$TAG has a SemVer pre-release suffix: page left alone"
             else
               latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
               if [ "$latest" = "$TAG" ]; then
