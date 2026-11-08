@@ -314,7 +314,11 @@ footer a { color: var(--muted); }
     versionEl.textContent = version;
     versionEl.hidden = !version;
     if (selected) hint.textContent = version ? `${selected.short} · ${version}` : selected.short;
-    else esp.setAttribute('manifest', boardlessManifest());
+    updateManifest();
+  }
+  // The only writer of the button's manifest: the chosen board's, or the board-less one.
+  function updateManifest() {
+    esp.setAttribute('manifest', selected ? manifestUrl(selected.id) : boardlessManifest());
   }
   // no-cache revalidates, so the copy ESP Web Tools fetches next is the same one.
   async function loadManifest(id) {
@@ -328,7 +332,6 @@ footer a { color: var(--muted); }
     setOpen(false); trigger.focus();
     triggerLabel.className = '';
     triggerLabel.innerHTML = `<b>${esc(board.name)}</b><small>${esc(board.spec)}</small>`;
-    esp.setAttribute('manifest', manifestUrl(board.id));
     hint.className = 'hint mono';
     showVersion(rawVersion);
     dlBoard.textContent = board.short;
@@ -346,7 +349,7 @@ footer a { color: var(--muted); }
     } catch (e) { /* keep the version shown */ }
   }
 
-  esp.setAttribute('manifest', boardlessManifest());
+  updateManifest();
   // All boards share one version, so the first board's manifest fills the pill.
   loadManifest(BOARDS[0].id).then(m => { if (m.version && !version) showVersion(m.version); }).catch(() => {});
 </script>
