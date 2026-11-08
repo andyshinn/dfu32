@@ -375,9 +375,12 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 4. **Happy path from the UI only:** **Check** shows the version and board match; **Flash**, then `start ota` over LoRa from the companion app. The job card shows armed (countdown), then the progress bar and rate, then succeeded, with a link to the run. This is the M4 "done when" (after joining WiFi over Improv).
 5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
 6. **Runs:** the list shows the flashes; a run's page has the attempts and the log. **Logs** tails live while a flash runs.
-7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept.
-8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards. The merged `.bin`: refused as "not an ESP-IDF app image".
-9. **Rollback:** install a build, and as soon as the upload finishes switch the access point off. The new image boots, finds no network, and about 90 s later rolls back ("rolling back to the previous image" on the console). Switch the access point on: the page says the device came back on the old version. Repeat with the access point on throughout: the console says "new firmware confirmed" and a later reboot stays on the new version.
+7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
+8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards, and the page shows that error (not a connection reset). The merged `.bin`: refused as "not an ESP-IDF app image".
+9. **Rollback rules:**
+   - With the access point on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
+   - Switch the access point off as soon as the upload finishes. After 90 s the console says "confirmed: WiFi works but … isn't reachable" (a router outage is not the firmware's fault), and it stays on the new version once the access point is back.
+   - A real rollback needs a build that breaks itself, which a normal build can't do. Use the console log: a self-check failure, or "shows no WiFi activity", followed by "rolling back to the previous image", and the page reports the old version.
 10. **Busy:** while a flash runs, **Install** answers busy.
 
 ## Bench results so far

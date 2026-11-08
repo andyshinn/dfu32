@@ -31,7 +31,9 @@ That happens after `probe --no-reset`, or an abort before START. Run `blreset` (
 
 ### After a firmware update it came back on the old version
 
-That's the rollback working: the new firmware couldn't bring WiFi and the HTTP API up within 90 seconds, or failed its self-check. The console log of the failed boot says why. Install a fixed build; the device keeps working on the old one meanwhile.
+That's the rollback working: the new firmware failed its self-check, couldn't start the HTTP API, or showed no WiFi activity at all within 90 seconds. The console log of the failed boot says why. Install a fixed build; the device keeps working on the old one meanwhile.
+
+A network problem outside DFU32 doesn't cause a rollback: if the router is down during the update (the radio reports "AP not found") or no network is stored, the new firmware is kept, and it joins once the network is back.
 
 ### It doesn't come back at all
 

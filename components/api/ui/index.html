@@ -135,7 +135,7 @@ async function refresh() {
 }
 function header() {
   const d = status.device || {}, w = d.wifi || {};
-  $("#hdr").textContent = [d.hostname, d.version, w.connected ? (w.ssid || "WiFi") + " " + w.rssi + " dBm" : "WiFi down"].filter(Boolean).join(" · ");
+  $("#hdr").textContent = [d.hostname, d.version, w.connected ? ((cfg && cfg.wifi_ssid) || "WiFi") + " " + w.rssi + " dBm" : "WiFi down"].filter(Boolean).join(" · ");
   const j = status.job;
   $("#hjob").replaceChildren(j && j.id ? badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]) : "");
 }
@@ -411,8 +411,8 @@ async function viewSystem() {
   }); } }, "Reboot");
 
   $("#main").replaceChildren(
-    h("section", h("h2", "Device"), dl([["Firmware", d.version + (d.partition ? " (" + d.partition + ")" : "")], ["Board", d.board], ["Hostname", d.hostname + ".local"], ["Uptime", dur(d.uptime_s * 1000)],
-      ["WiFi", w.connected ? (w.ssid || "") + " · " + w.ip + " · " + w.rssi + " dBm" : "not connected"], ["Clock", d.unix_time ? when(d.unix_time) : "not synced"], ["BLE", d.busy ? "in use: " + d.busy : "free"]])),
+    h("section", h("h2", "Device"), dl([["Firmware", d.version + (cfg.partition ? " (" + cfg.partition + ")" : "")], ["Board", d.board], ["Hostname", d.hostname + ".local"], ["Uptime", dur(d.uptime_s * 1000)],
+      ["WiFi", w.connected ? (cfg.wifi_ssid || "") + " · " + w.ip + " · " + w.rssi + " dBm" : "not connected"], ["Clock", d.unix_time ? when(d.unix_time) : "not synced"], ["BLE", d.busy ? "in use: " + d.busy : "free"]])),
     h("section", h("h2", "Settings"), h("div.form", h("label", "Hostname (blank = default)", host), h("label", "NTP server (blank = pool.ntp.org)", ntp), h("label", "Run deadline cap (s)", deadline)),
       h("div.row", { style: "margin-top:.7rem" }, h("label.chk", wifiOff, "Stop WiFi during transfers by default"), save)),
     h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload dfu32.bin from a CI build or release for this board. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),

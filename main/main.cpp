@@ -98,9 +98,16 @@ static void record_aborted_run() {
 
 // ---- self-OTA rollback (SPEC.md §10.1, §12.3) ---------------------------------------
 // After POST /api/v1/system/ota the bootloader starts the new image as
-// "pending verify". It is confirmed only once it has proved it can be reached
-// again (WiFi up with an address, HTTP API running); a self-check failure, or
-// no network within 90 s, rolls back to the previous image.
+// "pending verify". A failed self-check, or an HTTP API that doesn't start,
+// rolls back at once. WiFi is then the deciding signal, but only for faults
+// the new image could have caused:
+//  - an address within 90 s: confirmed;
+//  - no network stored: confirmed (there is nothing to test against);
+//  - the radio is demonstrably working but the network isn't reachable (the
+//    driver reported a disconnect: AP not found, wrong passphrase, ...):
+//    confirmed with a warning, so a router that is down during the update
+//    doesn't throw away a good image;
+//  - no sign of life from WiFi at all: rolled back.
 
 namespace {
 
@@ -125,12 +132,21 @@ void boot_failed(const char* why) {
 }
 
 void ota_confirm_task(void*) {
-    const bool up = dfu32::net::wait_connected(kOtaConfirmMs);
+    const bool up = dfu32::net::status().provisioned && dfu32::net::wait_connected(kOtaConfirmMs);
+    const dfu32::net::Status ns = dfu32::net::status();
     if (up) {
         esp_ota_mark_app_valid_cancel_rollback();
         ESP_LOGI(TAG, "new firmware confirmed: WiFi and the HTTP API are up");
+    } else if (!ns.provisioned) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(TAG, "new firmware confirmed without a network test: no WiFi network is stored");
+    } else if (ns.last_disconnect_reason != 0) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(TAG, "new firmware confirmed: WiFi works but \"%s\" isn't reachable (reason %u); not the "
+                      "firmware's fault",
+                 ns.ssid.c_str(), ns.last_disconnect_reason);
     } else {
-        ESP_LOGE(TAG, "new firmware has no network after %u s: rolling back to the previous image",
+        ESP_LOGE(TAG, "new firmware shows no WiFi activity after %u s: rolling back to the previous image",
                  static_cast<unsigned>(kOtaConfirmMs / 1000));
         vTaskDelay(pdMS_TO_TICKS(300));
         esp_ota_mark_app_invalid_rollback_and_reboot();
@@ -247,7 +263,7 @@ extern "C" void app_main(void) {
         if (!api_ok) {
             boot_failed("new firmware can't start WiFi or the HTTP API");
         } else {
-            ESP_LOGW(TAG, "new firmware: confirming once WiFi is up (rolls back after %u s without it)",
+            ESP_LOGW(TAG, "new firmware: confirming once WiFi is up (up to %u s)",
                      static_cast<unsigned>(kOtaConfirmMs / 1000));
             xTaskCreate(&ota_confirm_task, "ota_confirm", 3072, nullptr, 3, nullptr);
         }

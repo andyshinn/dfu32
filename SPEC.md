@@ -494,10 +494,13 @@ Conventions (M3b):
 - `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
 - `POST /system/reboot` is refused during a job unless `?force=1`.
 - `GET /` serves the web UI (§10.2), also while unclaimed.
+- `GET /status` is public, so it leaves out the WiFi SSID and the running OTA partition; `GET /config` (authenticated) reports them as `wifi_ssid` and `partition`.
 - `POST /system/ota` (M4b) takes `dfu32.bin` as the raw body with `Content-Length` (not the merged image). It runs on the slow-request task, holds the BLE lease (`409` during a job), and:
   - checks the first 328 bytes before writing anything (`dfu32_core/ota_image.hpp`, host-tested): the ESP image magic, the chip ID, the project name (`dfu32`), and DFU32's **board tag**, a 40-byte custom app descriptor (`.rodata_custom_desc`, right after `esp_app_desc_t`) naming the board profile. Another board's build (same chip, different flash layout or pins) or an untagged image is refused with `422 IMAGE_REJECTED` unless `?force=1`;
   - streams into the other OTA slot (`esp_ota_begin` with sequential writes), lets `esp_ota_end` verify the image, sets the boot partition, answers `200` with the new version, and reboots a second later;
-  - the new image confirms itself only once WiFi has an address and the API is up, within 90 s; a self-check failure or no network rolls back to the previous image (§12.3).
+  - it keeps the BLE lease until the reboot, so no job can start in that last second; on an early error it reads (and discards, up to 4 MB) the rest of the upload before answering, so the client gets the JSON error rather than a connection reset;
+  - rollback (§12.3): a failed boot self-check, or an HTTP API that doesn't start, rolls back at once. Then WiFi decides, but only for faults the new image could have caused: an address within 90 s confirms it; no stored network confirms it without a network test; a working radio that can't reach the network (the driver reported a disconnect: AP not found, wrong passphrase) confirms it with a warning, so a router that is down during the update doesn't discard a good image; no sign of WiFi activity at all rolls back.
+  - CI runs `tools/check_board_tag.py` on every built `dfu32.bin`, so a toolchain change that moved the tag fails the build instead of making every upload "untagged".
 
 | Method & path | Purpose |
 |---|---|

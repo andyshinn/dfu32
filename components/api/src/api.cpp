@@ -264,9 +264,8 @@ esp_err_t h_status(httpd_req_t* req) {
         .add_bool("claimed", claimed())
         .add("hostname", ns.hostname)
         .add("unix_time", static_cast<int64_t>(net::unix_time()));
-    if (const esp_partition_t* running = esp_ota_get_running_partition()) dev.add("partition", running->label);
     json::ObjectWriter wifi;
-    wifi.add_bool("connected", ns.connected).add("rssi", int64_t{ns.rssi}).add("ip", ns.ip).add("ssid", ns.ssid);
+    wifi.add_bool("connected", ns.connected).add("rssi", int64_t{ns.rssi}).add("ip", ns.ip);
     dev.add("wifi", std::move(wifi));
     if (const char* h = job::holder()) {
         dev.add("busy", h);
@@ -607,7 +606,10 @@ esp_err_t h_config(httpd_req_t* req) {
     }
     json::ObjectWriter w;
     write_json(w, c);
-    w.add("hostname_active", net::status().hostname).add_bool("reboot_required", reboot);
+    // Read-only details that /status (unauthenticated) leaves out.
+    const net::Status ns = net::status();
+    w.add("hostname_active", ns.hostname).add_bool("reboot_required", reboot).add("wifi_ssid", ns.ssid);
+    if (const esp_partition_t* running = esp_ota_get_running_partition()) w.add("partition", running->label);
     return send_obj(req, "200 OK", w);
 }
 
@@ -673,6 +675,7 @@ esp_err_t h_fault(httpd_req_t* req) {
 
 constexpr size_t kOtaChunk = 4096;
 constexpr int kOtaMaxTimeouts = 3;  // x recv_wait_timeout (5 s)
+constexpr size_t kOtaDrainMax = 4u * 1024 * 1024;  // never read more than this to discard a refused upload
 
 /// Fills `buf` with up to `want` body bytes; false (and `err` set) on a dead client.
 bool recv_exact(httpd_req_t* req, uint8_t* buf, size_t want, std::string& err) {
@@ -690,6 +693,21 @@ bool recv_exact(httpd_req_t* req, uint8_t* buf, size_t want, std::string& err) {
     return true;
 }
 
+/// Reads and discards up to `n` more body bytes (capped), so an early error
+/// response isn't answered with a connection reset: browsers that are still
+/// sending the upload then see the JSON error instead.
+void drain(httpd_req_t* req, size_t n) {
+    char buf[512];
+    if (n > kOtaDrainMax) n = kOtaDrainMax;
+    int timeouts = 0;
+    while (n > 0) {
+        const int got = httpd_req_recv(req, buf, n < sizeof(buf) ? n : sizeof(buf));
+        if (got == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < kOtaMaxTimeouts) continue;
+        if (got <= 0) break;
+        n -= static_cast<size_t>(got);
+    }
+}
+
 /// Streams the body into the other OTA slot. The image is checked (chip,
 /// project, board tag) before anything is written, verified by esp_ota_end(),
 /// and only then made the boot partition. Rollback: the new image must come
@@ -698,32 +716,47 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
     if (req->content_len == 0) {
         return send_error(req, "411 Length Required", "BAD_REQUEST", "send dfu32.bin as the raw body, with Content-Length");
     }
+    size_t remaining = req->content_len;
     const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
-    if (next == nullptr) return send_error(req, "500 Internal Server Error", "INTERNAL", "no OTA partition to update");
+    if (next == nullptr) {
+        drain(req, remaining);
+        return send_error(req, "500 Internal Server Error", "INTERNAL", "no OTA partition to update");
+    }
     if (req->content_len > next->size) {
+        drain(req, remaining);
         return send_error(req, "413 Content Too Large", "BAD_REQUEST",
                           "image is " + std::to_string(req->content_len) + " B, the OTA slot holds " +
                               std::to_string(next->size) + " B");
     }
     job::Lease lease("ota");
-    if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
+    if (!lease.ok()) {
+        drain(req, remaining);
+        return send_error(req, "409 Conflict", "BUSY", busy_detail());
+    }
 
     std::vector<uint8_t> buf(kOtaChunk);
-    size_t remaining = req->content_len;
     std::string err;
     ota::ImageInfo info;
     esp_ota_handle_t h = 0;
     bool begun = false;
+    // `remaining` is what the client has yet to send; read it (bounded) before
+    // answering, except when the client itself stopped sending.
+    bool client_gone = false;
     const auto fail = [&](const char* status, const char* code, const std::string& detail) {
         if (begun) esp_ota_abort(h);
         ESP_LOGE(TAG, "firmware upload refused: %s", detail.c_str());
+        if (!client_gone) drain(req, remaining);
         return send_error(req, status, code, detail);
     };
     const int64_t t0 = esp_timer_get_time();
     unsigned last_decile = 0;
     while (remaining > 0) {
         const size_t want = remaining < buf.size() ? remaining : buf.size();
-        if (!recv_exact(req, buf.data(), want, err)) return fail("408 Request Timeout", "BAD_REQUEST", err);
+        if (!recv_exact(req, buf.data(), want, err)) {
+            client_gone = true;
+            return fail("408 Request Timeout", "BAD_REQUEST", err);
+        }
+        remaining -= want;  // consumed from the socket, whatever happens next
         if (!begun) {
             ota::Expect expect;
             expect.chip_id = static_cast<uint16_t>(CONFIG_IDF_FIRMWARE_CHIP_ID);
@@ -743,7 +776,6 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
         if (const esp_err_t e = esp_ota_write(h, buf.data(), want); e != ESP_OK) {
             return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_write: ") + esp_err_to_name(e));
         }
-        remaining -= want;
         const unsigned decile = static_cast<unsigned>((req->content_len - remaining) * 10 / req->content_len);
         if (decile > last_decile && decile < 10) {
             last_decile = decile;
@@ -766,6 +798,9 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
     json::ObjectWriter w;
     w.add("version", info.version).add("partition", next->label).add_bool("rebooting", true).add(
         "note", "If the new firmware can't bring up WiFi and the API, it rolls back to the current one on its next reboot.");
+    // Keep the BLE lease until the reboot, so no job starts in the last second
+    // and gets cut off by the restart.
+    lease.keep();
     const esp_err_t sent = send_obj(req, "200 OK", w);
     schedule_reboot(1000 * 1000);
     return sent;
