@@ -14,13 +14,13 @@ Ideally the repeater is a sacrificial board on the OTAFIX bootloader. `flash` er
 Activate your ESP-IDF 6.1 environment first. Then build:
 
 ```bash
-idf.py -B build/feather_esp32s3 -DDFU32_BOARD=feather_esp32s3 build
+idf.py --preset feather_esp32s3 build
 ```
 
 Then flash and open the monitor (use your own port):
 
 ```bash
-idf.py -B build/feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
+idf.py --preset feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 ```
 
 The monitor shows the boot banner, "layout self-check OK", the NimBLE address, and a `dfu32>` prompt. Type `help` to list the commands.
@@ -276,7 +276,7 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 - **Busy:** while a job runs, a second `flash`, `stage`, `ble/scan` or target `PUT` gets `409`; so does the console's `scan`.
 - **Abort while armed:** `POST /jobs/current/abort` during `AWAITING_TARGET`: `FAILED`, `ABORTED`, target untouched.
 - **Offline re-flash from staging:** stage while the AP is up, start a flash with `{"source":"staged"}`, then switch the access point off and run `start ota`. Follow it on the console with `job`. It must succeed without the network. Because WiFi was already down when the target was seen, DFU32 doesn't insist on reconnecting afterwards (no reboot); `status` answers again once the AP is back.
-- **Restore watchdog and run deadline** (needs the debug build: the `dfu32-<board>-debug` CI artifact, or `idf.py -B build/<profile>-debug -DDFU32_BOARD=<profile> -DDFU32_DEBUG_ENDPOINTS=ON build`; never ship it):
+- **Restore watchdog and run deadline** (needs the debug build: the `dfu32-<board>-debug` CI artifact, or `idf.py --preset <profile> -B build/<profile>-debug -DDFU32_DEBUG_ENDPOINTS=ON build`; never ship it):
   - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 restarts WiFi and counts the restore as failed, retries once, then reboots. Each wait ends as soon as WiFi reconnects (60 s at most), so on a working network this takes seconds, not minutes. The run record is already written and WiFi comes back after the reboot.
   - `{"deadline_s":20}`: the run is aborted 20 s after the target is seen, recorded as `DEADLINE_EXCEEDED`, and WiFi is restored.
   - `{"stall_s":40}`: the DFU task blocks without a heartbeat; the stall watchdog reboots after about 30 s and the next boot records `ABORTED_BY_REBOOT`.
