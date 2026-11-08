@@ -37,6 +37,10 @@ constexpr esp_line_endings_t kTextLineEndings = ESP_LINE_ENDINGS_CRLF;
 StreamBufferHandle_t g_line = nullptr;
 std::mutex g_write_mu;
 
+#if CONFIG_ESP_CONSOLE_UART
+constexpr uart_port_t kUart = static_cast<uart_port_t>(CONFIG_ESP_CONSOLE_UART_NUM);
+#endif
+
 uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 /// Raw bytes from the driver (no line-ending translation): whatever has
@@ -47,12 +51,12 @@ int raw_read(uint8_t* buf, size_t n, TickType_t ticks) {
 #elif CONFIG_ESP_CONSOLE_UART
     // uart_read_bytes waits for all `n` bytes: wait for one, then take the
     // rest that is already buffered.
-    const int first = uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, buf, 1, ticks);
+    const int first = uart_read_bytes(kUart, buf, 1, ticks);
     if (first <= 0) return first;
     size_t avail = 0;
-    uart_get_buffered_data_len(CONFIG_ESP_CONSOLE_UART_NUM, &avail);
+    uart_get_buffered_data_len(kUart, &avail);
     avail = std::min(avail, n - 1);
-    const int more = avail > 0 ? uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, buf + 1, avail, 0) : 0;
+    const int more = avail > 0 ? uart_read_bytes(kUart, buf + 1, avail, 0) : 0;
     return 1 + std::max(more, 0);
 #else
     (void)buf;
