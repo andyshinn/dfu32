@@ -10,6 +10,7 @@
 #include "api/api.hpp"
 #include "config/config.hpp"
 #include "console.hpp"
+#include "console_io.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/image.hpp"
 #include "esp_app_desc.h"
@@ -209,9 +210,13 @@ extern "C" void app_main(void) {
     // (or `improv start`) opens it later.
     if (net_ok && !dfu32::improv::init()) ESP_LOGE(TAG, "Improv BLE init failed");
     if (net_ok && !dfu32::net::status().provisioned) {
-        ESP_LOGI(TAG, "no WiFi network stored: set one over Improv BLE, or with `wifi <ssid> <password>`");
+        ESP_LOGI(TAG, "no WiFi network stored: set one from the installer page (Improv Serial), over Improv BLE, "
+                      "or with `wifi <ssid> <password>`");
         dfu32::improv::open(dfu32::improv::Window::Unprovisioned);
     }
+    // The console reader, and Improv Serial with it, as early as the network
+    // allows: the installer page asks within seconds of resetting the board.
+    if (!dfu32::console_io::start()) ESP_LOGE(TAG, "console input failed to start");
 
     dfu32::indicator::Hooks hooks;
     hooks.improv_active = [] { return dfu32::improv::active(); };

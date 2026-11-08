@@ -1,14 +1,15 @@
 # improv: Improv Wi-Fi provisioning (SPEC.md §9.2). The core (packet handling,
 # state machine) and the vendored improv-wifi/sdk-cpp are pure C++ and build as
-# a plain CMake library for host tests; the Improv BLE transport (NimBLE GATT
-# server) is added only in the firmware build.
+# a plain CMake library for host tests; the transports (Improv BLE over a
+# NimBLE GATT server, Improv Serial on the console port) are firmware-only.
 set(IMPROV_PURE_SRCS
     src/core.cpp
+    src/serial_frame.cpp
     third_party/sdk-cpp/improv.cpp
 )
 
 if(ESP_PLATFORM)
-    idf_component_register(SRCS ${IMPROV_PURE_SRCS} "src/improv_ble.cpp"
+    idf_component_register(SRCS ${IMPROV_PURE_SRCS} "src/attempt.cpp" "src/improv_ble.cpp" "src/improv_serial.cpp"
                            INCLUDE_DIRS include
                            PRIV_INCLUDE_DIRS third_party/sdk-cpp
                            PRIV_REQUIRES bt esp_app_format esp_timer job net)

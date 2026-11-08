@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "NimBLEDevice.h"
+#include "attempt.hpp"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -101,10 +102,7 @@ RpcAssembler g_rpc_buf;
 struct Session {
     bool active = false;
     uint32_t window_gen = 0;      // bumped by every open/close/re-arm; stale timer messages are ignored
-    bool connecting = false;
-    int64_t connect_deadline_us = 0;
-    bool had_previous = false;    // a network was set before this attempt
-    std::string previous_ssid, previous_password, trying_ssid;
+    Attempt attempt;              // the WiFi connection attempt, if any
     int64_t close_at_us = 0;      // 0 = no close scheduled
 };
 Session g_s;
@@ -159,17 +157,7 @@ void Host::publish_result(std::span<const uint8_t> packet) {
 }
 
 bool Host::begin_connect(const std::string& ssid, const std::string& password) {
-    g_s.had_previous = net::stored_credentials(g_s.previous_ssid, g_s.previous_password);
-    // RAM only until it connects: a power cut mid-attempt keeps the old network.
-    if (!net::try_credentials(ssid, password)) {
-        ESP_LOGE(TAG, "could not apply the WiFi settings");
-        return false;
-    }
-    g_s.connecting = true;
-    g_s.trying_ssid = ssid;
-    g_s.connect_deadline_us = now_us() + kConnectWaitUs;
-    ESP_LOGI(TAG, "WiFi settings received for \"%s\"; connecting", ssid.c_str());
-    return true;
+    return g_s.attempt.begin(ssid, password, kConnectWaitUs);
 }
 
 void Host::identify() {
@@ -183,24 +171,12 @@ DeviceInfo Host::device_info() {
 
 /// Ends the connection attempt: keep the new network, or go back to the old one.
 void finish_connect(bool ok) {
-    g_s.connecting = false;
     if (ok) {
-        if (!net::commit_credentials()) ESP_LOGW(TAG, "connected, but saving the network failed; it is lost on reboot");
-        wipe(g_s.previous_password);
-        const std::string url = "http://" + net::status().ip + "/";
-        ESP_LOGI(TAG, "joined \"%s\"; provisioned, redirect %s", g_s.trying_ssid.c_str(), url.c_str());
-        g_core.connect_succeeded(url);
+        g_core.connect_succeeded(g_s.attempt.keep());
         g_s.close_at_us = now_us() + kCloseAfterProvisionUs;
         return;
     }
-    ESP_LOGW(TAG, "could not join \"%s\"; %s", g_s.trying_ssid.c_str(),
-             g_s.had_previous ? "going back to the previous network" : "clearing it again");
-    if (g_s.had_previous) {
-        net::set_credentials(g_s.previous_ssid, g_s.previous_password);
-    } else {
-        net::forget();
-    }
-    wipe(g_s.previous_password);
+    g_s.attempt.give_up();
     g_core.connect_failed();
 }
 
@@ -235,7 +211,7 @@ bool do_open(Window why) {
 
 void do_close() {
     if (!g_s.active) return;
-    if (g_s.connecting) finish_connect(false);  // closed mid-attempt: put the old network back
+    if (g_s.attempt.active()) finish_connect(false);  // closed mid-attempt: put the old network back
     ++g_s.window_gen;                           // any queued timer message is now stale
     esp_timer_stop(g_window_timer);
     g_s.close_at_us = 0;
@@ -281,19 +257,18 @@ void handle(Msg& m) {
 }
 
 void poll() {
-    if (g_s.connecting) {
-        if (net::status().connected) {
-            finish_connect(true);
-        } else if (now_us() >= g_s.connect_deadline_us) {
-            finish_connect(false);
-        }
+    switch (g_s.attempt.poll()) {
+        case Attempt::Poll::Joined: finish_connect(true); break;
+        case Attempt::Poll::TimedOut: finish_connect(false); break;
+        case Attempt::Poll::Idle:
+        case Attempt::Poll::Pending: break;
     }
     if (g_s.close_at_us != 0 && now_us() >= g_s.close_at_us) do_close();
 }
 
 void improv_task(void*) {
     for (;;) {
-        const bool busy = g_s.connecting || g_s.close_at_us != 0;
+        const bool busy = g_s.attempt.active() || g_s.close_at_us != 0;
         Msg* raw = nullptr;
         if (xQueueReceive(g_queue, &raw, busy ? kPollTicks : portMAX_DELAY) == pdTRUE && raw != nullptr) {
             std::unique_ptr<Msg> m(raw);

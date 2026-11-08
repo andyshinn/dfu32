@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "console.cpp"
+        "console_io.cpp"
         "main.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
@@ -12,6 +13,9 @@ idf_component_register(
         dfu_proto
         dfu32_core
         esp_app_format
+        esp_driver_uart
+        esp_driver_usb_serial_jtag
+        esp_stdio
         esp_partition
         esp_psram
         mbedtls
@@ -24,4 +28,5 @@ idf_component_register(
         nvs_flash
         runlog
         staging
+        vfs
 )

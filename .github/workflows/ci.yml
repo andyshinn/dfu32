@@ -34,6 +34,11 @@ jobs:
       - name: Python tool tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 
+      # Generated from the lock files; fails if a dependency changed without
+      # regenerating it, or has no license entry (MILESTONES M5).
+      - name: Third-party notices
+        run: python3 tools/dfu32_notices.py --check
+
       - name: Configure
         run: cmake -S test/host -B build-host -G Ninja
 
@@ -317,6 +322,7 @@ jobs:
           echo "### Installer page: $versions" >> "$GITHUB_STEP_SUMMARY"
           # ESP Web Tools from the npm tarball, checked against a pinned SHA-256.
           python3 tools/fetch_esp_web_tools.py --site _site
+          cp THIRD_PARTY_NOTICES _site/THIRD_PARTY_NOTICES.txt
           find _site -type f | sort
 
       # pages-gate ran before this job waited for the pages concurrency group,
@@ -346,7 +352,8 @@ jobs:
         uses: actions/deploy-pages@v5
 
   # Fresh-install images for esptool users, on every published release
-  # (pre-releases included). They reset settings; the page never uses them.
+  # (pre-releases included), with THIRD_PARTY_NOTICES. They reset settings;
+  # the page never uses them.
   # They appear once the firmware matrix finishes, a few minutes after the
   # release is published; until then releases/latest/download/... 404s.
   # --clobber lets a re-run of this job (after a failed upload) replace a
@@ -359,13 +366,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: THIRD_PARTY_NOTICES
+          sparse-checkout-cone-mode: false
+
       - name: Download firmware
         uses: actions/download-artifact@v8
         with:
           pattern: dfu32-*
           path: artifacts
 
-      - name: Attach merged images
+      - name: Attach merged images and notices
         env:
           GH_TOKEN: ${{ github.token }}
           BOARDS: ${{ needs.boards.outputs.boards }}
@@ -375,4 +387,5 @@ jobs:
           for b in $(jq -r '.[]' <<<"$BOARDS"); do
             files+=("artifacts/dfu32-$b/build/$b/dfu32-$b-merged.bin")
           done
+          files+=(THIRD_PARTY_NOTICES)
           gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

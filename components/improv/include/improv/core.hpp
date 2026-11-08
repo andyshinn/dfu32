@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
 // Transport-agnostic Improv Wi-Fi core (SPEC.md §9.2). The transport (Improv
-// BLE now, Improv Serial in M5) hands it complete RPC packets and publishes
-// what it reports; the device side connects to the network and reports back.
+// BLE or Improv Serial) hands it complete RPC packets and publishes what it
+// reports; the device side connects to the network and reports back.
 // Packet parsing uses the vendored improv-wifi/sdk-cpp. Pure C++, host-tested.
 #pragma once
 
@@ -34,11 +34,25 @@ enum class Error : uint8_t {
 
 // RPC commands DFU32 answers.
 inline constexpr uint8_t kCmdWifiSettings = 0x01;
-inline constexpr uint8_t kCmdIdentify = 0x02;     // BLE; on Serial 0x02 is "get current state"
+inline constexpr uint8_t kCmdIdentify = 0x02;         // BLE only
+inline constexpr uint8_t kCmdGetCurrentState = 0x02;  // Serial only (same value as identify)
 inline constexpr uint8_t kCmdGetDeviceInfo = 0x03;
+inline constexpr uint8_t kCmdGetWifiNetworks = 0x04;  // Serial only
+
+/// The two transports differ in a few details: a BLE RPC packet ends with its
+/// own checksum (a serial frame has one around it instead), command 0x02 is
+/// "identify" on BLE but "get current state" on Serial, and only Serial lists
+/// WiFi networks.
+enum class Transport : uint8_t { Ble, Serial };
 
 /// Largest RPC packet accepted (a WiFi-settings packet is at most 101 bytes).
 inline constexpr size_t kMaxPacket = 200;
+
+struct Network {
+    std::string ssid;
+    int rssi = 0;       // dBm
+    bool secured = false;
+};
 
 struct DeviceInfo {
     std::string firmware;   // "DFU32"
@@ -62,18 +76,28 @@ public:
     virtual bool begin_connect(const std::string& ssid, const std::string& password) = 0;
     virtual void identify() = 0;
     virtual DeviceInfo device_info() = 0;
+    /// Serial "get current state": true with the device's URL while it is on
+    /// a network (it then reports provisioned).
+    virtual bool online_url(std::string& url) {
+        (void)url;
+        return false;
+    }
+    /// Serial "get WiFi networks": scans (may block for a few seconds).
+    virtual std::vector<Network> scan_networks() { return {}; }
 };
 
 class Core {
 public:
-    explicit Core(IHost& host) : host_(host) {}
+    explicit Core(IHost& host, Transport transport = Transport::Ble) : host_(host), transport_(transport) {}
 
     /// Begins a session: Authorized (DFU32 has no authorisation step; the
-    /// window itself is the physical control, SPEC.md §9.2).
-    void start();
+    /// window itself is the physical control, SPEC.md §9.2). `announce`
+    /// publishes the state; Improv Serial starts quietly at boot and answers
+    /// only when asked, so a terminal doesn't show a frame on every boot.
+    void start(bool announce = true);
     void stop();
 
-    /// One complete RPC packet: command, length, data, checksum.
+    /// One complete RPC packet: command, length, data, and (BLE only) checksum.
     void handle_rpc(std::span<const uint8_t> packet);
 
     /// From the device, after begin_connect().
@@ -86,8 +110,11 @@ public:
 private:
     void set_state(State s);
     void set_error(Error e);
+    void publish(uint8_t command, const std::vector<std::string>& strings);
+    void report_current_state();
 
     IHost& host_;
+    Transport transport_;
     State state_ = State::Stopped;
     Error error_ = Error::None;
 };
@@ -108,8 +135,10 @@ private:
     bool complete_ = false;
 };
 
-/// Encodes an RPC result (command + strings, with checksum), as the SDK does.
-std::vector<uint8_t> encode_result(uint8_t command, const std::vector<std::string>& strings);
+/// Encodes an RPC result (command + strings), as the SDK does: with a
+/// trailing checksum for BLE, without one for Serial.
+std::vector<uint8_t> encode_result(uint8_t command, const std::vector<std::string>& strings,
+                                   Transport transport = Transport::Ble);
 
 /// Overwrites buffers that held a WiFi passphrase before they are freed
 /// (through a volatile pointer, so the stores aren't optimised away).

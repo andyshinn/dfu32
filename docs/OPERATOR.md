@@ -4,7 +4,9 @@ This is the everyday path: one DFU32 next to a MeshCore repeater, firmware serve
 
 ## 1. Put DFU32 on your network
 
-A DFU32 with no WiFi stored opens **Improv BLE** by itself; its NeoPixel blinks white slowly.
+If you installed DFU32 from the installer page ([dfu32.app](https://dfu32.app/)), the page asks for your network right after installing and then links to the device's web UI: skip to §2. To change the network later the same way, connect the board over USB, click the install button and choose **Change Wi-Fi**.
+
+Otherwise, a DFU32 with no WiFi stored opens **Improv BLE** by itself; its NeoPixel blinks white slowly.
 
 1. Open the Home Assistant companion app (Settings → Devices → Discovered), or https://www.improv-wifi.com/ in desktop Chrome or Edge.
 2. Pick **DFU32** (or `dfu32-xxxx`) and enter your network's name and passphrase. DFU32 joins **WPA2-Personal** and open networks; a WPA2/WPA3 mixed network works, a WPA3-only one doesn't.

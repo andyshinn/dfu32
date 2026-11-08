@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <vector>
 
 #include "dfu32_core/target_config.hpp"
 #include "esp_event.h"
@@ -285,6 +286,40 @@ bool stored_credentials(std::string& ssid, std::string& password) {
     ssid.assign(reinterpret_cast<const char*>(cfg.sta.ssid), strnlen(reinterpret_cast<const char*>(cfg.sta.ssid), 32));
     password.assign(reinterpret_cast<const char*>(cfg.sta.password),
                     strnlen(reinterpret_cast<const char*>(cfg.sta.password), 64));
+    return true;
+}
+
+bool scan(std::vector<ScanResult>& out, size_t max) {
+    out.clear();
+    if (!s_init || s_stopped) return false;
+    if (provisioned() && s_link != kAssociated) return false;  // joining (or about to retry)
+    wifi_scan_config_t cfg{};
+    cfg.show_hidden = false;
+    const esp_err_t err = esp_wifi_scan_start(&cfg, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi scan: %s", esp_err_to_name(err));
+        return false;
+    }
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    n = std::min<uint16_t>(n, 32);
+    std::vector<wifi_ap_record_t> recs(n);
+    if (n > 0 && esp_wifi_scan_get_ap_records(&n, recs.data()) != ESP_OK) n = 0;
+    if (n == 0) esp_wifi_clear_ap_list();  // frees the driver's list when nothing was read
+    recs.resize(n);
+    std::sort(recs.begin(), recs.end(),
+              [](const wifi_ap_record_t& a, const wifi_ap_record_t& b) { return a.rssi > b.rssi; });
+    // Strongest first, so the first record of each SSID is its best.
+    for (const wifi_ap_record_t& r : recs) {
+        const auto* name = reinterpret_cast<const char*>(r.ssid);
+        const std::string ssid(name, strnlen(name, sizeof(r.ssid)));
+        if (ssid.empty()) continue;
+        bool seen = false;
+        for (const ScanResult& e : out) seen = seen || e.ssid == ssid;
+        if (seen) continue;
+        out.push_back({ssid, r.rssi, r.authmode != WIFI_AUTH_OPEN});
+        if (out.size() >= max) break;
+    }
     return true;
 }
 

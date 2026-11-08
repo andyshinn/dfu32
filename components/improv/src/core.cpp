@@ -2,6 +2,7 @@
 #include "improv/core.hpp"
 
 #include <cctype>
+#include <string>
 
 #include "improv.h"  // vendored improv-wifi/sdk-cpp
 
@@ -10,7 +11,8 @@ namespace dfu32::improv {
 static_assert(static_cast<uint8_t>(State::Provisioned) == ::improv::STATE_PROVISIONED);
 static_assert(static_cast<uint8_t>(Error::UnableToConnect) == ::improv::ERROR_UNABLE_TO_CONNECT);
 static_assert(kCmdWifiSettings == ::improv::WIFI_SETTINGS && kCmdIdentify == ::improv::IDENTIFY &&
-              kCmdGetDeviceInfo == ::improv::GET_DEVICE_INFO);
+              kCmdGetCurrentState == ::improv::GET_CURRENT_STATE && kCmdGetDeviceInfo == ::improv::GET_DEVICE_INFO &&
+              kCmdGetWifiNetworks == ::improv::GET_WIFI_NETWORKS);
 
 void Core::set_state(State s) {
     state_ = s;
@@ -22,19 +24,28 @@ void Core::set_error(Error e) {
     host_.publish_error(e);
 }
 
-void Core::start() {
+void Core::start(bool announce) {
     error_ = Error::None;
-    set_state(State::Authorized);
+    if (announce) {
+        set_state(State::Authorized);
+    } else {
+        state_ = State::Authorized;
+    }
 }
 
 void Core::stop() {
     if (state_ != State::Stopped) set_state(State::Stopped);
 }
 
+void Core::publish(uint8_t command, const std::vector<std::string>& strings) {
+    host_.publish_result(encode_result(command, strings, transport_));
+}
+
 void Core::handle_rpc(std::span<const uint8_t> packet) {
     if (state_ == State::Stopped) return;
     if (error_ != Error::None) set_error(Error::None);  // a new command clears the last error
-    if (packet.size() < 3 || packet.size() > kMaxPacket) {
+    const bool checksummed = transport_ == Transport::Ble;
+    if (packet.size() < (checksummed ? 3U : 2U) || packet.size() > kMaxPacket) {
         set_error(Error::InvalidRpc);
         return;
     }
@@ -42,7 +53,7 @@ void Core::handle_rpc(std::span<const uint8_t> packet) {
     // in range (README.md next to the vendored copy).
     std::vector<uint8_t> copy(packet.begin(), packet.end());
     copy.push_back(0);
-    ::improv::ImprovCommand cmd = ::improv::parse_improv_data(copy.data(), packet.size(), true);
+    ::improv::ImprovCommand cmd = ::improv::parse_improv_data(copy.data(), packet.size(), checksummed);
     wipe(copy);  // may hold a passphrase
     struct WipeOnExit {
         std::string& s;
@@ -65,13 +76,28 @@ void Core::handle_rpc(std::span<const uint8_t> packet) {
             if (!host_.begin_connect(cmd.ssid, cmd.password)) connect_failed();
             return;
         }
-        case ::improv::IDENTIFY:
-            host_.identify();
+        case ::improv::IDENTIFY:  // == GET_CURRENT_STATE
+            if (transport_ == Transport::Serial) {
+                report_current_state();
+            } else {
+                host_.identify();
+            }
             return;
         case ::improv::GET_DEVICE_INFO: {
             const DeviceInfo d = host_.device_info();
-            const auto out = encode_result(kCmdGetDeviceInfo, {d.firmware, d.version, d.chip, d.name});
-            host_.publish_result(out);
+            publish(kCmdGetDeviceInfo, {d.firmware, d.version, d.chip, d.name});
+            return;
+        }
+        case ::improv::GET_WIFI_NETWORKS: {
+            if (transport_ != Transport::Serial) {
+                set_error(Error::UnknownRpc);
+                return;
+            }
+            // One result per network, then an empty one to end the list.
+            for (const Network& n : host_.scan_networks()) {
+                publish(kCmdGetWifiNetworks, {n.ssid, std::to_string(n.rssi), n.secured ? "YES" : "NO"});
+            }
+            publish(kCmdGetWifiNetworks, {});
             return;
         }
         case ::improv::UNKNOWN:       // length field disagrees with the packet
@@ -84,11 +110,27 @@ void Core::handle_rpc(std::span<const uint8_t> packet) {
     }
 }
 
+void Core::report_current_state() {
+    // Always answer with a state packet, even an unchanged one: that's what
+    // the client waits for. While connecting the attempt decides what's next.
+    if (state_ == State::Provisioning) {
+        host_.publish_state(state_);
+        return;
+    }
+    std::string url;
+    if (host_.online_url(url)) {
+        set_state(State::Provisioned);
+        publish(kCmdGetCurrentState, {url});
+    } else {
+        set_state(State::Authorized);
+    }
+}
+
 void Core::connect_succeeded(const std::string& redirect_url) {
     if (state_ != State::Provisioning) return;
     // The result (with the URL) goes out before the state change, so a client
     // that reacts to "provisioned" can already read where to go.
-    host_.publish_result(encode_result(kCmdWifiSettings, {redirect_url}));
+    publish(kCmdWifiSettings, {redirect_url});
     set_state(State::Provisioned);
 }
 
@@ -122,8 +164,13 @@ RpcAssembler::Status RpcAssembler::push(std::span<const uint8_t> chunk) {
     return Status::Complete;
 }
 
-std::vector<uint8_t> encode_result(uint8_t command, const std::vector<std::string>& strings) {
-    return ::improv::build_rpc_response(static_cast<::improv::Command>(command), strings, true);
+std::vector<uint8_t> encode_result(uint8_t command, const std::vector<std::string>& strings, Transport transport) {
+    const bool checksum = transport == Transport::Ble;
+    std::vector<uint8_t> out =
+        ::improv::build_rpc_response(static_cast<::improv::Command>(command), strings, checksum);
+    // Without a checksum the SDK still leaves room for one (a zero byte).
+    if (!checksum && !out.empty()) out.pop_back();
+    return out;
 }
 
 void wipe(std::span<uint8_t> bytes) noexcept {

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace dfu32::net {
 
@@ -46,6 +47,17 @@ bool commit_credentials();
 /// The network in use (stored, or being tried), so a failed Improv attempt
 /// can put the previous one back. False when none is set.
 bool stored_credentials(std::string& ssid, std::string& password);
+
+struct ScanResult {
+    std::string ssid;
+    int rssi = 0;          // dBm
+    bool secured = false;  // anything but an open network
+};
+/// Active WiFi scan (blocks for about 2 s): one entry per SSID at its
+/// strongest, strongest first, hidden networks left out, at most `max`.
+/// False (and nothing scanned) while stopped for a transfer, or while a
+/// stored network is being joined: a scan would get in the way of that.
+bool scan(std::vector<ScanResult>& out, size_t max = 20);
 
 /// Blocks until connected or `timeout_ms` passes.
 bool wait_connected(uint32_t timeout_ms);

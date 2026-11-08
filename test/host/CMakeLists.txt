@@ -30,6 +30,7 @@ add_executable(dfu_proto_tests
     test_crc16.cpp
     test_image.cpp
     test_improv.cpp
+    test_improv_serial.cpp
     test_indicator.cpp
     test_init_packet.cpp
     test_job.cpp
