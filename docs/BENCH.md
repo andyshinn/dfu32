@@ -426,14 +426,15 @@ Improv Serial shares the console port with the REPL (SPEC §9.2). Before the ins
 
    The output has "dropped a cut-off Improv frame" and then the `wifi` status: the command after the broken frame ran.
 6. **During a flash:** while an API flash is armed or transferring, WiFi settings from improv-wifi.com fail with "unable to connect" and the log says the radio is in use; the network list is empty. Nothing else changes.
-7. **Ctrl+C:** `scan 20` in the monitor, then Ctrl+C: it still aborts.
-8. **Feather V2** (UART console): repeat 1, 4 and 5 on it.
+7. **BLE window closing mid-attempt:** with no network stored (Improv BLE opens by itself), send WiFi settings for an unreachable network from improv-wifi.com, and run `improv stop` within the 25 s. The log says "the attempt keeps the BLE lease", and a `POST /flash` meanwhile answers `409` until the attempt fails; then it is accepted.
+8. **Ctrl+C:** `scan 20` in the monitor, then Ctrl+C: it still aborts.
+9. **Feather V2** (UART console): repeat 1, 4 and 5 on it.
 
 Once `main` has it, the installer page itself (MILESTONES M5 bench):
 
-9. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens the claim screen.
-10. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
-11. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
+10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens the claim screen.
+11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
+12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 
 ## Bench results so far
 
