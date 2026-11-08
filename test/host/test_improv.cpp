@@ -205,3 +205,24 @@ TEST_CASE("Improv: chip names", "[improv]") {
     CHECK(chip_name("esp32") == "ESP32");
     CHECK(chip_name("esp32c6") == "ESP32-C6");
 }
+
+TEST_CASE("Improv: passphrase buffers are wiped", "[improv]") {
+    std::vector<uint8_t> v{'s', 'e', 'c', 'r', 'e', 't'};
+    wipe(v);
+    CHECK(v == std::vector<uint8_t>(6, 0));
+    std::string s = "hunter2hunter2";
+    wipe(s);
+    CHECK(s == std::string(14, '\0'));
+
+    RpcAssembler a;
+    const auto p = wifi("Net", "password1");
+    REQUIRE(a.push(std::span<const uint8_t>(p).subspan(0, 5)) == RpcAssembler::Status::Incomplete);
+    const uint8_t* data = a.packet().data();
+    const size_t n = a.packet().size();
+    std::vector<uint8_t> before(data, data + n);
+    a.reset();
+    CHECK(a.packet().empty());
+    // The storage is kept by clear(); its bytes are zero now.
+    for (size_t i = 0; i < n; ++i) CHECK(data[i] == 0);
+    CHECK(before != std::vector<uint8_t>(n, 0));
+}

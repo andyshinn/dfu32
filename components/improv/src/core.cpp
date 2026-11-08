@@ -42,7 +42,12 @@ void Core::handle_rpc(std::span<const uint8_t> packet) {
     // in range (README.md next to the vendored copy).
     std::vector<uint8_t> copy(packet.begin(), packet.end());
     copy.push_back(0);
-    const ::improv::ImprovCommand cmd = ::improv::parse_improv_data(copy.data(), packet.size(), true);
+    ::improv::ImprovCommand cmd = ::improv::parse_improv_data(copy.data(), packet.size(), true);
+    wipe(copy);  // may hold a passphrase
+    struct WipeOnExit {
+        std::string& s;
+        ~WipeOnExit() { wipe(s); }
+    } guard{cmd.password};
 
     switch (cmd.command) {
         case ::improv::WIFI_SETTINGS: {
@@ -93,21 +98,24 @@ void Core::connect_failed() {
     set_state(State::Authorized);
 }
 
+void RpcAssembler::reset() noexcept {
+    wipe(buf_);
+    buf_.clear();
+    complete_ = false;
+}
+
 RpcAssembler::Status RpcAssembler::push(std::span<const uint8_t> chunk) {
-    if (complete_) {
-        buf_.clear();
-        complete_ = false;
-    }
+    if (complete_) reset();
     buf_.insert(buf_.end(), chunk.begin(), chunk.end());
     if (buf_.size() > kMaxPacket) {
-        buf_.clear();
+        reset();
         return Status::TooLong;
     }
     if (buf_.size() < 2) return Status::Incomplete;
     const size_t need = size_t{buf_[1]} + 3;  // command, length, data, checksum
     if (buf_.size() < need) return Status::Incomplete;
     if (buf_.size() > need) {  // trailing bytes: not a packet we understand
-        buf_.clear();
+        reset();
         return Status::TooLong;
     }
     complete_ = true;
@@ -116,6 +124,16 @@ RpcAssembler::Status RpcAssembler::push(std::span<const uint8_t> chunk) {
 
 std::vector<uint8_t> encode_result(uint8_t command, const std::vector<std::string>& strings) {
     return ::improv::build_rpc_response(static_cast<::improv::Command>(command), strings, true);
+}
+
+void wipe(std::span<uint8_t> bytes) noexcept {
+    volatile uint8_t* p = bytes.data();
+    for (size_t i = 0; i < bytes.size(); ++i) p[i] = 0;
+}
+
+void wipe(std::string& s) noexcept {
+    volatile char* p = s.data();
+    for (size_t i = 0; i < s.size(); ++i) p[i] = 0;
 }
 
 std::string chip_name(std::string_view idf_target) {

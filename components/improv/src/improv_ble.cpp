@@ -54,6 +54,7 @@ struct Msg {
     std::vector<uint8_t> data;        // Write
     SemaphoreHandle_t reply = nullptr;  // Open: given once `ok` is set
     bool* ok = nullptr;
+    ~Msg() { wipe(data); }  // a WiFi-settings write carries the passphrase
 };
 
 QueueHandle_t g_queue = nullptr;
@@ -185,6 +186,7 @@ void finish_connect(bool ok) {
     g_s.connecting = false;
     if (ok) {
         if (!net::commit_credentials()) ESP_LOGW(TAG, "connected, but saving the network failed; it is lost on reboot");
+        wipe(g_s.previous_password);
         const std::string url = "http://" + net::status().ip + "/";
         ESP_LOGI(TAG, "joined \"%s\"; provisioned, redirect %s", g_s.trying_ssid.c_str(), url.c_str());
         g_core.connect_succeeded(url);
@@ -198,7 +200,7 @@ void finish_connect(bool ok) {
     } else {
         net::forget();
     }
-    g_s.previous_password.assign(g_s.previous_password.size(), '\0');
+    wipe(g_s.previous_password);
     g_core.connect_failed();
 }
 

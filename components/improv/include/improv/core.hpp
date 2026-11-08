@@ -100,7 +100,8 @@ public:
     /// next push() starts a new one. TooLong: the buffer was discarded.
     Status push(std::span<const uint8_t> chunk);
     std::span<const uint8_t> packet() const { return buf_; }
-    void reset() { buf_.clear(); }
+    /// Clears (and wipes) the buffer.
+    void reset() noexcept;
 
 private:
     std::vector<uint8_t> buf_;
@@ -109,6 +110,11 @@ private:
 
 /// Encodes an RPC result (command + strings, with checksum), as the SDK does.
 std::vector<uint8_t> encode_result(uint8_t command, const std::vector<std::string>& strings);
+
+/// Overwrites buffers that held a WiFi passphrase before they are freed
+/// (through a volatile pointer, so the stores aren't optimised away).
+void wipe(std::span<uint8_t> bytes) noexcept;
+void wipe(std::string& s) noexcept;
 
 /// "ESP32-S3" from CONFIG_IDF_TARGET's "esp32s3".
 std::string chip_name(std::string_view idf_target);
