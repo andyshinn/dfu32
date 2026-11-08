@@ -6,6 +6,9 @@ sdkconfig.old
 # Personal CMake presets (idf.py reads them next to CMakePresets.json)
 CMakeUserPresets.json
 
+# Installer page: ESP Web Tools copied in by tools/fetch_esp_web_tools.py
+web/vendor/
+
 # Host tests
 build-host*/
 

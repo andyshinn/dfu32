@@ -147,6 +147,14 @@ def build_manifest(build_dir: Path, board: str, site: Path, version: str | None 
         if notice:
             manifest["dfu32_erase_notice"] = notice
 
+    # The per-version directory is what keeps cached parts from mixing builds,
+    # so two different builds must never land in one directory (the same
+    # version built twice, or two versions whose slugs collide).
+    for p in parts:
+        dest = site / p["path"]
+        if dest.exists() and dest.read_bytes() != p["src"].read_bytes():
+            raise ManifestError(f"{dest} already exists with different content: two builds share version "
+                                f"directory {part_dir.parent.name}")
     (site / part_dir).mkdir(parents=True, exist_ok=True)
     for p in parts:
         shutil.copyfile(p["src"], site / p["path"])

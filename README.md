@@ -24,6 +24,12 @@ To flash without the page, each release carries a merged image per board, `dfu32
 esptool.py --chip auto -p PORT write_flash 0x0 dfu32-feather_esp32s3-merged.bin
 ```
 
+To preview the page locally, copy in ESP Web Tools (from a hash-pinned npm tarball; `web/vendor/` is git-ignored) and serve `web/`. Localhost counts as a secure context, so Web Serial works; the manifests only exist on the deployed site.
+
+```bash
+python3 tools/fetch_esp_web_tools.py --site web && python3 -m http.server -d web 8000
+```
+
 ## Building the firmware
 
 You need ESP-IDF **v6.1** (for example installed with `eim`). Activate it in your shell, then pick a board profile with `--preset`. Each profile sets the chip target, flash size, partition table, PSRAM, console and pins, so **don't run `idf.py set-target`**. Each preset (see [CMakePresets.json](CMakePresets.json)) builds in its own directory, `build/<profile>`:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_partitions as cp  # noqa: E402
 import dfu32_web_manifest as wm  # noqa: E402
+import fetch_esp_web_tools as fewt  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -154,6 +156,19 @@ class Manifest(unittest.TestCase):
             with self.assertRaisesRegex(wm.ManifestError, "dfu32.bin not found"):
                 wm.build_manifest(b.dir, "feather_esp32s3", b.site)
 
+    def test_rerun_same_build_is_fine(self):
+        with Build() as b:
+            wm.build_manifest(b.dir, "feather_esp32s3", b.site)
+            wm.build_manifest(b.dir, "feather_esp32s3", b.site)
+
+    def test_two_builds_in_one_version_dir_fail(self):
+        # "1.0+a" and "1.0_a" share the slug 1.0_a; the second build differs.
+        with Build() as b:
+            wm.build_manifest(b.dir, "feather_esp32s3", b.site, version="1.0+a")
+            (b.dir / "dfu32.bin").write_bytes(b"other app")
+            with self.assertRaisesRegex(wm.ManifestError, "two builds share version directory 1.0_a"):
+                wm.build_manifest(b.dir, "feather_esp32s3", b.site, version="1.0_a")
+
     def test_erase_notice(self):
         with Build() as b:
             base = b.baseline({"4mb.csv": "Updating from v0.3.x needs an erase.", "8mb.csv": None})
@@ -185,6 +200,21 @@ class Manifest(unittest.TestCase):
         with Build(debug=True) as b, contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(wm.main([str(b.dir), "--board", "feather_esp32s3", "--site", str(b.site)]), 1)
             self.assertIn("debug build", err.getvalue())
+
+
+class Page(unittest.TestCase):
+    """web/index.html against the rest of the repo."""
+    HTML = (REPO / "web" / "index.html").read_text()
+
+    def test_boards_match_presets(self):
+        # A preset missing here would be built and published but never offered.
+        presets = {p["name"] for p in json.loads((REPO / "CMakePresets.json").read_text())["configurePresets"]}
+        block = re.search(r"const BOARDS = \[(.*?)\];", self.HTML, re.S).group(1)
+        self.assertEqual(set(re.findall(r"id: '([a-z0-9_]+)'", block)), presets)
+
+    def test_esp_web_tools_path_matches_fetch_tool(self):
+        self.assertIn(f'src="vendor/esp-web-tools-{fewt.VERSION}/install-button.js"', self.HTML)
+        self.assertNotRegex(self.HTML, r"<script[^>]+src=\"https?://")
 
 
 class PartitionBaseline(unittest.TestCase):

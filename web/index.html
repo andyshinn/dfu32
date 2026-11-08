@@ -11,7 +11,8 @@
   // before anything renders: web (default), unsupported or notallowed.
   document.documentElement.dataset.mode = !window.isSecureContext ? 'notallowed' : ('serial' in navigator ? 'web' : 'unsupported');
 </script>
-<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+<!-- ESP Web Tools, served from this site: tools/fetch_esp_web_tools.py copies it here from a hash-pinned npm tarball. -->
+<script type="module" src="vendor/esp-web-tools-10.4.0/install-button.js"></script>
 <style>
 :root {
   --bg: #fff; --surface: #fff; --surface-2: #f1f3f4;
@@ -220,7 +221,6 @@ footer a { color: var(--muted); }
     <a href="https://github.com/andyshinn/dfu32#readme">README</a>
     <a href="https://github.com/andyshinn/dfu32/blob/main/docs/OPERATOR.md">Operator guide</a>
     <a href="https://github.com/andyshinn/dfu32/blob/main/docs/RECOVERY.md">Recovery guide</a>
-    <a href="THIRD_PARTY_NOTICES.txt">Third-party notices</a>
     <a href="https://github.com/andyshinn/dfu32/blob/main/LICENSE">MIT licence</a>
   </footer>
 </main>
