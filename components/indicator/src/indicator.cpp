@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "indicator/logic.hpp"
 #include "iot_button.h"
@@ -72,8 +73,10 @@ Hooks g_hooks;
 led_indicator_handle_t g_neo = nullptr;
 led_indicator_handle_t g_red = nullptr;
 button_handle_t g_button = nullptr;
+// One clock for both the hold feedback and the release action, so the LED
+// never shows one level while the release triggers another.
 std::atomic<int64_t> g_pressed_at_us{0};       // 0 = not pressed
-std::atomic<uint8_t> g_pending{0};             // ButtonAction released, handled on the task
+QueueHandle_t g_actions = nullptr;             // ButtonAction, handled on the task in order
 
 uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
 
@@ -133,11 +136,14 @@ bool setup_red() {
 
 void on_press_down(void*, void*) { g_pressed_at_us = esp_timer_get_time(); }
 
-void on_press_up(void* handle, void*) {
-    g_pressed_at_us = 0;
-    const uint32_t held = iot_button_get_pressed_time(static_cast<button_handle_t>(handle));
+void on_press_up(void*, void*) {
+    const int64_t at = g_pressed_at_us.exchange(0);
+    if (at == 0) return;  // missed the press: do nothing rather than guess
+    const auto held = static_cast<uint32_t>((esp_timer_get_time() - at) / 1000);
     const ButtonAction a = classify_hold(held);
-    if (a != ButtonAction::None) g_pending = static_cast<uint8_t>(a);
+    if (a != ButtonAction::None && xQueueSend(g_actions, &a, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "button action dropped (previous ones still running)");
+    }
 }
 
 bool setup_button() {
@@ -185,7 +191,8 @@ void indicator_task(void*) {
     Output last{};
     bool first = true;
     for (;;) {
-        if (const uint8_t a = g_pending.exchange(0); a != 0) run_action(static_cast<ButtonAction>(a));
+        ButtonAction a;
+        while (xQueueReceive(g_actions, &a, 0) == pdTRUE) run_action(a);
 
         const job::Snapshot s = job::snapshot();
         const uint32_t now = uptime_s();
@@ -231,6 +238,8 @@ void indicator_task(void*) {
 
 bool start(const Hooks& hooks) {
     g_hooks = hooks;
+    g_actions = xQueueCreate(4, sizeof(ButtonAction));
+    if (g_actions == nullptr) return false;
     setup_neopixel();
     setup_red();
     setup_button();

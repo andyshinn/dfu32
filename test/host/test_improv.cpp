@@ -15,14 +15,16 @@ struct FakeHost : IHost {
     std::vector<std::vector<uint8_t>> results;
     std::string ssid, password;
     int connects = 0, identifies = 0;
+    bool connect_starts = true;
 
     void publish_state(State s) override { states.push_back(s); }
     void publish_error(Error e) override { errors.push_back(e); }
     void publish_result(std::span<const uint8_t> p) override { results.emplace_back(p.begin(), p.end()); }
-    void begin_connect(const std::string& s, const std::string& p) override {
+    bool begin_connect(const std::string& s, const std::string& p) override {
         ssid = s;
         password = p;
         ++connects;
+        return connect_starts;
     }
     void identify() override { ++identifies; }
     DeviceInfo device_info() override { return {"DFU32", "v0.4.0", "ESP32-S3", "dfu32-ab12"}; }
@@ -104,6 +106,20 @@ TEST_CASE("Improv: connection failure reports an error and allows a retry", "[im
     CHECK(c.error() == Error::None);  // a new command clears the error
     CHECK(h.connects == 2);
     CHECK(c.state() == State::Provisioning);
+}
+
+TEST_CASE("Improv: a connect that can't start doesn't leave the core provisioning", "[improv]") {
+    FakeHost h;
+    h.connect_starts = false;
+    Core c(h);
+    c.start();
+    c.handle_rpc(wifi("MyNetwork", "password1"));
+    CHECK(c.state() == State::Authorized);
+    CHECK(c.error() == Error::UnableToConnect);
+    h.connect_starts = true;
+    c.handle_rpc(wifi("MyNetwork", "password1"));  // accepted again at once
+    CHECK(c.state() == State::Provisioning);
+    CHECK(h.connects == 2);
 }
 
 TEST_CASE("Improv: open networks and credential limits", "[improv]") {

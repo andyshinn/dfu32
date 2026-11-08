@@ -57,7 +57,7 @@ void Core::handle_rpc(std::span<const uint8_t> packet) {
                 return;
             }
             set_state(State::Provisioning);
-            host_.begin_connect(cmd.ssid, cmd.password);
+            if (!host_.begin_connect(cmd.ssid, cmd.password)) connect_failed();
             return;
         }
         case ::improv::IDENTIFY:

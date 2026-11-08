@@ -748,15 +748,18 @@ int cmd_improv(int argc, char** argv) {
         return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "stop") == 0) {
-        improv::close();
-        std::printf("Improv BLE closing.\n");
+        std::printf("%s\n", improv::close() ? "Improv BLE closing." : "Improv BLE is not open.");
         return 0;
     }
-    static const char* const kStates[] = {"stopped", "awaiting authorization", "authorized (waiting for WiFi settings)",
-                                          "provisioning", "provisioned"};
-    const auto st = static_cast<unsigned>(improv::state());
-    std::printf("Improv BLE %s%s%s\n", improv::active() ? "open: " : "closed", improv::active() ? kStates[st < 5 ? st : 0] : "",
-                improv::active() ? "" : " (`improv start` opens it)");
+    static const char* const kStates[] = {"stopped", "awaiting authorization", "waiting for WiFi settings",
+                                          "connecting", "provisioned"};
+    const improv::Snapshot snap = improv::snapshot();
+    const auto st = static_cast<unsigned>(snap.state);
+    if (snap.active) {
+        std::printf("Improv BLE open: %s\n", st < 5 ? kStates[st] : "?");
+    } else {
+        std::printf("Improv BLE closed (`improv start` opens it)\n");
+    }
     return 0;
 }
 

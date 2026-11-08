@@ -5,6 +5,7 @@
 // console.
 #include <cinttypes>
 #include <cstdint>
+#include <cstring>
 
 #include "api/api.hpp"
 #include "config/config.hpp"
@@ -165,10 +166,33 @@ extern "C" void app_main(void) {
     };
     hooks.on_factory_reset = [] {
         // SPEC.md §9.3: settings and WiFi go; the staged image and run log stay.
-        const bool cfg = dfu32::config::erase_all();
-        const bool wifi = dfu32::net::forget();
-        ESP_LOGW(TAG, "factory reset: settings %s, WiFi %s; rebooting", cfg ? "erased" : "NOT erased",
-                 wifi ? "forgotten" : "NOT forgotten");
+        // Never in the middle of a flash (it would leave the target erased) or
+        // a console/API operation: those hold the BLE lease. Improv holding it
+        // is fine, the reboot ends it.
+        const char* holder = dfu32::job::holder();
+        const bool improv = holder != nullptr && std::strcmp(holder, "improv") == 0;
+        if (holder != nullptr && !improv) {
+            ESP_LOGE(TAG, "factory reset refused: %s is using BLE/staging; abort it (`job abort`) and hold again",
+                     holder);
+            return;
+        }
+        // Take the lease so no job can start while erasing.
+        if (!improv && !dfu32::job::try_acquire("reset")) {
+            ESP_LOGE(TAG, "factory reset refused: something just started; try again");
+            return;
+        }
+        if (!dfu32::config::erase_all()) {
+            ESP_LOGE(TAG, "factory reset failed: could not erase the settings; nothing else changed, not rebooting");
+            if (!improv) dfu32::job::release();
+            return;
+        }
+        if (!dfu32::net::forget()) {
+            ESP_LOGE(TAG, "factory reset incomplete: settings erased, but the WiFi credentials could not be "
+                          "cleared (`wifi forget`); not rebooting");
+            if (!improv) dfu32::job::release();
+            return;
+        }
+        ESP_LOGW(TAG, "factory reset: settings erased, WiFi forgotten; rebooting");
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
     };

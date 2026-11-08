@@ -431,7 +431,8 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
   - It holds the device-wide BLE lease while open, so a scan or flash can't start (`409 Busy`, holder `improv`; the console says to set WiFi first or `improv stop`). This is the `BLE_BUSY` precheck of §7.2.
   - There is no authorisation step: a session starts in "authorized". The window itself is the physical control (unprovisioned, or a button press).
   - RPCs: WiFi settings, identify (the NeoPixel blinks white for 10 s) and device info (`DFU32`, the firmware version, the chip, the hostname). Packets split across BLE writes are reassembled; anything over 200 bytes is refused.
-  - On WiFi settings it stores them and waits up to 30 s for an IP. On success it sends the redirect URL `http://<ip>/`, reports "provisioned", and closes 5 s later. On failure it reports "unable to connect" and puts the previous network back (or clears it again if there was none), so a typo doesn't strand a working device.
+  - On WiFi settings it tries them from RAM only (`esp_wifi_set_storage(RAM)`) and waits up to 30 s for an IP. On success it writes them to flash, sends the redirect URL `http://<ip>/`, reports "provisioned", and closes 5 s later. On failure, or a close mid-attempt, it reports "unable to connect" and puts the previous network back (or clears it again if there was none). A typo or a power cut during the attempt doesn't strand a working device.
+  - One task owns all Improv state (open, close, RPC writes, the advert, the connection attempt); NimBLE callbacks, the button and the console only post to it, and the 5-minute timer's messages carry a generation so a stale one is ignored.
   - Closing stops advertising, drops a connected client and releases the lease. The GATT service stays registered (removing it means a GATT reset); without advertising nobody finds it.
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
@@ -439,10 +440,10 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 
 - While unclaimed, `POST /api/v1/claim` returns a newly generated token **once**: 32 bytes from `esp_fill_random` with the radio on, encoded base64url. DFU32 stores its SHA-256.
 - While unclaimed, the mutating endpoints are disabled; only `GET /status`, `GET /`, and `/claim` work.
-- Button handling uses `espressif/button` (§4.1). What happens depends on how long the button was held when it is **released**, and the NeoPixel shows which action a release would trigger:
+- Button handling uses `espressif/button` (§4.1). What happens depends on how long the button was held when it is **released**, and the NeoPixel shows which action a release would trigger (both read the same press timestamp, so they always agree):
   - **2–5 s** (amber slow blink): open Improv BLE for 5 minutes (§9.2).
   - **Unclaim, 5–15 s** (amber fast blink): clears `token_sha256` without touching anything else.
-  - **Factory reset, 15 s or more** (solid amber): erases the `dfu32` namespace and WiFi credentials, then reboots. The staging partition and run log are kept.
+  - **Factory reset, 15 s or more** (solid amber): erases the `dfu32` namespace and WiFi credentials, then reboots. The staging partition and run log are kept. It is refused while a job, a console flash/probe or a scan holds the BLE lease (a reset mid-flash would leave the target erased), and it doesn't reboot unless both erasures succeeded.
 - The button is `CONFIG_DFU32_BUTTON_GPIO` (BOOT on the Feather S3 and N16R8, the user button on GPIO38 on the Feather V2).
 - On boards with no button, use `POST /api/v1/system/token/rotate` while authenticated, or reflash with an NVS erase.
 

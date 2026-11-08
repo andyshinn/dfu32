@@ -24,14 +24,21 @@ bool init();
 
 /// Starts advertising. False if Improv BLE is disabled in Kconfig or the BLE
 /// lease is held (a job, scan or console flash is running). A Button window
-/// while already open restarts its 5 minutes.
+/// while already open (re)arms its 5 minutes. Waits for the Improv task.
 bool open(Window why);
 
-/// Stops advertising, drops a connected client and releases the lease.
-void close();
+/// Stops advertising, drops a connected client, puts the previous network
+/// back if an attempt was still connecting, and releases the lease. Returns
+/// whether it was open (the close itself happens on the Improv task).
+bool close();
 
+struct Snapshot {
+    bool active = false;
+    State state = State::Stopped;
+};
+/// Both values read together.
+Snapshot snapshot();
 bool active();
-State state();
 
 /// True for 10 s after an Improv "identify" request (the LED blinks white).
 bool identifying();

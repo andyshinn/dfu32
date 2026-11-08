@@ -56,8 +56,10 @@ public:
     virtual void publish_error(Error e) = 0;
     /// An encoded RPC result packet (with checksum) for the transport to send.
     virtual void publish_result(std::span<const uint8_t> packet) = 0;
-    /// Start connecting; must not block. Report with Core::connect_succeeded/failed.
-    virtual void begin_connect(const std::string& ssid, const std::string& password) = 0;
+    /// Start connecting; must not block. Report with Core::connect_succeeded/
+    /// failed. Return false if the attempt can't even start: the core then
+    /// reports UNABLE_TO_CONNECT and accepts new settings right away.
+    virtual bool begin_connect(const std::string& ssid, const std::string& password) = 0;
     virtual void identify() = 0;
     virtual DeviceInfo device_info() = 0;
 };
