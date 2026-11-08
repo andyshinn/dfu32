@@ -4,7 +4,7 @@ DFU32 is ESP32 firmware that flashes nRF52 boards over BLE using Nordic **legacy
 
 DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
-**Status:** Milestone M4a. A JSON HTTP API (token claimed on first use) configures the target, stages its image from your server, and arms a flash that waits for `start ota`, hands the radio over to BLE, flashes with automatic retries, brings WiFi back and records the run. WiFi is set over Improv BLE (from Home Assistant or the Improv web page) or the USB console, and the NeoPixel, red LED and button follow SPEC §9.3/§13.4. The web UI and self-OTA come next (M4b), then a browser installer on GitHub Pages that flashes DFU32 and sets its WiFi over Improv Serial (M5). See [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
+**Status:** Milestone M4b. DFU32 joins WiFi over Improv BLE, serves a web UI (claimed on first use) that configures the target, stages its image from your server and flashes the repeater over BLE once you run `start ota`, with automatic retries, run records and live progress. It updates itself from the same UI, with rollback. Next is a browser installer on GitHub Pages that flashes DFU32 and sets its WiFi over Improv Serial (M5). Start with [docs/OPERATOR.md](docs/OPERATOR.md); see also [docs/RECOVERY.md](docs/RECOVERY.md), [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
 
 - [SPEC.md](SPEC.md): the full specification
 - [docs/MILESTONES.md](docs/MILESTONES.md): phased plan

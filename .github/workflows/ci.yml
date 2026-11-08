@@ -21,6 +21,9 @@ jobs:
       - name: Partition tables
         run: python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
 
+      - name: Web UI size budget
+        run: python3 tools/dfu32_ui.py check components/api/ui/index.html
+
       - name: Python tool tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 

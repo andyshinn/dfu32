@@ -1,4 +1,4 @@
-# Bench guide (M1–M4a)
+# Bench guide (M1–M4b)
 
 This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
@@ -364,6 +364,21 @@ These need a phone or a computer with Bluetooth, and eyes on the board, so the b
 10. **Short press (< 2 s):** nothing happens.
 
 **LEDs** during an API flash with `"wifi_off":false`: blue pulse while fetching or verifying, cyan blink while armed, magenta getting brighter during the transfer (the red LED blinks), solid green for 10 s on success. For a failure, abort mid-transfer: the NeoPixel blinks red fast and the red LED stays on until a later flash succeeds. A failure before START (e.g. arm timeout) shows solid red until the next job. With the access point off, the NeoPixel blinks dim yellow.
+
+## 9. Web UI and firmware update (M4b)
+
+Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
+
+1. **Claim:** on an unclaimed device the page offers **Claim this device** and shows the token once. Reload: you are still signed in. In a private window you get **Sign in**; a wrong token says so, the right one works.
+2. **Improv redirect:** after provisioning over Improv BLE (§8), the client's "visit device" link opens this page on the claim screen.
+3. **Target:** run `start ota`, **Scan**, **Use as target** fills the MAC; fill in id, board and manifest URL, **Save**. Reloading shows the saved values. Change one tuning value and save.
+4. **Happy path from the UI only:** **Check** shows the version and board match; **Flash**, then `start ota` over LoRa from the companion app. The job card shows armed (countdown), then the progress bar and rate, then succeeded, with a link to the run. This is the M4 "done when" (after joining WiFi over Improv).
+5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
+6. **Runs:** the list shows the flashes; a run's page has the attempts and the log. **Logs** tails live while a flash runs.
+7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept.
+8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards. The merged `.bin`: refused as "not an ESP-IDF app image".
+9. **Rollback:** install a build, and as soon as the upload finishes switch the access point off. The new image boots, finds no network, and about 90 s later rolls back ("rolling back to the previous image" on the console). Switch the access point on: the page says the device came back on the old version. Repeat with the access point on throughout: the console says "new firmware confirmed" and a later reboot stays on the new version.
+10. **Busy:** while a flash runs, **Install** answers busy.
 
 ## Bench results so far
 

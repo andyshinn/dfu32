@@ -56,6 +56,7 @@ RouteMatch match_route(std::string_view uri) {
     else if (is(1, "config")) m.route = Route::Config;
     else if (is(2, "ble", "scan")) m.route = Route::BleScan;
     else if (is(2, "system", "reboot")) m.route = Route::Reboot;
+    else if (is(2, "system", "ota")) m.route = Route::SystemOta;
     else if (is(3, "system", "token", "rotate")) m.route = Route::TokenRotate;
     else if (is(3, "jobs", "current", "abort")) m.route = Route::JobAbort;
     else if (is(2, "debug", "fault")) m.route = Route::DebugFault;
@@ -96,6 +97,7 @@ bool method_allowed(Route r, Method m) noexcept {
         case Route::BleScan:
         case Route::Reboot:
         case Route::TokenRotate:
+        case Route::SystemOta:
         case Route::DebugFault: return m == Method::Post;
     }
     return false;

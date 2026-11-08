@@ -9,6 +9,7 @@ set(DFU32_CORE_SRCS
     src/job.cpp
     src/json.cpp
     src/manifest.cpp
+    src/ota_image.cpp
     src/stage_writer.cpp
     src/target_config.cpp
     src/url.cpp

@@ -493,8 +493,11 @@ Conventions (M3b):
 - `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.
 - `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
 - `POST /system/reboot` is refused during a job unless `?force=1`.
-- `GET /` serves a placeholder until the M4 UI.
-- `POST /system/ota` arrives with M4.
+- `GET /` serves the web UI (§10.2), also while unclaimed.
+- `POST /system/ota` (M4b) takes `dfu32.bin` as the raw body with `Content-Length` (not the merged image). It runs on the slow-request task, holds the BLE lease (`409` during a job), and:
+  - checks the first 328 bytes before writing anything (`dfu32_core/ota_image.hpp`, host-tested): the ESP image magic, the chip ID, the project name (`dfu32`), and DFU32's **board tag**, a 40-byte custom app descriptor (`.rodata_custom_desc`, right after `esp_app_desc_t`) naming the board profile. Another board's build (same chip, different flash layout or pins) or an untagged image is refused with `422 IMAGE_REJECTED` unless `?force=1`;
+  - streams into the other OTA slot (`esp_ota_begin` with sequential writes), lets `esp_ota_end` verify the image, sets the boot partition, answers `200` with the new version, and reboots a second later;
+  - the new image confirms itself only once WiFi has an address and the API is up, within 90 s; a self-check failure or no network rolls back to the previous image (§12.3).
 
 | Method & path | Purpose |
 |---|---|
@@ -556,6 +559,8 @@ A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget
 - **System:** WiFi info, hostname, DFU32 firmware upload, reboot, token rotate, tuning defaults.
 
 The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
+
+Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a claim screen (shows the new token once) and a sign-in screen for a claimed device; a `401` returns to sign-in. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
 
 ### 10.3 Home Assistant
 
@@ -626,7 +631,7 @@ nvs 60 KB, otadata, phy, runlog 64 KB (16 slots), ota_0/ota_1 3 MB each, staging
 ```
 # Partitions / app
 CONFIG_PARTITION_TABLE_CUSTOM=y                 # CSV chosen by board profile
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y         # DFU32 self-OTA; mark valid after WiFi+HTTP up
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y         # DFU32 self-OTA; a new image confirms itself once WiFi + HTTP are up (90 s), else rolls back
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
@@ -822,7 +827,7 @@ dfu32/
     config/              NVS settings: target record, device settings, token hash
     job/                 orchestrator task, busy lease, handover, deadline, stall watchdog, restore check
     runlog/              log ring + run-record partition
-    api/                 esp_http_server routes, claim / bearer auth; embedded UI in M4
+    api/                 esp_http_server routes, claim / bearer auth, firmware upload; ui/index.html (embedded web UI)
     indicator/           LEDs + button (led_indicator, button); pure pattern/hold logic
     improv/              Improv core + BLE transport (vendored sdk-cpp); Serial transport in M5
   web/                   (M5) static browser installer page for GitHub Pages

@@ -119,7 +119,10 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - `components/indicator`: NeoPixel and red-LED patterns with `espressif/led_indicator` on `led_strip`, and the button with `espressif/button` (release after 2 s = Improv, 5 s = unclaim, 15 s = factory reset, with amber feedback while held). Pattern choice and hold timing are pure and host-tested;
     - firmware version from `git describe` (CI checks out full history);
     - console: `improv [start|stop]`.
-  - **M4b, web UI and self-OTA:** the UI (status, target form with the scan picker, runs, logs, system), `GET /` while unclaimed, `POST /api/v1/system/ota` with rollback (mark valid once WiFi and HTTP are up), `docs/RECOVERY.md` and `docs/OPERATOR.md`.
+  - **M4b, web UI and self-OTA (implemented, awaiting bench):**
+    - the web UI in one vanilla HTML file (`components/api/ui/index.html`): claim and sign-in screens, Status (job, progress, Check / Stage / Flash / Abort, staged image), Target (form, tuning, BLE scan picker), Runs (history and detail with the log), Logs (live tail), System (settings, firmware upload, token rotate, reboot). Gzipped at build time by `tools/dfu32_ui.py`, about 10 KB of the 40 KB budget, checked in CI;
+    - `POST /api/v1/system/ota`: checks chip, project and a new board tag in the image before writing (pure, host-tested), streams into the other slot, reboots; the new image confirms itself once WiFi and the API are up within 90 s, otherwise it rolls back;
+    - `docs/OPERATOR.md` (MeshCore walkthrough, remote `start ota`) and `docs/RECOVERY.md`.
 
 ## M5: Browser installer (2–3 days)
 

@@ -35,6 +35,7 @@ add_executable(dfu_proto_tests
     test_job.cpp
     test_json.cpp
     test_manifest.cpp
+    test_ota_image.cpp
     test_protocol.cpp
     test_retry.cpp
     test_runlog.cpp
