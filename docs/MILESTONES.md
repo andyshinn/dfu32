@@ -161,9 +161,9 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 
 ## M6: v1.0 hardening (2 days)
 
-- Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX.
+- Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX. **Runner ready:** `tools/dfu32_bench.py --soak 20` (check 6.1, [BENCH.md §7](BENCH.md#soak-m6)), tested against the simulator; awaiting the bench.
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
-- `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API).
+- `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API). **Implemented** as `tools/dfu32_meshcore_fetch.py`, with tests against a fake GitHub API.
 - Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0, which also publishes the installer page.
 
 ## Later (post-v1, in rough priority order)

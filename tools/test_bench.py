@@ -25,7 +25,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dfu32_bench  # noqa: E402
-from bench import parse  # noqa: E402
+from bench import checks, parse  # noqa: E402
 from bench.api import retry_after  # noqa: E402
 from bench.console import Redactor, SerialConsole, quote_arg, split_incomplete_escape, strip_ansi  # noqa: E402
 from bench.fake_dfu32 import FakeDfu32  # noqa: E402
@@ -380,6 +380,31 @@ class Selection(unittest.TestCase):
         self.assertLess(ids.index("3.5"), ids.index("3.3"))  # scan after the LoRa happy path
         self.assertLess(ids.index("3.9"), ids.index("3.10"))
 
+    def test_soak_is_opt_in(self):
+        sel = lambda *a: [t.id for t in dfu32_bench.select(dfu32_bench.build_parser().parse_args(list(a)))]  # noqa: E731
+        self.assertNotIn("6.1", sel())
+        self.assertEqual(sel("--soak", "20"), ["6.1"])
+        self.assertIn("6.1", sel("--soak", "20", "--sections", "3,6"))
+        self.assertIn("3.5", sel("--soak", "20", "--sections", "3,6"))
+
+    def test_soak_faults_arg(self):
+        parse_args = dfu32_bench.build_parser().parse_args
+        self.assertEqual(parse_args([]).soak_faults, list(checks.SOAK_FAULTS))
+        self.assertEqual(parse_args(["--soak-faults", "abort, reset"]).soak_faults, ["abort", "reset"])
+        self.assertEqual(parse_args(["--soak-faults", "none"]).soak_faults, [])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["--soak-faults", "abort,unplug"])
+
+
+class SoakPlan(unittest.TestCase):
+    def test_alternates_and_cycles_faults(self):
+        plan = checks.soak_plan(7, ["reset", "abort"], 3)
+        self.assertEqual([v for _, v, _ in plan], ["good", "alt", "good", "alt", "good", "alt", "good"])
+        self.assertEqual([f for _, _, f in plan], ["", "", "reset", "", "", "abort", ""])
+        self.assertEqual([f for _, _, f in checks.soak_plan(4, ["a", "b"], 1)], ["a", "b", "a", "b"])
+        self.assertEqual({f for _, _, f in checks.soak_plan(5, [], 1)}, {""})
+        self.assertEqual({f for _, _, f in checks.soak_plan(5, ["a"], 0)}, {""})
+
 
 # A cross-section that keeps CI quick; DFU32_BENCH_SIM=all runs everything (about 2.5 minutes).
 SUBSET = "1.3,2.3,2.5b,2.5d,3.2,3.6,3.9,3.11,4.1,5.1"
@@ -496,6 +521,56 @@ class EndToEndUnattended(unittest.TestCase):
         self.assertIn("LoRa) path was not tested", notes)
         log = (d / "out" / "serial.log").read_text()
         self.assertIn("before arming DFU32", log)
+
+
+
+class EndToEndSoak(unittest.TestCase):
+    """Section 6 against the simulator: two images, every fault once, each recovered."""
+
+    def test_soak(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        za, zb = d / "Heltec_T096_repeater-v1.18.0-81dbae5.zip", d / "Heltec_T096_repeater-v1.17.0-0a1b2c3.zip"
+        write_zip(za, *synthetic_package(4096))
+        write_zip(zb, *synthetic_package(4104))
+        fake = FakeDfu32()
+        port = fake.start_http()
+        self.addCleanup(fake.stop)
+        argv = ["--port", "sim", "--zip", str(za), "--soak-zip", str(zb), "--board", "heltec_t096", "--mac", fake.mac,
+                "--device-ip", f"127.0.0.1:{port}", "--host-ip", "127.0.0.1", "--site-port", "0",
+                "--start-ota-timeout", "60", "--out", str(d / "out"), "--soak", "6", "--soak-fault-every", "1"]
+        real_console = dfu32_bench.SerialConsole
+        with mock.patch.object(dfu32_bench, "SerialConsole",
+                               lambda *a, **kw: real_console(*a, opener=fake.opener, **kw)), \
+                mock.patch.object(Ctx, "start_ota", lambda self, **kw: fake.start_ota()), \
+                mock.patch.object(Ctx, "countdown", lambda self, s, w: None), \
+                mock.patch.object(Ctx, "resolve", staticmethod(lambda name, timeout=8: None)), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = dfu32_bench.main(argv)
+        report = json.loads((d / "out" / "report.json").read_text())
+        self.assertEqual([r["id"] for r in report["results"]], ["6.1"])
+        res = report["results"][0]
+        self.assertIn(res["status"], ("PASS", "WARN"), "\n".join(res["notes"][-8:]) + out.getvalue()[-3000:])
+        self.assertEqual(rc, 0)
+        rows = res["data"]["rows"]
+        self.assertEqual([r["fault"] for r in rows], ["reset", "abort", "deadline", "stall", "restore", "reset"])
+        self.assertEqual([r["version"] for r in rows], ["Heltec_T096_repeater-v1.18.0-81dbae5",
+                                                        "Heltec_T096_repeater-v1.17.0-0a1b2c3"] * 3)
+        self.assertTrue(all(r["ok"] for r in rows), rows)
+        by_fault = {r["fault"]: r for r in rows}
+        self.assertEqual(by_fault["abort"]["fault_result"], "FAILED ABORTED")
+        self.assertTrue(by_fault["deadline"]["fault_result"].startswith("FAILED DEADLINE_EXCEEDED"))
+        self.assertEqual(by_fault["stall"]["fault_result"], "ABORTED_BY_REBOOT")
+        self.assertEqual(by_fault["reset"]["fault_result"], "ABORTED_BY_REBOOT")
+        self.assertIn("restore watchdog rebooted", by_fault["restore"]["fault_result"])
+        for f in ("reset", "abort", "deadline", "stall"):
+            self.assertTrue(by_fault[f]["recovery"].endswith("SUCCEEDED"), by_fault[f])
+        self.assertEqual(by_fault["restore"]["recovery"], "")
+        self.assertEqual(fake.target["last_ok_version"], "Heltec_T096_repeater-v1.17.0-0a1b2c3")
+        csv_text = (d / "out" / "soak.csv").read_text()
+        self.assertEqual(len(csv_text.strip().splitlines()), 7)
+
 
 if __name__ == "__main__":
     unittest.main()

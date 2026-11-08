@@ -82,7 +82,7 @@ To also check the CRC16 against a real image, point two environment variables at
 DFU32_TEST_BIN=path/to/firmware.bin DFU32_TEST_DAT=path/to/firmware.dat ctest --test-dir build-host --output-on-failure
 ```
 
-Test the Python tools (staging, packing and the bench runner):
+Test the Python tools (staging, packing, the MeshCore release fetcher and the bench runner):
 
 ```bash
 python3 -m unittest discover -s tools -p 'test_*.py'
@@ -96,7 +96,9 @@ python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
 
 ## Bench runner
 
-With DFU32 and a repeater on your desk, `tools/dfu32_bench.py` runs the bench checklist automatically through the serial console and the HTTP API. It stops only when you need to send `start ota`. See [docs/BENCH.md §7](docs/BENCH.md#7-automated-bench-run).
+With DFU32 and a repeater on your desk, `tools/dfu32_bench.py` runs the bench checklist automatically through the serial console and the HTTP API. It stops only when you need to send `start ota`. `--soak 20` runs the M6 soak: 20 flashes alternating two versions, with faults mixed in. See [docs/BENCH.md §7](docs/BENCH.md#7-automated-bench-run).
+
+To get a MeshCore release ready to serve, `tools/dfu32_meshcore_fetch.py --tag repeater-v1.18.0 --env RAK_4631_repeater --board rak4631 --out site/rak4631` finds the right asset on GitHub, downloads it and packs it (see [docs/BENCH.md §4](docs/BENCH.md#4-stage-an-image)).
 
 ## License
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import platform
+import re
 import statistics
 import subprocess
 import threading
@@ -15,8 +16,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .api import ApiUnreachable
+from .console import ConsoleError, ConsoleRebooted
 from .parse import parse_check, parse_stage, parse_token
-from .runner import TERMINAL, Ctx, TestFailed, TestSkipped, check
+from .runner import TERMINAL, Ctx, TestFailed, TestSkipped, check, cleanup
 
 WRONG_BOARD = "not_this_board"
 
@@ -840,4 +843,242 @@ def c_wifi_compare(ctx: Ctx) -> None:
     ctx.soft(not failed, f"all {2 * n} runs succeeded", f"failed: {failed}")
 
 
-HOOKS = {"enter": {"4": enter_debug}, "leave": {"4": leave_debug}}
+# ============================================================================================
+# 6. Soak (M6): N flashes in a row, alternating two images, with faults mixed in
+# ============================================================================================
+
+# Faults that need the debug build's POST /debug/fault, and the body that arms each.
+SOAK_DEBUG_FAULTS = {"deadline": {"deadline_s": 20}, "stall": {"stall_s": 40}, "restore": {"restore_fail": True}}
+SOAK_FAULTS = ("reset", "abort", *SOAK_DEBUG_FAULTS)
+# wifi_off per fault: abort and reset watch the transfer's progress on /status, so WiFi stays up;
+# the debug faults exercise the safety layers that only matter while WiFi is off (SPEC §7.3).
+SOAK_WIFI_OFF = {"reset": False, "abort": False, "deadline": True, "stall": True, "restore": True}
+# What MeshCore's `ver` prints: "<version>-<commit> (Build: …)". dfu32_meshcore_fetch.py uses it as
+# the manifest version; zip stems from dfu32_pack.py contain it too.
+FW_VER_RE = re.compile(r"v\d+(?:\.\d+)+-[0-9a-f]{6,40}")
+
+
+def soak_plan(n: int, faults: list, every: int) -> list:
+    """(run, image, fault) for each soak run: images alternate good/alt, and every `every`-th run gets
+    the next fault in turn ("" = a clean run)."""
+    plan = []
+    k = 0
+    for i in range(1, n + 1):
+        fault = ""
+        if faults and every > 0 and i % every == 0:
+            fault = faults[k % len(faults)]
+            k += 1
+        plan.append((i, "good" if i % 2 else "alt", fault))
+    return plan
+
+
+def enter_soak(ctx: Ctx) -> Optional[str]:
+    """Section 6 setup: decide which faults can run. The debug ones need the debug build."""
+    if ctx.args.soak <= 0:
+        return "the soak runs only with --soak N"
+    faults = list(ctx.args.soak_faults)
+    ctx.soak_debug = False
+    if any(f in SOAK_DEBUG_FAULTS for f in faults):
+        why = enter_debug(ctx)
+        if why:
+            dropped = [f for f in faults if f in SOAK_DEBUG_FAULTS]
+            faults = [f for f in faults if f not in SOAK_DEBUG_FAULTS]
+            print(f"\n  NOTE: soak without {', '.join(dropped)}: {why}", flush=True)
+        else:
+            ctx.soak_debug = True
+    ctx.soak_faults = faults
+    return None
+
+
+def leave_soak(ctx: Ctx) -> None:
+    if getattr(ctx, "soak_debug", False):
+        leave_debug(ctx)
+
+
+def soak_wait(ctx: Ctx, job_id: int, boots: int, timeout: float, *, until=None) -> tuple:
+    """Follows a job until it ends ("ended", job), DFU32 reboots ("rebooted", boot), or until(job)
+    is true ("reached", job). Unlike ctx.wait_job, a reboot ends the wait instead of a long timeout."""
+    end = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < end:
+        if len(ctx.con.boots) > boots:
+            boot = ctx.con.wait_boot(boots, 60)
+            ctx.after_boot(boot)
+            ctx.say("DFU32 rebooted")
+            return "rebooted", boot
+        st = ctx.api.status(timeout=2.5) if ctx.api else None
+        try:
+            job = (st.get("job") or {}) if st else ctx.console_job()
+        except ConsoleRebooted:
+            continue
+        if job.get("id") == job_id:
+            key = (job.get("state"), job.get("phase", ""))
+            if key != last:
+                last = key
+                ctx.say(f"job #{job_id}: {key[0]}{' / ' + key[1] if key[1] else ''}")
+            if job.get("state") in TERMINAL:
+                if job.get("state") == "SUCCEEDED" or job.get("target_erased"):
+                    ctx.ota_pending = False
+                return "ended", job
+            if until and until(job):
+                return "reached", job
+        time.sleep(0.25 if until else 1.0)
+    raise TestFailed(f"job #{job_id} did not finish within {timeout:.0f} s (last {last})")
+
+
+def _past(fraction: float):
+    def reached(job: dict) -> bool:
+        total = job.get("bytes_total") or 0
+        return job.get("state") == "DFU_RUNNING" and total > 0 and (job.get("bytes_done") or 0) >= total * fraction
+    return reached
+
+
+def soak_run(ctx: Ctx, api, i: int, variant: str, fault: str) -> dict:
+    """One soak run: flash `variant` with `fault` injected, recover if needed, then check the repeater
+    runs the image. "ok" means it does: zero of these may fail."""
+    version = ctx.site.version_of(variant)
+    row = {"i": i, "version": version, "fault": fault or "-", "fault_result": "", "recovery": "", "runs": [],
+           "attempts": 0, "ok": False, "why": "", "seconds": 0.0}
+    t0 = time.monotonic()
+    before = (api.get(f"/targets/{ctx.tid}").get("last_run") or {}).get("seq", 0)
+    ctx.ensure_target(manifest_url=ctx.manifest_url(variant))
+    if fault in SOAK_DEBUG_FAULTS:
+        r = api.post("/debug/fault", SOAK_DEBUG_FAULTS[fault])
+        ctx.expect(r.status == 200, f"POST /debug/fault {SOAK_DEBUG_FAULTS[fault]}", r.short())
+    body: dict = {"source": "manifest"}
+    if fault:
+        body["wifi_off"] = SOAK_WIFI_OFF[fault]
+    boots = len(ctx.con.boots)
+    timeout = ctx.args.start_ota_timeout + 900
+    ctx.prime_repeater()
+    job, _ = ctx.api_flash(body)
+    j = wait_state(ctx, job, {"AWAITING_TARGET"}, 240)
+    if j.get("state") not in TERMINAL:
+        try:
+            ctx.start_ota(still_needed=ctx.awaiting(job))
+        except ConsoleRebooted:
+            pass  # the stall fault can reboot DFU32 the moment the repeater is seen
+    how, res = soak_wait(ctx, job, boots, timeout, until=_past(0.2) if fault in ("abort", "reset") else None)
+    erased: Optional[bool] = None  # None: unknown after a reboot
+    if how == "reached" and fault == "abort":
+        ctx.say(f"transfer at {100 * res['bytes_done'] // res['bytes_total']}%: aborting")
+        r = api.post("/jobs/current/abort")
+        how, res = soak_wait(ctx, job, boots, 120)
+        row["fault_result"] = f"{res.get('state')} {res.get('error', '')}".strip() if how == "ended" else how
+        erased = bool(r.get("target_erased")) if r.status == 202 else None
+    elif how == "reached" and fault == "reset":
+        ctx.say(f"transfer at {100 * res['bytes_done'] // res['bytes_total']}%: resetting DFU32")
+        how, res = "rebooted", ctx.reset_and_wait(why="soak: mid-transfer")
+    if how == "rebooted":
+        rows = ctx.runs()
+        newest = rows[0] if rows and rows[0]["seq"] > before else {}
+        row["fault_result"] = newest.get("result", "rebooted, no run record")
+        erased = {"no": False, "yes": True}.get(newest.get("erased", ""))
+        if fault == "restore" and newest:
+            row["fault_result"] += ", then the restore watchdog rebooted DFU32"
+        ctx.wait_api(120)
+    elif how == "ended":
+        if fault and not row["fault_result"]:
+            row["fault_result"] = f"{res.get('state')} {res.get('error', '')}".strip()
+        if res.get("state") != "SUCCEEDED" and erased is None:
+            erased = bool(res.get("target_erased"))
+    if fault == "restore" and how != "rebooted":
+        row["fault_result"] += " (fault not injected: no reboot)"
+    elif fault and fault != "restore" and row["fault_result"].startswith("SUCCEEDED"):
+        row["fault_result"] += " (fault not injected: the transfer finished first)"
+
+    last = api.get(f"/targets/{ctx.tid}").get("last_run") or {}
+    if last.get("seq", 0) <= before or last.get("result") != "SUCCEEDED":
+        # The flash didn't land: flash the staged image (this run's) again. An erased target's
+        # bootloader is already waiting; otherwise the repeater may need another `start ota`.
+        row["recovery"] = "staged"
+        ctx.say("recovering: flashing the staged image again (source=staged)")
+        ctx.abort_leftover_job()
+        w = ctx.api_flash_and_wait({"source": "staged", "wifi_off": False, "arm_timeout_s": 180},
+                                   start_ota=erased is not True)
+        row["recovery"] += f" -> {w.final.get('state')}"
+    tgt = api.get(f"/targets/{ctx.tid}").body or {}
+    last = tgt.get("last_run") or {}
+    row["runs"] = [r["seq"] for r in reversed(ctx.runs()) if r["seq"] > before]
+    row["attempts"] = len(last.get("attempts") or [])
+    if last.get("seq", 0) <= before or last.get("result") != "SUCCEEDED":
+        row["why"] = f"last run #{last.get('seq')} {last.get('result')} {last.get('error', '')}".strip()
+    elif tgt.get("last_ok_version") != version:
+        row["why"] = f"last_ok_version is '{tgt.get('last_ok_version')}', expected '{version}'"
+    else:
+        row["ok"] = True
+    want = FW_VER_RE.search(version)
+    if row["ok"] and want and ctx.repeater:
+        try:
+            out = ctx.repeater.command("ver", wait=3, expect=want.group(0), window=90)
+        except Exception as e:  # noqa: BLE001 - the port may not come back; the API already agreed
+            ctx.warn(f"run {i}: couldn't read `ver` from the repeater ({type(e).__name__}: {e})")
+        else:
+            row["ver"] = out.strip().splitlines()[-1] if out.strip() else ""
+            if want.group(0) not in out:
+                row["ok"] = False
+                row["why"] = f"the repeater's `ver` says '{row['ver']}', expected {want.group(0)}"
+    row["seconds"] = round(time.monotonic() - t0, 1)
+    return row
+
+
+@check("6.1", "soak: --soak N flashes, alternating images, faults mixed in", needs=("repeater",))
+def c_soak(ctx: Ctx) -> None:
+    n = ctx.args.soak
+    api = ctx.ensure_token()
+    if not ctx.site.has("alt"):
+        ctx.warn("no --soak-zip (or --soak-bin/--soak-dat): every run flashes the same image, so a run that "
+                 "silently didn't flash can only be told apart by its run record")
+    elif ctx.site.sha256_of("alt") == ctx.site.sha256:
+        ctx.warn("--soak-zip is the same image as --zip")
+    faults = getattr(ctx, "soak_faults", list(ctx.args.soak_faults))
+    plan = soak_plan(n, faults, ctx.args.soak_fault_every)
+    if not ctx.site.has("alt"):
+        plan = [(i, "good", f) for i, _, f in plan]
+    every = ctx.args.soak_fault_every
+    ctx.note(f"{n} runs; faults: {', '.join(faults) or 'none'}" +
+             (f", one every {every} runs" if faults and every > 1 else ", one per run" if faults and every else ""))
+    if not ctx.repeater:
+        ctx.warn("no --repeater-port: you'll be asked for `start ota` on every run")
+    rows: list = []
+    fields = ["i", "version", "fault", "fault_result", "recovery", "ok", "why", "attempts", "runs", "seconds", "ver"]
+    with open(ctx.out / "soak.csv", "w", newline="") as f:
+        cw = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        cw.writeheader()
+        for i, variant, fault in plan:
+            ctx.say(f"--- soak run {i}/{n}: {ctx.site.version_of(variant)}{', fault ' + fault if fault else ''}")
+            try:
+                row = soak_run(ctx, api, i, variant, fault)
+            except (TestFailed, ConsoleError, ApiUnreachable) as e:
+                row = {"i": i, "version": ctx.site.version_of(variant), "fault": fault or "-", "ok": False,
+                       "why": f"{type(e).__name__}: {e}", "runs": [], "fault_result": "", "recovery": ""}
+                cleanup(ctx, False)
+            rows.append(row)
+            cw.writerow({**row, "runs": " ".join(map(str, row.get("runs", [])))})
+            f.flush()
+            ctx.say(f"run {i}: {'OK' if row['ok'] else 'NOT RECOVERED: ' + row['why']}"
+                    f"{'  [' + row['fault_result'] + ']' if row.get('fault_result') else ''}")
+            if not row["ok"] and ctx.repeater_alive() is False:
+                ctx.warn(f"the repeater stopped answering on its USB console after run {i}: it looks hung; "
+                         "stopping the soak")
+                break
+    table = ["| # | image | fault | fault result | recovery | attempts | result |", "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        table.append(f"| {r['i']} | {r['version']} | {r['fault']} | {r.get('fault_result') or ''} | "
+                     f"{r.get('recovery') or ''} | {r.get('attempts', '')} | "
+                     f"{'ok' if r['ok'] else 'NOT RECOVERED: ' + r['why']} |")
+    injected = [r for r in rows if r["fault"] != "-" and "not injected" not in (r.get("fault_result") or "")]
+    clean_failed = [r["i"] for r in rows if r["fault"] == "-" and r.get("recovery")]
+    retried = sum(1 for r in rows if (r.get("attempts") or 0) > 1)
+    ctx.data("table", table)
+    ctx.data("rows", rows)
+    print("\n" + "\n".join("    " + t for t in table), flush=True)
+    ctx.note(f"{len(rows)} runs, {len(injected)} with a fault injected, {retried} needed more than one attempt")
+    ctx.soft(not clean_failed, "every run without a fault succeeded first time (no recovery flash)",
+             f"runs {clean_failed} needed a recovery flash")
+    bad = [r["i"] for r in rows if not r["ok"]]
+    ctx.expect(not bad, f"zero unrecovered failures in {len(rows)} runs", f"runs {bad}")
+    ctx.expect(len(rows) == n, f"all {n} runs ran", f"stopped after {len(rows)}")
+
+
+HOOKS = {"enter": {"4": enter_debug, "6": enter_soak}, "leave": {"4": leave_debug, "6": leave_soak}}
