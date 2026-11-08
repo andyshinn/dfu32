@@ -30,6 +30,9 @@ namespace {
 
 constexpr const char* TAG = "console";
 constexpr size_t kLineBufferSize = 512;  // typed input waiting for the line editor
+// The console's output translation as esp_stdio_install_io_driver() sets it
+// (the VFS has no getter); write_frame() turns it off and back to this.
+constexpr esp_line_endings_t kTextLineEndings = ESP_LINE_ENDINGS_CRLF;
 
 StreamBufferHandle_t g_line = nullptr;
 std::mutex g_write_mu;
@@ -61,7 +64,7 @@ int raw_read(uint8_t* buf, size_t n, TickType_t ticks) {
 
 /// Output translation: '\n' -> "\r\n" for text, off for a frame.
 void raw_output(bool raw) {
-    const esp_line_endings_t mode = raw ? ESP_LINE_ENDINGS_LF : ESP_LINE_ENDINGS_CRLF;
+    const esp_line_endings_t mode = raw ? ESP_LINE_ENDINGS_LF : kTextLineEndings;
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     usb_serial_jtag_vfs_set_tx_line_endings(mode);
 #elif CONFIG_ESP_CONSOLE_UART
@@ -95,6 +98,9 @@ void on_event(improv::SerialFramer::Event e, const improv::SerialFramer& f) {
             ESP_LOGW(TAG, "dropped an oversized Improv frame");
             improv::serial_invalid_frame();
             return;
+        // No reply to these two: a client speaking another protocol version
+        // couldn't read our (version 1) error frame either, and a cut-off
+        // frame's sender is gone or will resend it.
         case Event::BadVersion: ESP_LOGW(TAG, "dropped an Improv frame of an unknown version"); return;
         case Event::TimedOut: ESP_LOGW(TAG, "dropped a cut-off Improv frame"); return;
     }
@@ -172,9 +178,14 @@ void write_frame(std::span<const uint8_t> frame) {
     raw_output(true);
     const int fd = fileno(stdout);
     const ssize_t written = ::write(fd, out.data(), out.size());
-    (void)written;  // short only when USB isn't connected (nobody to read it): the frame is dropped
     raw_output(false);
     fsync(fd);
+    if (written != static_cast<ssize_t>(out.size())) {
+        // USB not connected (nobody to read it) or the driver gave up: the
+        // frame is dropped and the client will time out.
+        ESP_LOGD(TAG, "Improv frame not sent (%d of %u bytes)", static_cast<int>(written),
+                 static_cast<unsigned>(out.size()));
+    }
 }
 
 }  // namespace dfu32::console_io

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "attempt.hpp"
 
-#include <atomic>
 #include <cstring>
+#include <mutex>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -16,30 +16,55 @@ namespace {
 constexpr const char* TAG = "improv";
 constexpr const char* kLeaseName = "improv-serial";
 
-std::atomic<bool> g_running{false};  // an attempt from either transport
+// One attempt at a time, from either transport, and whether it holds the BLE
+// lease: its own ("improv-serial"), or Improv BLE's, adopted when the BLE
+// window closed under it (release_ble_lease()).
+std::mutex g_mu;
+bool g_running = false;     // guarded by g_mu
+bool g_owns_lease = false;  // guarded by g_mu
 
 }  // namespace
 
+bool Attempt::any_running() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_running;
+}
+
+void release_ble_lease() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_running && !g_owns_lease) {
+        // A Serial attempt relied on the BLE window's lease: keep it held for
+        // the attempt (it releases it when it ends), or a flash could start
+        // and stop WiFi underneath it.
+        g_owns_lease = true;
+        ESP_LOGI(TAG, "Improv BLE closed during a WiFi attempt; the attempt keeps the BLE lease");
+        return;
+    }
+    job::release();
+}
+
 bool Attempt::begin(const std::string& ssid, const std::string& password, int64_t timeout_us) {
     if (active_) return false;
-    bool expected = false;
-    if (!g_running.compare_exchange_strong(expected, true)) {
-        ESP_LOGW(TAG, "WiFi settings refused: another Improv client is connecting");
-        return false;
-    }
-    // Improv BLE holds the lease while it is open; otherwise take it for the
-    // attempt, so no flash can stop WiFi underneath it.
-    const char* holder = job::holder();
-    if (holder != nullptr && std::strcmp(holder, "improv") != 0) {
-        ESP_LOGW(TAG, "WiFi settings refused: %s is using the radio", holder);
-        g_running = false;
-        return false;
-    }
-    owns_lease_ = holder == nullptr && job::try_acquire(kLeaseName);
-    if (holder == nullptr && !owns_lease_) {
-        ESP_LOGW(TAG, "WiFi settings refused: a job just started");
-        g_running = false;
-        return false;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (g_running) {
+            ESP_LOGW(TAG, "WiFi settings refused: another Improv client is connecting");
+            return false;
+        }
+        // Improv BLE holds the lease while it is open (and hands it over if it
+        // closes mid-attempt); otherwise take it for the attempt, so no flash
+        // can stop WiFi underneath it.
+        const char* holder = job::holder();
+        if (holder != nullptr && std::strcmp(holder, "improv") != 0) {
+            ESP_LOGW(TAG, "WiFi settings refused: %s is using the radio", holder);
+            return false;
+        }
+        g_owns_lease = holder == nullptr && job::try_acquire(kLeaseName);
+        if (holder == nullptr && !g_owns_lease) {
+            ESP_LOGW(TAG, "WiFi settings refused: a job just started");
+            return false;
+        }
+        g_running = true;
     }
     had_previous_ = net::stored_credentials(previous_ssid_, previous_password_);
     // RAM only until it connects: a power cut mid-attempt keeps the old network.
@@ -85,8 +110,9 @@ void Attempt::give_up() {
 
 void Attempt::end() {
     active_ = false;
-    if (owns_lease_) job::release();
-    owns_lease_ = false;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_owns_lease) job::release();
+    g_owns_lease = false;
     g_running = false;
 }
 

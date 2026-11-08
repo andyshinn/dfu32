@@ -222,7 +222,7 @@ void do_close() {
     g_core.stop();
     g_rpc_buf.reset();
     set_mirror(false, State::Stopped);
-    job::release();  // held since do_open(), released last
+    release_ble_lease();  // held since do_open(), released last (or kept by a Serial attempt)
     ESP_LOGI(TAG, "Improv BLE closed");
 }
 

@@ -81,8 +81,13 @@ bool SerialHost::begin_connect(const std::string& ssid, const std::string& passw
 }
 
 std::vector<Network> SerialHost::scan_networks() {
-    // Not while a flash or console operation has the radio: a scan would
-    // slow the BLE transfer down. The client then just sees no networks.
+    // Not while a flash or console operation has the radio (a scan would slow
+    // the BLE transfer down), nor while an Improv attempt from either
+    // transport is joining a network (a scan would get in the way of
+    // associating). The client then just sees no networks for now.
+    // The scan blocks this task for about 2 s; frames that arrive meanwhile
+    // wait in the queue (4 deep; the client sends one RPC at a time).
+    if (Attempt::any_running()) return {};
     const char* holder = job::holder();
     if (holder != nullptr && std::strcmp(holder, "improv") != 0) return {};
     std::vector<net::ScanResult> found;
@@ -102,7 +107,10 @@ void finish_connect(bool ok) {
     g_core.connect_succeeded(g_attempt.keep());
     // Improv BLE may still be open (it opens by itself while no network is
     // stored) and holds the BLE lease while it is: close it, or a flash would
-    // be refused until someone ran `improv stop`.
+    // be refused until someone ran `improv stop`. close() only posts to the
+    // BLE task; its do_close() would end a *BLE* attempt as failed, but none
+    // can be running: Attempt allows one at a time across both transports,
+    // and this one has just ended.
     if (improv::active()) improv::close();
 }
 

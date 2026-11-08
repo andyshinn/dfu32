@@ -30,16 +30,21 @@ public:
     void give_up();
 
     bool active() const noexcept { return active_; }
+    /// An attempt from either transport is running.
+    static bool any_running();
     const std::string& ssid() const noexcept { return trying_ssid_; }
 
 private:
     void end();
 
     bool active_ = false;
-    bool owns_lease_ = false;
     int64_t deadline_us_ = 0;
     bool had_previous_ = false;
     std::string previous_ssid_, previous_password_, trying_ssid_;
 };
+
+/// Improv BLE's close releases its lease through this: if a Serial attempt is
+/// running on that lease, the attempt keeps it (and releases it when it ends).
+void release_ble_lease();
 
 }  // namespace dfu32::improv

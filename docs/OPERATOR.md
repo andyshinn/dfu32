@@ -6,6 +6,8 @@ This is the everyday path: one DFU32 next to a MeshCore repeater, firmware serve
 
 If you installed DFU32 from the installer page ([dfu32.app](https://dfu32.app/)), the page asks for your network right after installing and then links to the device's web UI: skip to §2. To change the network later the same way, connect the board over USB, click the install button and choose **Change Wi-Fi**.
 
+Unlike Improv BLE, which only opens while no network is stored or after a button press, Improv Serial is always on: anyone who can plug into DFU32's USB port can change its WiFi network, just as they could with the `wifi` console command. Treat the USB port as physical access, and don't leave it connected to a machine you don't trust.
+
 Otherwise, a DFU32 with no WiFi stored opens **Improv BLE** by itself; its NeoPixel blinks white slowly.
 
 1. Open the Home Assistant companion app (Settings → Devices → Discovered), or https://www.improv-wifi.com/ in desktop Chrome or Edge.
