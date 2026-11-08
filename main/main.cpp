@@ -5,8 +5,10 @@
 // console.
 #include <cinttypes>
 #include <cstdint>
+#include <cstring>
 
 #include "api/api.hpp"
+#include "config/config.hpp"
 #include "console.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/image.hpp"
@@ -16,6 +18,10 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_psram.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "improv/improv.hpp"
+#include "indicator/indicator.hpp"
 #include "job/job.hpp"
 #include "net/net.hpp"
 #include "nvs_flash.h"
@@ -137,6 +143,60 @@ extern "C" void app_main(void) {
     }
     // The API needs the network stack; without it the console still works.
     if (net_ok && !dfu32::api::start()) ESP_LOGE(TAG, "HTTP API failed to start");
+
+    // Improv BLE (SPEC.md §9.2): open while no network is stored; the button
+    // (or `improv start`) opens it later.
+    if (net_ok && !dfu32::improv::init()) ESP_LOGE(TAG, "Improv BLE init failed");
+    if (net_ok && !dfu32::net::status().provisioned) {
+        ESP_LOGI(TAG, "no WiFi network stored: set one over Improv BLE, or with `wifi <ssid> <password>`");
+        dfu32::improv::open(dfu32::improv::Window::Unprovisioned);
+    }
+
+    dfu32::indicator::Hooks hooks;
+    hooks.improv_active = [] { return dfu32::improv::active(); };
+    hooks.identifying = [] { return dfu32::improv::identifying(); };
+    hooks.on_improv_window = [] {
+        if (!dfu32::improv::open(dfu32::improv::Window::Button)) {
+            ESP_LOGW(TAG, "Improv BLE not opened (disabled, or BLE busy with a job)");
+        }
+    };
+    hooks.on_unclaim = [] {
+        ESP_LOGW(TAG, "%s", dfu32::api::unclaim() ? "API token cleared: POST /api/v1/claim issues a new one"
+                                                    : "clearing the API token failed");
+    };
+    hooks.on_factory_reset = [] {
+        // SPEC.md §9.3: settings and WiFi go; the staged image and run log stay.
+        // Never in the middle of a flash (it would leave the target erased) or
+        // a console/API operation: those hold the BLE lease. Improv holding it
+        // is fine, the reboot ends it.
+        const char* holder = dfu32::job::holder();
+        const bool improv = holder != nullptr && std::strcmp(holder, "improv") == 0;
+        if (holder != nullptr && !improv) {
+            ESP_LOGE(TAG, "factory reset refused: %s is using BLE/staging; abort it (`job abort`) and hold again",
+                     holder);
+            return;
+        }
+        // Take the lease so no job can start while erasing.
+        if (!improv && !dfu32::job::try_acquire("reset")) {
+            ESP_LOGE(TAG, "factory reset refused: something just started; try again");
+            return;
+        }
+        if (!dfu32::config::erase_all()) {
+            ESP_LOGE(TAG, "factory reset failed: could not erase the settings; nothing else changed, not rebooting");
+            if (!improv) dfu32::job::release();
+            return;
+        }
+        if (!dfu32::net::forget()) {
+            ESP_LOGE(TAG, "factory reset incomplete: settings erased, but the WiFi credentials could not be "
+                          "cleared (`wifi forget`); not rebooting");
+            if (!improv) dfu32::job::release();
+            return;
+        }
+        ESP_LOGW(TAG, "factory reset: settings erased, WiFi forgotten; rebooting");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+    };
+    dfu32::indicator::start(hooks);
 
     // Mark valid once the self-check and BLE init pass. M4 (self-OTA) moves
     // this after WiFi + HTTP come up (SPEC.md §12.3, rollback).

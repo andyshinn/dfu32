@@ -97,7 +97,7 @@ private:
 struct DeviceConfig {
     std::string hostname;         // "" = default dfu32-xxxx
     std::string ntp_server;       // "" = default pool.ntp.org
-    bool wifi_off_dfu = true;     // default for a flash request's wifi_off
+    bool wifi_off_dfu = false;    // default for a flash request's wifi_off (bench: on is fast enough)
     uint32_t dfu_deadline_max_s = 1200;  // cap on the §7.3 run deadline
 };
 

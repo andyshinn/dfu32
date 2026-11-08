@@ -1,0 +1,6 @@
+## Status LEDs and button (SPEC.md §4.1, §13.4, §9.3).
+dependencies:
+  idf: "~6.1.0"
+  espressif/led_indicator: "~2.1.2"
+  espressif/led_strip: "~3.1.1"
+  espressif/button: "~4.2.3"

@@ -33,14 +33,37 @@ jobs:
       - name: Test
         run: ctest --test-dir build-host --output-on-failure
 
+  # The firmware matrix comes from CMakePresets.json, so a new board only needs
+  # its boards/<name>/ profile and a preset. Checking them here first means a
+  # mismatch fails this job with a clear error before any firmware job starts.
+  boards:
+    name: Board list
+    runs-on: ubuntu-24.04
+    outputs:
+      boards: ${{ steps.list.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Board presets
+        run: python3 tools/check_presets.py
+
+      # Assign first: a failing command substitution inside echo's arguments
+      # wouldn't fail the step.
+      - id: list
+        name: List presets
+        run: |
+          boards=$(python3 tools/build_all.py --list --json)
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+
   firmware:
     name: Firmware (${{ matrix.board }})
+    needs: boards
     runs-on: ubuntu-24.04
     container: espressif/idf:v6.1
     strategy:
       fail-fast: false
       matrix:
-        board: [feather_esp32s3, feather_esp32_v2, esp32s3_n16r8, rak11200_rak19007]
+        board: ${{ fromJSON(needs.boards.outputs.boards) }}
     defaults:
       run:
         shell: bash
@@ -54,7 +77,12 @@ jobs:
       # the image tag is rebuilt even though the toolchain is identical.
       CCACHE_COMPILERCHECK: content
     steps:
+      # Full history and tags, so ESP-IDF's `git describe` gives the firmware
+      # version (v0.4.0, or v0.4.0-3-gabc1234 between tags) instead of a bare
+      # hash. It shows in /api/v1/status and Improv device info.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # ${{ github.workspace }} is the host path in container jobs, so derive
       # container paths from $GITHUB_WORKSPACE at runtime instead. The cache
@@ -88,7 +116,29 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
           ccache --zero-stats
-          idf.py -B "build/${{ matrix.board }}" -DDFU32_BOARD=${{ matrix.board }} build
+          idf.py --preset "${{ matrix.board }}" build
+
+      # The Component Manager rewrites the lock if the committed one doesn't
+      # match what it resolves, and creates it if it is missing. Either way
+      # the committed pin was not what this build used.
+      - name: Component lock unchanged
+        run: |
+          if [ -n "$(git status --porcelain -- 'dependencies.lock*')" ]; then
+            git status --short -- 'dependencies.lock*'
+            git diff -- 'dependencies.lock*'
+            echo "::error::the build changed dependencies.lock.*; build this profile locally and commit the result"
+            exit 1
+          fi
+
+      # The same firmware with the fault-injection endpoints, for the bench
+      # runner's safety checks (tools/dfu32_bench.py, section 4). Built
+      # before the cache is saved so its objects are cached too.
+      - name: Build debug variant (bench only)
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --preset "${{ matrix.board }}" -B "build/${{ matrix.board }}-debug" -DDFU32_DEBUG_ENDPOINTS=ON build
+          grep -q '^CONFIG_DFU32_DEBUG_ENDPOINTS=y' "build/${{ matrix.board }}-debug/sdkconfig"
+          cp "build/${{ matrix.board }}-debug/dfu32.bin" "build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin"
 
       - name: ccache stats
         if: always()
@@ -103,13 +153,21 @@ jobs:
           path: .ccache
           key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
+      # Where the bytes go, so a budget failure (next step) says what grew.
+      - name: Size by component
+        run: |
+          . "$IDF_PATH/export.sh"
+          # Into a file first: piping straight into `head` kills idf.py with SIGPIPE.
+          idf.py -B "build/${{ matrix.board }}" size-components > size-components.txt 2>&1
+          head -45 size-components.txt
+
       - name: App size budget
         run: python3 tools/check_app_size.py "build/${{ matrix.board }}"
 
       - name: Merged image (single file, flash at 0x0)
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py -B "build/${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
+          idf.py --preset "${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -124,5 +182,13 @@ jobs:
             build/${{ matrix.board }}/partition_table/partition-table.bin
             build/${{ matrix.board }}/flasher_args.json
             build/${{ matrix.board }}/sdkconfig
-            dependencies.lock
+            dependencies.lock.*
           if-no-files-found: warn
+
+      # Its own artifact, so nothing that picks up dfu32-<board> for a
+      # release can ship the fault-injection build by accident.
+      - name: Upload debug build (bench only, never release)
+        uses: actions/upload-artifact@v7
+        with:
+          name: dfu32-${{ matrix.board }}-debug
+          path: build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin

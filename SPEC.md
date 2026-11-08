@@ -85,9 +85,9 @@ Registry components are declared in the `idf_component.yml` of the component tha
 | `h2zero/esp-nimble-cpp` | 2.6.0 (pinned) | BLE central, scanning, Improv BLE peripheral | M1 (in use) |
 | `espressif/mdns` | ^1.10 | `dfu32-xxxx.local` | M3a (in use) |
 | `espressif/cjson` | ^1.7.19 | Manifest, API bodies, target record | M3a (in use) |
-| `espressif/button` (esp-iot-solution) | 4.2.x | Debounce, long-press events for the 5 s unclaim and 15 s factory reset (§9.3) | M4 |
-| `espressif/led_indicator` (esp-iot-solution) on `espressif/led_strip` | 2.1.x / 3.1.x | NeoPixel and red-LED patterns with priorities (§13.4) | M4 |
-| `improv-wifi/sdk-cpp` (not in the registry; vendored or fetched) | 1.2.x | Improv packet parsing and checksums; DFU32 supplies the serial and BLE transports (§9.2) | M4 (BLE), M5 (Serial) |
+| `espressif/button` (esp-iot-solution) | 4.2.x | Debounce and press timing for the 2 s / 5 s / 15 s holds (§9.3) | M4a (in use) |
+| `espressif/led_indicator` (esp-iot-solution) on `espressif/led_strip` | 2.1.x / 3.1.x | NeoPixel and red-LED blink patterns (§13.4) | M4a (in use) |
+| `improv-wifi/sdk-cpp` (not in the registry; vendored in `components/improv/third_party/sdk-cpp`, 1.2.7) | 1.2.x | Improv packet parsing and RPC results; DFU32 supplies the serial and BLE transports (§9.2) | M4a (BLE, in use), M5 (Serial) |
 | `espressif/mqtt` (esp-mqtt) | 1.x | MQTT + Home Assistant discovery (§10.3) | post-v1 |
 | `espressif/libsodium` | 1.0.x | Ed25519 verification for signed manifests (§11); PSA in IDF 6 has no Ed25519 | post-v1 |
 
@@ -323,7 +323,7 @@ Also: VERIFYING_STAGED → FAILED (nothing staged, re-hash fails), and RADIO_HAN
 - WiFi stays up during FETCHING and AWAITING_TARGET; scanning coexists through software coex.
 - **WiFi-off during the transfer is an option.** The device-level default is the `wifi_off_dfu` config value. Any flash request can override it with `"wifi_off": true|false`, and the UI has a checkbox next to **Flash**.
   - The value used is recorded in each run record (`wifi_off`) so that on/off runs can be compared.
-  - The shipped default is decided after bench comparison. The nRF52's flash writes are probably the bottleneck, so WiFi on/off may make little difference.
+  - **Default: WiFi stays on.** Bench, 2026-11-07, Feather V2 → Heltec T096 (OTAFIX), 413,680 B image, 5 runs each: WiFi off 12.3 kB/s, 39 s total; WiFi on 10.2 kB/s, 47 s total; no failures or retries either way. Under a minute either way, and keeping WiFi up keeps live progress in `/status`.
 - When the option is on and the target is found, DFU32 calls `esp_wifi_stop()` before connecting. The driver stays initialised, so restoring is just `esp_wifi_start()` plus reconnect.
 - While WiFi is off, the HTTP API can't be reached. The LED shows progress, and the run record captures it afterwards.
 - With the option off, WiFi stays up for live progress, and the §7.3 deadline/restore layers still apply. On S3 this relies on software coexistence; on a classic ESP32 it's expected to be slower.
@@ -410,7 +410,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `hostname` | str | Default `dfu32-XXXX` (last 2 bytes of MAC). Also the mDNS name. |
 | `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
 | `ntp_server` | str | Default `pool.ntp.org` |
-| `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Provisionally 1; the final default is set after bench comparison. Per-request override: `wifi_off`. |
+| `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Default 0 (WiFi stays on; bench comparison in §7.1). Per-request override: `wifi_off`. |
 | `dfu_deadline` | u32 | Cap on the §7.3 run deadline (`dfu_deadline_max_s`), default 1200, 120–7200. |
 | `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
@@ -430,16 +430,25 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
   - Only input is parsed. Log output on the port is harmless, because ESP Web Tools ignores bytes outside Improv frames. On the classic ESP32, the ROM and second-stage bootloader print to UART0 before the app starts (115200 with the usual 40 MHz crystal). That output is outside DFU32's control and is ignored the same way.
   - It stays on after provisioning, so the installer page can recognise DFU32 and offer to change WiFi. Anyone with USB access can already do that with the `wifi` command.
 - Both transports use the Improv project's C++ SDK (`improv-wifi/sdk-cpp`, §4.1) for packet parsing, behind one transport-agnostic Improv core (M4): save the credentials, wait for the connection, then report provisioned with the redirect URL, or an error. DFU32 provides the UART/USB and NimBLE GATT plumbing.
-- **Improv BLE** runs only while unprovisioned, or for 5 min after a 2 s button press. It uses a NimBLE GATT server and advertising. It is fully torn down when provisioning finishes or the window expires, and a DFU can't start while it is active.
+- **Improv BLE** runs only while unprovisioned, or for 5 min after a 2 s button press (or from the console with `improv start`). It uses a NimBLE GATT server (`components/improv`) and advertises the Improv service with its service data (state, capabilities: identify). Implemented in M4a:
+  - It holds the device-wide BLE lease while open, so a scan or flash can't start (`409 Busy`, holder `improv`; the console says to set WiFi first or `improv stop`). This is the `BLE_BUSY` precheck of §7.2.
+  - There is no authorisation step: a session starts in "authorized". The window itself is the physical control (unprovisioned, or a button press).
+  - RPCs: WiFi settings, identify (the NeoPixel blinks white for 10 s) and device info (`DFU32`, the firmware version, the chip, the hostname). Packets split across BLE writes are reassembled; anything over 200 bytes is refused.
+  - On WiFi settings it tries them from RAM only (`esp_wifi_set_storage(RAM)`) and waits up to 30 s for an IP. On success it writes them to flash, sends the redirect URL `http://<ip>/`, reports "provisioned", and closes 5 s later. On failure, or a close mid-attempt, it reports "unable to connect" and puts the previous network back (or clears it again if there was none). A typo or a power cut during the attempt doesn't strand a working device.
+  - One task owns all Improv state (open, close, RPC writes, the advert, the connection attempt); NimBLE callbacks, the button and the console only post to it, and the 5-minute timer's messages carry a generation so a stale one is ignored.
+  - Closing stops advertising, drops a connected client and releases the lease. The GATT service stays registered (removing it means a GATT reset); without advertising nobody finds it.
+- DFU32 joins WPA2-Personal and open networks; WPA2/WPA3 transition-mode networks connect over WPA2. WPA3-only and Enterprise networks aren't supported (left out to fit the 4 MB layout, §12.1).
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
 ### 9.3 Token bootstrap (decided: claim on first use)
 
 - While unclaimed, `POST /api/v1/claim` returns a newly generated token **once**: 32 bytes from `esp_fill_random` with the radio on, encoded base64url. DFU32 stores its SHA-256.
 - While unclaimed, the mutating endpoints are disabled; only `GET /status`, `GET /`, and `/claim` work.
-- Button handling uses `espressif/button` long-press events (§4.1).
-- **Unclaim:** hold the button 5 s. The LED flashes amber. This clears `token_sha256` without touching anything else.
-- **Factory reset:** hold 15 s. This erases the `dfu32` namespace and WiFi credentials. The staging partition and run log are kept.
+- Button handling uses `espressif/button` (§4.1). What happens depends on how long the button was held when it is **released**, and the NeoPixel shows which action a release would trigger (both read the same press timestamp, so they always agree):
+  - **2–5 s** (amber slow blink): open Improv BLE for 5 minutes (§9.2).
+  - **Unclaim, 5–15 s** (amber fast blink): clears `token_sha256` without touching anything else.
+  - **Factory reset, 15 s or more** (solid amber): erases the `dfu32` namespace and WiFi credentials, then reboots. The staging partition and run log are kept. It is refused while a job, a console flash/probe or a scan holds the BLE lease (a reset mid-flash would leave the target erased), and it doesn't reboot unless both erasures succeeded.
+- The button is `CONFIG_DFU32_BUTTON_GPIO` (BOOT on the Feather S3 and N16R8, the user button on GPIO38 on the Feather V2).
 - On boards with no button, use `POST /api/v1/system/token/rotate` while authenticated, or reflash with an NVS erase.
 
 ---
@@ -609,6 +618,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - **App size budget:** CI fails a build above **1.30 MB**, which is 90% of a slot.
 - Estimated footprint: WiFi + NimBLE (central + peripheral) + httpd + http_client (no TLS) + cJSON + mDNS + UI comes to about 1.0–1.2 MB **[bench]**.
 - If the budget is blown, the levers are: trim NimBLE roles, drop mDNS, move the UI into its own partition.
+- **M4a:** Improv BLE (NimBLE GATT server and advertising), `led_indicator` + `led_strip` (RMT) and `button` added about 97 KB and took the Feather S3 to 92.4%. Pulled in first, because DFU32 uses none of it: Wi-Fi soft-AP, WPA2/3-Enterprise (and its GMAC suites), OWE, and lwIP IPv6 (`sdkconfig.defaults`). WPA3-Personal stays. That saved about 80 KB: the Feather S3 app went from 1,392,064 B to 1,312,144 B (87.1%, about 44 KB under budget). CI prints `idf.py size-components` before the budget check. Then **WPA3-Personal off** as well (decided 2026-11-08, to leave room for the M4b UI): with SAE and OWE gone nothing calls mbedTLS's elliptic-curve code (most of TF-PSA crypto's 107 KB), so the linker drops it. `ESP_WIFI_MBEDTLS_CRYPTO` stays on, because in IDF 6.1 the supplicant's built-in crypto doesn't link (undefined `sha1_vector`). Measured: Feather S3 1,312,144 → 1,282,992 B (85.1%, about 73 KB under budget). TF-PSA crypto is still about 112 KB, because PSA keeps every enabled algorithm reachable; trimming its algorithm set (`MBEDTLS_*` / `PSA_WANT_*`) is the next crypto lever. WPA2/WPA3 transition-mode networks still connect over WPA2; WPA3-only networks are not supported. Further levers: mDNS (33 KB), or fewer INFO log strings (the merged string pool, about 137 KB, which the size tool charges to `esp_stdio`).
 
 ### 12.2 `partitions/8mb.csv` (8 MB and 16 MB boards)
 
@@ -720,17 +730,20 @@ Writes are rare (one sector per run), so wear isn't a concern.
 | Colour | Meaning |
 |---|---|
 | dim green | idle |
-| blue pulse | fetching or staging |
+| dim yellow, slow blink | WiFi configured but not connected |
+| white, slow blink | Improv BLE open, waiting for WiFi settings |
+| white, fast blink | Improv "identify" (10 s) |
+| blue pulse | fetching, verifying or staging |
 | cyan blink | awaiting target (run `start ota`) |
-| magenta fill | transfer progress, brightness tracking percent done |
+| magenta, brightness tracking percent done | transfer |
 | solid green, 10 s | success |
-| solid red | last run failed |
+| solid red | last job failed (until the next job) |
 | red fast blink | target erased and not reflashed |
-| amber flash | button-hold feedback |
+| amber: slow blink / fast blink / solid | button held 2 s / 5 s / 15 s (§9.3) |
 
 On the Feathers, the plain red LED (GPIO13) is the **attention** indicator, separate from the NeoPixel. It stays solid while the target is known to be erased and not yet reflashed, so the warning is visible even if the NeoPixel is dimmed or disabled. It blinks during the transfer.
 
-Implemented with `espressif/led_indicator` over `espressif/led_strip` (§4.1): each row is a blink pattern, and when several apply the highest-priority one shows (erased target > failure > transfer > awaiting > fetching > idle). The red LED uses the same component in GPIO mode.
+Implemented with `espressif/led_indicator` over `espressif/led_strip` (§4.1) in `components/indicator`: each row is a blink pattern. When several apply, the highest priority shows: button feedback > identify > a running job (transfer > awaiting > fetching) > Improv > erased target > failure > success > WiFi down > idle. A running job outranks the stale outcomes so that the re-flash that fixes an erased target shows its progress; the red LED keeps the erased warning meanwhile. The choice is pure and host-tested (`indicator/logic.hpp`). The red LED uses the same component in GPIO mode.
 
 ---
 
@@ -813,8 +826,8 @@ dfu32/
     job/                 orchestrator task, busy lease, handover, deadline, stall watchdog, restore check
     runlog/              log ring + run-record partition
     api/                 esp_http_server routes, claim / bearer auth; embedded UI in M4
-    indicator/           (M4) LED + button
-    improv/              (M4) Improv core + BLE transport; Serial transport in M5
+    indicator/           LEDs + button (led_indicator, button); pure pattern/hold logic
+    improv/              Improv core + BLE transport (vendored sdk-cpp); Serial transport in M5
   web/                   (M5) static browser installer page for GitHub Pages
   tools/                 dfu32_pack.py, dfu32_stage_image.py, layout and size checks
   test/host/             Catch2 tests for the pure components

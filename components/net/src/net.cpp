@@ -235,7 +235,7 @@ bool set_credentials(const std::string& ssid, const std::string& password) {
     std::memcpy(cfg.sta.password, password.data(), password.size());
     // Refuse to fall back to an open network when a password was given.
     cfg.sta.threshold.authmode = password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-    cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;  // unused while WPA3 is off (sdkconfig.defaults)
     s_want_connect = false;
     local_disconnect();
     const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
@@ -257,6 +257,35 @@ bool forget() {
     const bool ok = esp_wifi_set_config(WIFI_IF_STA, &cfg) == ESP_OK;
     s_want_connect = true;  // a later set_credentials() connects again
     return ok;
+}
+
+bool try_credentials(const std::string& ssid, const std::string& password) {
+    if (!s_init) return false;
+    if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) return false;
+    const bool ok = set_credentials(ssid, password);
+    // Back to flash for everything else; this config stays RAM-only until
+    // commit_credentials() writes it again.
+    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    return ok;
+}
+
+bool commit_credentials() {
+    if (!s_init) return false;
+    wifi_config_t cfg{};
+    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK || cfg.sta.ssid[0] == 0) return false;
+    const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);  // storage is FLASH again
+    if (err != ESP_OK) ESP_LOGE(TAG, "saving WiFi credentials: %s", esp_err_to_name(err));
+    return err == ESP_OK;
+}
+
+bool stored_credentials(std::string& ssid, std::string& password) {
+    if (!s_init) return false;
+    wifi_config_t cfg{};
+    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK || cfg.sta.ssid[0] == 0) return false;
+    ssid.assign(reinterpret_cast<const char*>(cfg.sta.ssid), strnlen(reinterpret_cast<const char*>(cfg.sta.ssid), 32));
+    password.assign(reinterpret_cast<const char*>(cfg.sta.password),
+                    strnlen(reinterpret_cast<const char*>(cfg.sta.password), 64));
+    return true;
 }
 
 bool wait_connected(uint32_t timeout_ms) {

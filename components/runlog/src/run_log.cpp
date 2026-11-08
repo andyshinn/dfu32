@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <new>
 
 #include "dfu_proto/staging_format.hpp"  // crc32_ieee
 
@@ -23,6 +25,14 @@ uint32_t get_u32(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
            (static_cast<uint32_t>(p[3]) << 24);
 }
+
+using SlotBuf = std::array<uint8_t, kSlotSize>;
+
+/// A slot is 4 KB: keep it off the caller's stack. RunLog runs on small
+/// stacks (app_main's 3.5 KB when recording an interrupted run at boot, the
+/// HTTP server's 8 KB), and a stack copy there overflowed. Null when out of
+/// memory.
+std::unique_ptr<SlotBuf> slot_buf() { return std::unique_ptr<SlotBuf>(new (std::nothrow) SlotBuf{}); }
 
 uint32_t payload_crc(std::string_view json, std::string_view log) {
     uint32_t crc = dfu::crc32_ieee({reinterpret_cast<const uint8_t*>(json.data()), json.size()});
@@ -77,10 +87,11 @@ void RunLog::scan() {
     any_ = false;
     newest_seq_ = 0;
     newest_index_ = 0;
-    std::array<uint8_t, kSlotSize> buf{};
+    const auto buf = slot_buf();
+    if (!buf) return;
     for (size_t i = 0; i < storage_.slot_count(); ++i) {
         RunSlot slot;
-        if (!storage_.read_slot(i, buf) || !decode_slot(buf, slot)) continue;
+        if (!storage_.read_slot(i, *buf) || !decode_slot(*buf, slot)) continue;
         if (!any_ || slot.seq > newest_seq_) {
             any_ = true;
             newest_seq_ = slot.seq;
@@ -94,8 +105,8 @@ uint32_t RunLog::append(std::string_view json, std::string_view log) {
     if (n == 0) return 0;
     const uint32_t seq = next_seq();
     const size_t index = any_ ? (newest_index_ + 1) % n : 0;
-    std::array<uint8_t, kSlotSize> buf{};
-    if (!encode_slot(seq, json, log, buf) || !storage_.write_slot(index, buf)) return 0;
+    const auto buf = slot_buf();
+    if (!buf || !encode_slot(seq, json, log, *buf) || !storage_.write_slot(index, *buf)) return 0;
     any_ = true;
     newest_seq_ = seq;
     newest_index_ = index;
@@ -104,10 +115,11 @@ uint32_t RunLog::append(std::string_view json, std::string_view log) {
 
 std::vector<RunSlot> RunLog::list(bool with_log) {
     std::vector<RunSlot> out;
-    std::array<uint8_t, kSlotSize> buf{};
+    const auto buf = slot_buf();
+    if (!buf) return out;
     for (size_t i = 0; i < storage_.slot_count(); ++i) {
         RunSlot slot;
-        if (!storage_.read_slot(i, buf) || !decode_slot(buf, slot)) continue;
+        if (!storage_.read_slot(i, *buf) || !decode_slot(*buf, slot)) continue;
         if (!with_log) slot.log.clear();
         out.push_back(std::move(slot));
     }
@@ -116,10 +128,11 @@ std::vector<RunSlot> RunLog::list(bool with_log) {
 }
 
 bool RunLog::get(uint32_t seq, RunSlot& out) {
-    std::array<uint8_t, kSlotSize> buf{};
+    const auto buf = slot_buf();
+    if (!buf) return false;
     for (size_t i = 0; i < storage_.slot_count(); ++i) {
         RunSlot slot;
-        if (storage_.read_slot(i, buf) && decode_slot(buf, slot) && slot.seq == seq) {
+        if (storage_.read_slot(i, *buf) && decode_slot(*buf, slot) && slot.seq == seq) {
             out = std::move(slot);
             return true;
         }

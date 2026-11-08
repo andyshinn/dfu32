@@ -1,0 +1,5 @@
+## Improv BLE uses the same NimBLE C++ wrapper as dfu_ble (SPEC.md §4.1).
+## improv-wifi/sdk-cpp isn't in the registry; it is vendored in third_party/.
+dependencies:
+  idf: "~6.1.0"
+  h2zero/esp-nimble-cpp: "2.6.0"

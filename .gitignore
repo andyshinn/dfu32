@@ -3,6 +3,8 @@ build/
 managed_components/
 sdkconfig
 sdkconfig.old
+# Personal CMake presets (idf.py reads them next to CMakePresets.json)
+CMakeUserPresets.json
 
 # Host tests
 build-host*/
@@ -11,6 +13,9 @@ build-host*/
 .vscode/
 .idea/
 .DS_Store
+
+# Bench runner output (tools/dfu32_bench.py)
+bench-results/
 
 # Python
 __pycache__/

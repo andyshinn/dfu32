@@ -1,4 +1,4 @@
-# Bench guide (M1–M3b)
+# Bench guide (M1–M4a)
 
 This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
@@ -14,13 +14,13 @@ Ideally the repeater is a sacrificial board on the OTAFIX bootloader. `flash` er
 Activate your ESP-IDF 6.1 environment first. Then build:
 
 ```bash
-idf.py -B build/feather_esp32s3 -DDFU32_BOARD=feather_esp32s3 build
+idf.py --preset feather_esp32s3 build
 ```
 
 Then flash and open the monitor (use your own port):
 
 ```bash
-idf.py -B build/feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
+idf.py --preset feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 ```
 
 The monitor shows the boot banner, "layout self-check OK", the NimBLE address, and a `dfu32>` prompt. Type `help` to list the commands.
@@ -202,7 +202,7 @@ Tuning knobs:
 | `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval, then halves PRN. |
 | `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
-| `--wifi on\|off` | off | WiFi is stopped for the flash and restored afterwards (SPEC §7.1, provisional default). `--wifi on` keeps it up. The run record's `wifi_off` shows which was used, for the M3b on/off comparison. |
+| `--wifi on\|off` | on | WiFi stays up during the flash (SPEC §7.1). `--wifi off` stops it for the transfer and restores it afterwards. The run record's `wifi_off` shows which was used. |
 
 ## 6. Over the HTTP API (M3b)
 
@@ -267,6 +267,8 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 
 ### M3b bench checklist
 
+`tools/dfu32_bench.py` runs this whole list for you; see [§7](#7-automated-bench-run).
+
 - **Happy path with curl only:** claim, PUT target, flash, `start ota` from the companion app, `status` ends `SUCCEEDED`; `GET /targets/t096` shows `last_ok_version`.
 - **Bad hash:** edit `bin.sha256` in the manifest, `POST /stage` with `{"force":true}`. `status` ends `FAILED` with `HASH_MISMATCH`.
 - **Wrong board:** `PUT` the target with `"board":"rak4631"`, then flash. `FAILED`, `BOARD_MISMATCH` (from the manifest, or from the staged header with `"source":"staged"`), and the repeater is never touched.
@@ -274,11 +276,94 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 - **Busy:** while a job runs, a second `flash`, `stage`, `ble/scan` or target `PUT` gets `409`; so does the console's `scan`.
 - **Abort while armed:** `POST /jobs/current/abort` during `AWAITING_TARGET`: `FAILED`, `ABORTED`, target untouched.
 - **Offline re-flash from staging:** stage while the AP is up, start a flash with `{"source":"staged"}`, then switch the access point off and run `start ota`. Follow it on the console with `job`. It must succeed without the network. Because WiFi was already down when the target was seen, DFU32 doesn't insist on reconnecting afterwards (no reboot); `status` answers again once the AP is back.
-- **Restore watchdog and run deadline** (needs a build with `CONFIG_DFU32_DEBUG_ENDPOINTS=y`; add it to `sdkconfig.defaults` locally, never in a release):
-  - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 waits 60 s, retries once, waits 60 s, then reboots; the run record is already written and WiFi comes back after the reboot.
+- **Restore watchdog and run deadline** (needs the debug build: the `dfu32-<board>-debug` CI artifact, or `idf.py --preset <profile> -B build/<profile>-debug -DDFU32_DEBUG_ENDPOINTS=ON build`; never ship it):
+  - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 restarts WiFi and counts the restore as failed, retries once, then reboots. Each wait ends as soon as WiFi reconnects (60 s at most), so on a working network this takes seconds, not minutes. The run record is already written and WiFi comes back after the reboot.
   - `{"deadline_s":20}`: the run is aborted 20 s after the target is seen, recorded as `DEADLINE_EXCEEDED`, and WiFi is restored.
   - `{"stall_s":40}`: the DFU task blocks without a heartbeat; the stall watchdog reboots after about 30 s and the next boot records `ABORTED_BY_REBOOT`.
-- **WiFi on vs off:** at least 5 runs each with `"wifi_off":true` and `false`. Compare `rate_x10_kBps`, attempts and failures in `GET /targets/t096/runs`. This decides the shipped `wifi_off_dfu` default.
+- **WiFi on vs off:** at least 5 runs each with `"wifi_off":true` and `false`. Compare `rate_x10_kBps`, attempts and failures in `GET /targets/t096/runs`. Done 2026-11-07 (results below): WiFi off is about 20% faster, but both finish in under a minute with no failures, so `wifi_off_dfu` defaults to off (WiFi stays on).
+
+## 7. Automated bench run
+
+`tools/dfu32_bench.py` runs the §6 checklist (all but the offline re-flash, which needs the access point switched off), plus the M2b run-record checks, from your computer. It types on DFU32's console over USB serial, calls the HTTP API, serves the firmware itself (with deliberately broken copies for the failure cases), and uses esptool when a check needs a different DFU32 build. It only stops for things it can't do:
+
+- **`start ota` on the repeater.** It rings the terminal bell, prints what to do, and carries on by itself once DFU32 sees the repeater. With `--repeater-port` it sends `start ota` over the repeater's USB console instead. Check 3.5, the M3 "done when", always asks you to send it **over LoRa from the companion app**.
+- Nothing needs the access point switched off. The WiFi-drop test (§4) and the offline re-flash (§6) are left to do by hand.
+- **Fully unattended:** with `--repeater-port` and `--unattended`, nothing waits for you. 3.5 sends `start ota` over USB instead of LoRa (the report says so), and any check that would need a person is skipped.
+
+You need Python 3.8+ and esptool, which brings pyserial with it: `pip install esptool`. Close any serial monitor first, so the port is free.
+
+### Run it
+
+Download the CI artifacts for your board. `dfu32-<board>` contains the merged image and the app-only `dfu32.bin`. `dfu32-<board>-debug` contains `dfu32-<board>-debug.bin`: the same app with the fault endpoints. It is a separate artifact so it can never be shipped by mistake.
+
+```bash
+python3 tools/dfu32_bench.py --port /dev/cu.usbserial-575E0522651 \
+  --zip Heltec_T096_repeater-v1.18.0.zip --board heltec_t096 --mac F4:1C:36:A7:33:95 \
+  --wifi-ssid MyNetwork --wifi-pass MyPassword \
+  --merged-bin dfu32-feather_esp32_v2-merged.bin --app-bin dfu32.bin \
+  --debug-app-bin dfu32-feather_esp32_v2-debug.bin
+```
+
+- `--merged-bin` is the one-off flash for the new layout. It wipes NVS, so the script joins WiFi again with `--wifi-ssid`/`--wifi-pass` (or set `DFU32_WIFI_PASS`). Leave it out on later runs, and the app-only `--app-bin` is flashed instead, which keeps WiFi, the token and the target. Leave both out to test whatever is already on the board.
+- Section 4 flashes `--debug-app-bin` and puts `--app-bin` back afterwards. Without a debug build, section 4 is skipped.
+- The script serves the firmware on port 8000 (`--site-port`) at your computer's LAN address. If DFU32 can't reach it, pass `--host-ip`.
+- `python3 tools/dfu32_bench.py --list` lists the checks. `--only 3.1,3.5`, `--sections 1,2`, `--skip 3.11` and `--minimum` pick a subset. `--minimum` is what unblocks M4: 3.1, 3.2, 3.5 and 5.1.
+- `--compare-runs N` sets how many flashes 5.1 does per WiFi setting (default 3, so 6 flashes; the WiFi default is already decided, so this now only watches for regressions).
+
+A full run flashes the repeater about 20 times and takes roughly an hour, most of it in transfers and waiting for `start ota`. Ctrl+C stops after cleaning up: it aborts a running flash at a safe point, the same as typing Ctrl+C on the console.
+
+### What it changes on DFU32
+
+- It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also unclaims the device and claims it again.
+- It creates or overwrites the target (`--target-id`, default `t096`). If another target id exists, it is deleted, because v1 allows only one.
+- 3.13 renames DFU32 to `bench-dfu`, reboots, then renames it back and reboots again (`--keep-hostname` skips the rename back).
+- The staged image ends up as the image under test.
+
+### What you get
+
+Each run writes a new folder under `bench-results/` (`--out` overrides it):
+
+- `report.md`: one line per check (PASS, WARN, FAIL, SKIP or ERROR), then everything each check verified. 5.1 ends with the WiFi on/off comparison table.
+- `report.json`: the same, with run records, timelines and samples.
+- `serial.log`: everything DFU32 printed, timestamped, with the script's own notes (`###`) in between.
+- `http.log`: every API call and its response.
+- `wifi_compare.csv`: the 5.1 runs.
+
+WiFi passwords and API tokens are replaced with `<redacted>` in all of these, so the folder can be sent back as it is.
+
+A WARN means the device did what it should but something looked off: a timing outside the expected range, an mDNS name that didn't resolve on your computer, or an 8 ms interval that happened not to overrun. The note says which.
+
+### Order and dependencies
+
+The checks run in checklist order, except that 3.3 (BLE scan) runs right after 3.5. The scan needs `start ota`, and a repeater left in OTA mode would let 3.5 start without the LoRa command it is meant to test. When a check needs the repeater *not* to advertise (3.7, 3.8, 3.10) and an earlier `start ota` hasn't been used up by a flash, the script asks you to reboot the repeater first, or sends `reboot` over `--repeater-port`.
+
+Each check sets up what it needs (WiFi, token, target, staged image), so any of them can run on its own with `--only`. After a check that leaves the repeater's app erased (1.3, 3.9, 4.2), the script recovers it by flashing the staged image again. No `start ota` is needed for that, because the OTAFIX bootloader is waiting.
+
+### Developing the runner
+
+`tools/bench/fake_dfu32.py` is a rough simulator of DFU32's console and API. `tools/test_bench.py` runs the script against it, together with unit tests for the output parsers. These run in CI with the other tool tests, on a subset of the checks. `DFU32_BENCH_SIM=all` runs every check (about 2.5 minutes). When the real device and the simulator disagree, fix the simulator.
+
+## 8. Provisioning, LEDs and button (M4a)
+
+These need a phone or a computer with Bluetooth, and eyes on the board, so the bench runner doesn't cover them yet.
+
+**Improv BLE.** Use the Home Assistant companion app (Settings → Devices → "Discovered"), or https://www.improv-wifi.com/ in desktop Chrome or Edge ("Connect device to Wi-Fi").
+
+1. **Fresh device:** flash the merged bin (it wipes NVS), or run `wifi forget` and reboot. The boot log says "no WiFi network stored", `improv` shows "open", and the NeoPixel blinks white slowly.
+2. **Provision:** pick "DFU32" (or `dfu32-xxxx`) in the Improv client and enter the SSID and passphrase. Within about 10 s the client shows success and offers `http://<ip>/`, the NeoPixel goes dim green, and `wifi` shows the network. About 5 s later `improv` shows "closed".
+3. **Wrong passphrase:** after `wifi forget` and `improv start`, send a wrong passphrase. After about 30 s the client shows "unable to connect"; retrying with the right one works. If a network was stored before, `wifi` shows it again after the failed attempt.
+4. **Identify:** the Improv web page's identify, if offered, blinks the NeoPixel white quickly for 10 s.
+5. **Busy:** while Improv is open, the console's `scan` says "Improv BLE provisioning is open", and `POST /flash` answers `409` with holder `improv`. `improv stop` frees it.
+6. **Device info:** the Improv web page shows DFU32, the firmware version (from `git describe`, e.g. `v0.3.0-12-gabc1234`), the chip and the hostname. `/api/v1/status` shows the same version.
+
+**Button** (BOOT on the Feather S3 and N16R8, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
+
+7. **Hold 2–5 s:** amber slow blink while held; on release `improv` shows "open" and the NeoPixel blinks white. It closes by itself after 5 minutes.
+8. **Hold 5–15 s:** amber fast blink; on release the log says "API token cleared", `GET /status` shows `"claimed":false`, and `POST /claim` works again.
+9. **Hold 15 s or more:** solid amber; on release DFU32 erases its settings and WiFi and reboots into Improv. `runs` and `staged` still show the run history and the staged image.
+10. **Short press (< 2 s):** nothing happens.
+
+**LEDs** during an API flash with `"wifi_off":false`: blue pulse while fetching or verifying, cyan blink while armed, magenta getting brighter during the transfer (the red LED blinks), solid green for 10 s on success. For a failure, abort mid-transfer: the NeoPixel blinks red fast and the red LED stays on until a later flash succeeds. A failure before START (e.g. arm timeout) shows solid red until the next job. With the access point off, the NeoPixel blinks dim yellow.
 
 ## Bench results so far
 
@@ -296,6 +381,8 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 | 2026-11-05 | Feather V2 (1M PHY) | Heltec T096, OTAFIX 2.3 | same | 244 B, PRN 8, **interval 15 ms** (2 runs, both OK) | 27.9 s (14.8 kB/s) | |
 | 2026-11-05 | Feather V2 (1M PHY), **M2a retries** | Heltec T096, OTAFIX 2.3 | same | `--interval 8` | attempt 1: LINK_OR_OVERRUN after 27 KB; attempt 2 at 30 ms: 44.9 s | **61.0 s, recovered by itself** |
 | 2026-11-05 | Feather V2 (1M PHY), **M2a retries** | Heltec T096, OTAFIX 2.3, **power-cycled at ~12%** | same | default (20 ms) | attempt 1: link lost after 52 KB; attempt 2 found the bootloader at MAC+1, 30 ms: 45.2 s | **65.3 s, recovered by itself** |
+| 2026-11-07 | Feather V2 (1M PHY), API, **WiFi off** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | 413,680 B MeshCore repeater v1.18.1 | default (20 ms), staged | 12.3 kB/s mean, all first attempt | **39.0 s mean, 5/5** |
+| 2026-11-07 | Feather V2 (1M PHY), API, **WiFi on** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | same | default (20 ms), staged | 10.2 kB/s mean, all first attempt | **47.2 s mean, 5/5**: chosen default (live progress, under a minute) |
 
 PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash.
 

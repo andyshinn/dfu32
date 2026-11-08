@@ -81,7 +81,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - arm timeout;
   - WiFi-restore watchdog (debug fault endpoint);
   - an offline re-flash from staging with the AP off;
-  - **WiFi on vs off during the transfer** (`wifi_off` per request): at least 5 runs each, comparing rate, PRN timeouts and failures in the run records. This sets the shipped `wifi_off_dfu` default.
+  - **WiFi on vs off during the transfer** (`wifi_off` per request): at least 5 runs each, comparing rate, PRN timeouts and failures in the run records. This sets the shipped `wifi_off_dfu` default. **Done 2026-11-07:** WiFi stays on by default (47 s vs 39 s, no failures either way).
 - **Done when:** a full flash is done end to end using only HTTP calls and `start ota` sent **remotely over LoRa** from a companion app.
 - **Split into two PRs:**
   - **M3a, fetch and stage (implemented):**
@@ -91,7 +91,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - `components/config`: target settings as one atomic NVS record (`tgt0`), reading an M1 target until the first save;
     - console: `wifi`, `target board|url|id|maxapp|clear`, `check`, `stage`;
     - `tools/dfu32_pack.py`, with a golden manifest shared with the C++ tests.
-  - **M3b, orchestrator and API (implemented, awaiting bench):**
+  - **M3b, orchestrator and API (implemented; benched 2026-11-07 with `tools/dfu32_bench.py`):**
     - `components/job`: one job at a time on its own task (stage, or flash = arm then wait); a device-wide lease so the console and the API's scan can't collide with a job (`409 Busy`);
     - radio handover: WiFi stays up while fetching and waiting, and stops only once the target is seen (per request `wifi_off`, default config `wifi_off_dfu`);
     - SPEC §7.3 layers: the run deadline (`esp_timer`, `DEADLINE_EXCEEDED`), a stall watchdog fed by heartbeats from every blocking BLE wait (reboots after 30 s of silence), restore verification (retry once, then reboot), the `job_active` marker;
@@ -113,6 +113,13 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - Firmware version from the git tag: CI checks out full history (`fetch-depth: 0`) so `git describe` gives `v0.4.0` rather than a bare hash. The same string shows in `/api/v1/status`, the UI, Improv device info and, in M5, the installer manifests.
 - `docs/RECOVERY.md` and `docs/OPERATOR.md` (MeshCore walkthrough, including remote `start ota`).
 - **Done when:** a Feather flashed with `idf.py` joins WiFi over Improv BLE (for example from Home Assistant or Chrome) and then completes a repeater flash using only the web UI.
+- **Split into two PRs:**
+  - **M4a, provisioning and device (implemented, awaiting bench):**
+    - `components/improv`: a transport-agnostic Improv core (WiFi settings, identify, device info; pure and host-tested) over the vendored `improv-wifi/sdk-cpp` 1.2.7, plus the Improv BLE transport (NimBLE GATT server, advertising with Improv service data). Open while no network is stored, for 5 minutes after a 2 s button press, or with `improv start`; it holds the BLE lease while open. A failed attempt puts the previous network back;
+    - `components/indicator`: NeoPixel and red-LED patterns with `espressif/led_indicator` on `led_strip`, and the button with `espressif/button` (release after 2 s = Improv, 5 s = unclaim, 15 s = factory reset, with amber feedback while held). Pattern choice and hold timing are pure and host-tested;
+    - firmware version from `git describe` (CI checks out full history);
+    - console: `improv [start|stop]`.
+  - **M4b, web UI and self-OTA:** the UI (status, target form with the scan picker, runs, logs, system), `GET /` while unclaimed, `POST /api/v1/system/ota` with rollback (mark valid once WiFi and HTTP are up), `docs/RECOVERY.md` and `docs/OPERATOR.md`.
 
 ## M5: Browser installer (2–3 days)
 

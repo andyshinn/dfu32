@@ -153,4 +153,14 @@ bool clear_token() {
     return ok;
 }
 
+bool erase_all() {
+    nvs_handle_t h;
+    const esp_err_t err = nvs_open(kNs, NVS_READWRITE, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (err != ESP_OK) return false;
+    const bool ok = nvs_erase_all(h) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
 }  // namespace dfu32::config

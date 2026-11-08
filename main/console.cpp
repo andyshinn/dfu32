@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Bench console (USB serial): target, wifi, check, stage, scan, staged, probe,
-// flash, runs, run, logs, blreset, job, token. The HTTP API and the web UI (M4)
+// flash, runs, run, logs, blreset, job, token, improv. The HTTP API and the web UI (M4)
 // cover the same ground; the console stays as a debug tool. Commands that use
 // BLE or the staging partition take the job lease, so they can't run while an
 // API job does (and vice versa). Ctrl+C or Ctrl+D aborts the BLE commands
@@ -23,6 +23,7 @@
 #include "config/config.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "fetch/fetch.hpp"
+#include "improv/improv.hpp"
 #include "job/job.hpp"
 #include "net/net.hpp"
 #include "dfu_proto/protocol.hpp"
@@ -183,7 +184,11 @@ uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 100000
 bool acquire(job::Lease& lease) {
     if (lease.ok()) return true;
     const char* h = job::holder();
-    std::printf("Busy: %s is using BLE/staging. Wait for it (see `job`), or `job abort`.\n", h ? h : "something");
+    if (h != nullptr && std::strcmp(h, "improv") == 0) {
+        std::printf("Busy: Improv BLE provisioning is open. Set WiFi first, or `improv stop`.\n");
+    } else {
+        std::printf("Busy: %s is using BLE/staging. Wait for it (see `job`), or `job abort`.\n", h ? h : "something");
+    }
     return false;
 }
 
@@ -271,7 +276,8 @@ int cmd_target(int argc, char** argv) {
 int cmd_wifi(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "forget") == 0) {
         const bool ok = net::forget();
-        std::printf("%s\n", ok ? "WiFi credentials cleared." : "Failed to clear WiFi credentials.");
+        std::printf("%s\n", ok ? "WiFi credentials cleared. `improv start` opens Improv BLE to set new ones."
+                                : "Failed to clear WiFi credentials.");
         return ok ? 0 : 1;
     }
     if (argc >= 2) {
@@ -515,17 +521,17 @@ int cmd_flash(int argc, char** argv) {
         o.before_transfer = [](uint8_t) { runlog::idf::job_set_stage(runlog::idf::JobStage::Transferring); };
     }
 
-    // SPEC.md §7.1: WiFi off during the transfer is the provisional default;
-    // `--wifi on` keeps it up so the two can be compared in the run records.
-    // The console is attended, so it skips the M3b run deadline and simply
-    // restores WiFi afterwards.
+    // SPEC.md §7.1: WiFi stays up during the transfer by default (bench: about
+    // 47 s vs 39 s for the T096 image, no failures either way); `--wifi off`
+    // stops it. The console is attended, so it skips the M3b run deadline and
+    // simply restores WiFi afterwards.
     bool wifi_off = false;
     const char* wifi_opt = nullptr;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--wifi") == 0) wifi_opt = argv[i + 1];
     }
-    if (!(wifi_opt != nullptr && std::strcmp(wifi_opt, "on") == 0) && net::status().initialised) {
-        std::printf("WiFi is off until the flash finishes (--wifi on keeps it up).\n");
+    if (wifi_opt != nullptr && std::strcmp(wifi_opt, "off") == 0 && net::status().initialised) {
+        std::printf("WiFi is off until the flash finishes.\n");
         std::fflush(stdout);
         wifi_off = net::stop();
     }
@@ -731,6 +737,32 @@ int cmd_token(int argc, char** argv) {
     return 0;
 }
 
+int cmd_improv(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "start") == 0) {
+        if (!improv::open(improv::Window::Console)) {
+            std::printf("Could not open Improv BLE (disabled in this build, or BLE is busy: see `job`).\n");
+            return 1;
+        }
+        std::printf("Improv BLE open: set WiFi from Home Assistant or https://www.improv-wifi.com/ "
+                    "(`improv stop` closes it).\n");
+        return 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "stop") == 0) {
+        std::printf("%s\n", improv::close() ? "Improv BLE closing." : "Improv BLE is not open.");
+        return 0;
+    }
+    static const char* const kStates[] = {"stopped", "awaiting authorization", "waiting for WiFi settings",
+                                          "connecting", "provisioned"};
+    const improv::Snapshot snap = improv::snapshot();
+    const auto st = static_cast<unsigned>(snap.state);
+    if (snap.active) {
+        std::printf("Improv BLE open: %s\n", st < 5 ? kStates[st] : "?");
+    } else {
+        std::printf("Improv BLE closed (`improv start` opens it)\n");
+    }
+    return 0;
+}
+
 // linenoise redraws the prompt with a raw write() that starts with "\r" and
 // "erase to end of line". Anything still in the stdio buffer at that point is
 // overwritten or appears after the prompt, so flush before returning.
@@ -789,6 +821,7 @@ void start_console() {
         &cmd_blreset);
     reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
     reg("token", "API token: show claim state, issue a new token, or unclaim.", "[rotate | clear]", &cmd_token);
+    reg("improv", "Improv BLE WiFi provisioning: show state, open it, or close it.", "[start | stop]", &cmd_improv);
 
     ESP_LOGI(TAG, "console ready; type 'help'");
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
