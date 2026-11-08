@@ -36,4 +36,9 @@ bool load_token_hash(std::array<uint8_t, 32>& out);
 bool save_token_hash(const std::array<uint8_t, 32>& hash);
 bool clear_token();
 
+/// Factory reset (SPEC.md §9.3): erases the whole `dfu32` namespace (target,
+/// device settings, token hash). WiFi credentials are the WiFi driver's and
+/// are cleared separately; the staging partition and run log are kept.
+bool erase_all();
+
 }  // namespace dfu32::config

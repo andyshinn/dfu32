@@ -1,4 +1,4 @@
-# Bench guide (M1–M3b)
+# Bench guide (M1–M4a)
 
 This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
@@ -342,6 +342,28 @@ Each check sets up what it needs (WiFi, token, target, staged image), so any of 
 ### Developing the runner
 
 `tools/bench/fake_dfu32.py` is a rough simulator of DFU32's console and API. `tools/test_bench.py` runs the script against it, together with unit tests for the output parsers. These run in CI with the other tool tests, on a subset of the checks. `DFU32_BENCH_SIM=all` runs every check (about 2.5 minutes). When the real device and the simulator disagree, fix the simulator.
+
+## 8. Provisioning, LEDs and button (M4a)
+
+These need a phone or a computer with Bluetooth, and eyes on the board, so the bench runner doesn't cover them yet.
+
+**Improv BLE.** Use the Home Assistant companion app (Settings → Devices → "Discovered"), or https://www.improv-wifi.com/ in desktop Chrome or Edge ("Connect device to Wi-Fi").
+
+1. **Fresh device:** flash the merged bin (it wipes NVS), or run `wifi forget` and reboot. The boot log says "no WiFi network stored", `improv` shows "open", and the NeoPixel blinks white slowly.
+2. **Provision:** pick "DFU32" (or `dfu32-xxxx`) in the Improv client and enter the SSID and passphrase. Within about 10 s the client shows success and offers `http://<ip>/`, the NeoPixel goes dim green, and `wifi` shows the network. About 5 s later `improv` shows "closed".
+3. **Wrong passphrase:** after `wifi forget` and `improv start`, send a wrong passphrase. After about 30 s the client shows "unable to connect"; retrying with the right one works. If a network was stored before, `wifi` shows it again after the failed attempt.
+4. **Identify:** the Improv web page's identify, if offered, blinks the NeoPixel white quickly for 10 s.
+5. **Busy:** while Improv is open, the console's `scan` says "Improv BLE provisioning is open", and `POST /flash` answers `409` with holder `improv`. `improv stop` frees it.
+6. **Device info:** the Improv web page shows DFU32, the firmware version (from `git describe`, e.g. `v0.3.0-12-gabc1234`), the chip and the hostname. `/api/v1/status` shows the same version.
+
+**Button** (BOOT on the Feather S3 and N16R8, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
+
+7. **Hold 2–5 s:** amber slow blink while held; on release `improv` shows "open" and the NeoPixel blinks white. It closes by itself after 5 minutes.
+8. **Hold 5–15 s:** amber fast blink; on release the log says "API token cleared", `GET /status` shows `"claimed":false`, and `POST /claim` works again.
+9. **Hold 15 s or more:** solid amber; on release DFU32 erases its settings and WiFi and reboots into Improv. `runs` and `staged` still show the run history and the staged image.
+10. **Short press (< 2 s):** nothing happens.
+
+**LEDs** during an API flash with `"wifi_off":false`: blue pulse while fetching or verifying, cyan blink while armed, magenta getting brighter during the transfer (the red LED blinks), solid green for 10 s on success. For a failure, abort mid-transfer: the NeoPixel blinks red fast and the red LED stays on until a later flash succeeds. A failure before START (e.g. arm timeout) shows solid red until the next job. With the access point off, the NeoPixel blinks dim yellow.
 
 ## Bench results so far
 

@@ -17,6 +17,8 @@ idf_component_register(
         mbedtls
         esp_timer
         fetch
+        improv
+        indicator
         job
         net
         nvs_flash

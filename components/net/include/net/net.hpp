@@ -36,6 +36,10 @@ bool set_credentials(const std::string& ssid, const std::string& password);
 /// Clears stored credentials and disconnects.
 bool forget();
 
+/// The stored network, so a failed Improv attempt can put it back. False when
+/// none is stored.
+bool stored_credentials(std::string& ssid, std::string& password);
+
 /// Blocks until connected or `timeout_ms` passes.
 bool wait_connected(uint32_t timeout_ms);
 

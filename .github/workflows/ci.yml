@@ -54,7 +54,12 @@ jobs:
       # the image tag is rebuilt even though the toolchain is identical.
       CCACHE_COMPILERCHECK: content
     steps:
+      # Full history and tags, so ESP-IDF's `git describe` gives the firmware
+      # version (v0.4.0, or v0.4.0-3-gabc1234 between tags) instead of a bare
+      # hash. It shows in /api/v1/status and Improv device info.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # ${{ github.workspace }} is the host path in container jobs, so derive
       # container paths from $GITHUB_WORKSPACE at runtime instead. The cache

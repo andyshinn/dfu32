@@ -259,6 +259,16 @@ bool forget() {
     return ok;
 }
 
+bool stored_credentials(std::string& ssid, std::string& password) {
+    if (!s_init) return false;
+    wifi_config_t cfg{};
+    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK || cfg.sta.ssid[0] == 0) return false;
+    ssid.assign(reinterpret_cast<const char*>(cfg.sta.ssid), strnlen(reinterpret_cast<const char*>(cfg.sta.ssid), 32));
+    password.assign(reinterpret_cast<const char*>(cfg.sta.password),
+                    strnlen(reinterpret_cast<const char*>(cfg.sta.password), 64));
+    return true;
+}
+
 bool wait_connected(uint32_t timeout_ms) {
     if (!s_init) return false;
     return (xEventGroupWaitBits(s_events, kGotIp, pdFALSE, pdTRUE, pdMS_TO_TICKS(timeout_ms)) & kGotIp) != 0;
