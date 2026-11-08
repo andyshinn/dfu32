@@ -116,6 +116,12 @@ Package the release on your computer and serve it over plain HTTP:
 python3 tools/dfu32_pack.py RAK_4631_repeater-v1.18.0-81dbae5.zip --board rak4631 --out site/rak4631
 ```
 
+Or let `dfu32_meshcore_fetch.py` find and download the MeshCore release for you, then pack it the same way (`--latest repeater` instead of `--tag` takes the newest release; `--list` shows the nRF52 env names):
+
+```bash
+python3 tools/dfu32_meshcore_fetch.py --tag repeater-v1.18.0 --env RAK_4631_repeater --board rak4631 --out site/rak4631
+```
+
 ```bash
 python3 -m http.server -d site 8000
 ```
@@ -328,6 +334,7 @@ Each run writes a new folder under `bench-results/` (`--out` overrides it):
 - `serial.log`: everything DFU32 printed, timestamped, with the script's own notes (`###`) in between.
 - `http.log`: every API call and its response.
 - `wifi_compare.csv`: the 5.1 runs.
+- `soak.csv`: the 6.1 runs, one row each, written as the soak goes.
 
 WiFi passwords and API tokens are replaced with `<redacted>` in all of these, so the folder can be sent back as it is.
 
@@ -338,6 +345,26 @@ A WARN means the device did what it should but something looked off: a timing ou
 The checks run in checklist order, except that 3.3 (BLE scan) runs right after 3.5. The scan needs `start ota`, and a repeater left in OTA mode would let 3.5 start without the LoRa command it is meant to test. When a check needs the repeater *not* to advertise (3.7, 3.8, 3.10) and an earlier `start ota` hasn't been used up by a flash, the script asks you to reboot the repeater first, or sends `reboot` over `--repeater-port`.
 
 Each check sets up what it needs (WiFi, token, target, staged image), so any of them can run on its own with `--only`. After a check that leaves the repeater's app erased (1.3, 3.9, 4.2), the script recovers it by flashing the staged image again. No `start ota` is needed for that, because the OTAFIX bootloader is waiting.
+
+### Soak (M6)
+
+Check 6.1 is the M6 soak: N flashes in a row, alternating between two versions, with faults mixed in. It only runs when you ask for it with `--soak N`; on its own, `--soak` runs just the soak.
+
+```bash
+python3 tools/dfu32_bench.py --port /dev/cu.usbserial-575E0522651 --repeater-port /dev/cu.usbmodem1101 --unattended \
+  --zip Heltec_T096_repeater-v1.18.0-81dbae5.zip --soak-zip Heltec_T096_repeater-v1.17.0-0a1b2c3.zip \
+  --board heltec_t096 --mac F4:1C:36:A7:33:95 --soak 20 \
+  --debug-app-bin dfu32-feather_esp32_v2-debug.bin --app-bin dfu32.bin
+```
+
+- Odd runs flash `--zip`, even runs `--soak-zip` (`--soak-bin`/`--soak-dat` work too), so every successful flash changes the version. Each run points the target at that image's manifest and flashes with `source: manifest`, so the download and staging are part of every run. Without a second image every run flashes the same one, and the report warns.
+- Every third run (`--soak-fault-every`) gets the next fault in turn from `--soak-faults` (default `reset,abort,deadline,stall,restore`; `none` for clean runs only):
+  - `reset`: DFU32 is reset at 20% of the transfer (expects `ABORTED_BY_REBOOT`);
+  - `abort`: `POST /jobs/current/abort` at 20% (expects `FAILED ABORTED`);
+  - `deadline`, `stall`, `restore`: the §14.2 debug faults, as in checks 4.1-4.3. They need the debug build (`--debug-app-bin`, put back with `--app-bin` afterwards) and are left out, with a note, without it.
+- After a run that didn't flash, the soak flashes the staged image again (`source: staged`), as you would by hand. A run counts as **recovered** when the target's last run is a new `SUCCEEDED` record and `last_ok_version` is that run's image. With `--repeater-port`, the repeater's `ver` must also show it when the version contains `v<x.y.z>-<commit>` (as `dfu32_meshcore_fetch.py` and MeshCore's zip names do).
+- 6.1 fails if any run is not recovered; that is the M6 bar (zero unrecovered failures on OTAFIX). A run without a fault that needed a recovery flash is a WARN. If the repeater stops answering `ver` after a failed run, the soak stops there.
+- Without `--repeater-port` you'll be asked for `start ota` on every run, so use it with `--unattended` for a soak. 20 runs on the T096 take about 30-40 minutes.
 
 ### Developing the runner
 

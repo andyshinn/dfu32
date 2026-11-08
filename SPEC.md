@@ -602,7 +602,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 
 **Server tooling** (`tools/`, Python, MIT):
 - `dfu32-pack <dfu.zip> --board rak4631 --version … --out dir/` (`tools/dfu32_pack.py`, M3a) reads the adafruit-nrfutil `manifest.json` in the zip, extracts `.bin` and `.dat`, validates them (word alignment, dev type, CRC16, max size), and writes `manifest.json`.
-- `dfu32-meshcore-fetch --tag repeater-v1.18.0 --env RAK_4631_repeater` resolves the asset through the GitHub API, because asset names carry a SHA suffix and `releases/latest` is shared across firmware types. It then calls `dfu32-pack`. This is MeshCore-specific, so it stays in tooling.
+- `dfu32-meshcore-fetch --tag repeater-v1.18.0 --env RAK_4631_repeater --board rak4631 --out dir/` (`tools/dfu32_meshcore_fetch.py`) resolves the asset through the GitHub API, because asset names carry a SHA suffix (`<env>-<version>-<commit>.zip`) and `releases/latest` is shared across firmware types. `--latest repeater` picks the highest published `repeater-v…` release instead of a fixed tag, and `--list` shows a release's nRF52 envs. It checks the download against the release's size and SHA-256 digest, then calls `dfu32-pack`. The manifest version defaults to `<version>-<commit>`, which is what the repeater's `ver` prints. This is MeshCore-specific, so it stays in tooling.
 - `dfu32-stage-image` builds a raw staging-partition image for flashing with `parttool.py` (used by Milestone 1).
 
 ---
