@@ -8,6 +8,7 @@ the fault cases from BENCH.md §4 without editing files by hand:
   /badhash/manifest.json   bin.sha256 has one hex digit changed  -> HASH_MISMATCH
   /badsize/manifest.json   firmware.bin is served one byte long   -> SIZE_MISMATCH
   /missing/manifest.json   everything 404s                        -> HTTP_ERROR
+  /alt/manifest.json       a second image (--soak-zip), for the soak's alternating versions
 
 Every request is recorded, so a check can tell whether DFU32 actually
 downloaded firmware.bin (fresh stage) or reused the staged copy.
@@ -43,11 +44,13 @@ class FirmwareSite:
         self.dat = dat
         self.board = board
         self.version = version
+        self.max_app_size = max_app_size
         self.manifest = dfu32_pack.build_manifest(bin_data, dat, self.pkt, boards=[board], version=version,
                                                   name="DFU32 bench")
         bad = copy.deepcopy(self.manifest)
         bad["bin"]["sha256"] = flip_hex_digit(bad["bin"]["sha256"])
         self._manifests = {"good": self.manifest, "badhash": bad, "badsize": self.manifest}
+        self._files = {v: (bin_data, dat) for v in self._manifests}
         self.port = port
         self.bind = bind
         self.hits: list[dict] = []
@@ -60,6 +63,29 @@ class FirmwareSite:
         bin_data, dat = si.load_package(zip_path, bin_path, dat_path)
         version = version or (zip_path.stem if zip_path else "bench")
         return cls(bin_data, dat, board=board, version=version[:63], **kw)
+
+    def add_image(self, variant: str, bin_data: bytes, dat: bytes, version: str) -> dict:
+        """Serves another image (same board) under /<variant>/, e.g. the soak's second version."""
+        pkt = si.validate(bin_data, dat, self.max_app_size)
+        m = dfu32_pack.build_manifest(bin_data, dat, pkt, boards=[self.board], version=version[:63],
+                                      name="DFU32 bench")
+        self._manifests[variant] = m
+        self._files[variant] = (bin_data, dat)
+        return m
+
+    def add_package(self, variant: str, zip_path: Optional[Path], bin_path: Optional[Path],
+                    dat_path: Optional[Path], version: str = "") -> dict:
+        bin_data, dat = si.load_package(zip_path, bin_path, dat_path)
+        return self.add_image(variant, bin_data, dat, version or (zip_path.stem if zip_path else variant))
+
+    def has(self, variant: str) -> bool:
+        return variant in self._manifests
+
+    def version_of(self, variant: str = "good") -> str:
+        return self._manifests[variant]["version"]
+
+    def sha256_of(self, variant: str = "good") -> str:
+        return self._manifests[variant]["bin"]["sha256"]
 
     @property
     def sha256(self) -> str:
@@ -77,12 +103,13 @@ class FirmwareSite:
         if len(parts) != 2 or parts[0] not in self._manifests:
             return None
         variant, name = parts
+        bin_data, dat = self._files[variant]
         if name == "manifest.json":
             return (json.dumps(self._manifests[variant], indent=2) + "\n").encode(), "application/json"
         if name == "firmware.dat":
-            return self.dat, "application/octet-stream"
+            return dat, "application/octet-stream"
         if name == "firmware.bin":
-            return (self.bin + b"\x00" if variant == "badsize" else self.bin), "application/octet-stream"
+            return (bin_data + b"\x00" if variant == "badsize" else bin_data), "application/octet-stream"
         return None
 
     def url(self, host_ip: str, variant: str = "good") -> str:

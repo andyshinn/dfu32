@@ -21,6 +21,10 @@ Examples:
   # only what unblocks M4 (claim, target, LoRa happy path, WiFi on/off comparison)
   dfu32_bench.py --port ... --zip ... --board heltec_t096 --mac ... --minimum
 
+  # the M6 soak: 20 flashes alternating two versions, with faults; --repeater-port sends `start ota`
+  dfu32_bench.py --port ... --repeater-port ... --unattended --zip v1.18.0.zip --soak-zip v1.17.0.zip \
+      --board heltec_t096 --soak 20 --debug-app-bin dfu32-feather_esp32_v2-debug.bin --app-bin dfu32.bin
+
   dfu32_bench.py --list
 """
 from __future__ import annotations
@@ -32,7 +36,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bench import checks  # noqa: E402,F401  (registers the checks)
+from bench import checks  # noqa: E402  (also registers the checks)
 from bench.console import Redactor, SerialConsole  # noqa: E402
 from bench.flasher import Flasher  # noqa: E402
 from bench.runner import Ctx, ordered, run_checks  # noqa: E402
@@ -61,8 +65,11 @@ def select(args) -> list:
         specs = MINIMUM
     elif args.sections:
         specs = args.sections.split(",")
+    elif args.soak:
+        specs = ["6"]  # --soak on its own runs just the soak
     else:
         specs = None
+        tests = [t for t in tests if t.section != "6"]  # the soak is opt-in: --soak N
     if specs is not None:
         tests = [t for t in tests if any(matches(s, t.id) for s in specs)]
     if args.skip:
@@ -122,6 +129,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how long DFU32 waits for `start ota` each time (default 300 s, or 120 s with "
                         "--repeater-port, where the runner sends it at once)")
 
+    g = ap.add_argument_group("soak (section 6, M6): runs only with --soak")
+    g.add_argument("--soak", type=int, default=0, metavar="N",
+                   help="flash N times in a row (M6 asks for 20); on its own, runs only the soak")
+    g.add_argument("--soak-zip", type=Path, help="a second DFU .zip for the same board: runs alternate between it "
+                                                 "and --zip, so each flash visibly changes the version")
+    g.add_argument("--soak-bin", type=Path, help="second image's .bin (instead of --soak-zip)")
+    g.add_argument("--soak-dat", type=Path, help="second image's .dat (instead of --soak-zip)")
+    g.add_argument("--soak-version", default="", help="second image's version (default: its zip's file name)")
+    g.add_argument("--soak-faults", type=soak_faults, default=list(checks.SOAK_FAULTS),
+                   help=f"comma-separated faults to mix in, taken in turn (default {','.join(checks.SOAK_FAULTS)}; "
+                        "'none' for clean runs only). deadline, stall and restore need the debug build "
+                        "(--debug-app-bin) and are left out without it")
+    g.add_argument("--soak-fault-every", type=int, default=3, metavar="K",
+                   help="inject a fault on every K-th run (default 3)")
+
     g = ap.add_argument_group("behaviour")
     g.add_argument("--unattended", action="store_true",
                    help="run with nobody at the keyboard: 3.5 sends `start ota` over --repeater-port instead of "
@@ -134,6 +156,17 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--echo", action="store_true", help="also print everything DFU32 logs")
     g.add_argument("--out", type=Path, help="results folder (default bench-results/<date-time>)")
     return ap
+
+
+def soak_faults(text: str) -> list:
+    items = [f.strip() for f in text.split(",") if f.strip()]
+    if items == ["none"]:
+        return []
+    bad = [f for f in items if f not in checks.SOAK_FAULTS]
+    if bad or not items:
+        raise argparse.ArgumentTypeError(f"unknown fault(s) {', '.join(bad) or text!r}; "
+                                         f"choose from {', '.join(checks.SOAK_FAULTS)} or 'none'")
+    return items
 
 
 def setup(ctx: Ctx) -> None:
@@ -178,18 +211,31 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--unattended needs --repeater-port, so the runner can send `start ota` itself")
     if args.unattended and (args.manual_reset or args.power_cycle):
         ap.error("--unattended can't be combined with --manual-reset or --power-cycle")
+    if bool(args.soak_bin) != bool(args.soak_dat):
+        ap.error("--soak-bin and --soak-dat go together")
+    if args.soak < 0 or args.soak_fault_every < 0:
+        ap.error("--soak and --soak-fault-every can't be negative")
     if args.debug_app_bin and not args.app_bin:
         print("note: without --app-bin the debug build stays on DFU32 after section 4", file=sys.stderr)
 
     selected = select(args)
     if not selected:
         ap.error("no checks selected")
+    if args.soak and not any(t.section == "6" for t in selected):
+        ap.error("--soak was given, but the checks selected leave out the soak (6.1): add it to --only or "
+                 "--sections, or drop --minimum")
     try:
         site = FirmwareSite.from_package(args.zip, args.bin, args.dat, board=args.board, version=args.version,
                                          port=args.site_port)
     except (ValueError, KeyError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    if args.soak_zip or args.soak_bin:
+        try:
+            site.add_package("alt", args.soak_zip, args.soak_bin, args.soak_dat, args.soak_version)
+        except (ValueError, KeyError, OSError) as e:
+            print(f"error: the soak's second image: {e}", file=sys.stderr)
+            return 2
 
     out = args.out or Path("bench-results") / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)

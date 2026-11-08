@@ -119,7 +119,10 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - `components/indicator`: NeoPixel and red-LED patterns with `espressif/led_indicator` on `led_strip`, and the button with `espressif/button` (release after 2 s = Improv, 5 s = unclaim, 15 s = factory reset, with amber feedback while held). Pattern choice and hold timing are pure and host-tested;
     - firmware version from `git describe` (CI checks out full history);
     - console: `improv [start|stop]`.
-  - **M4b, web UI and self-OTA:** the UI (status, target form with the scan picker, runs, logs, system), `GET /` while unclaimed, `POST /api/v1/system/ota` with rollback (mark valid once WiFi and HTTP are up), `docs/RECOVERY.md` and `docs/OPERATOR.md`.
+  - **M4b, web UI and self-OTA (implemented, awaiting bench):**
+    - the web UI in one vanilla HTML file (`components/api/ui/index.html`): claim and sign-in screens, Status (job, progress, Check / Stage / Flash / Abort, staged image), Target (form, tuning, BLE scan picker), Runs (history and detail with the log), Logs (live tail), System (settings, firmware upload, token rotate, reboot). Gzipped at build time by `tools/dfu32_ui.py`, about 10 KB of the 40 KB budget, checked in CI;
+    - `POST /api/v1/system/ota`: checks chip, project and a new board tag in the image before writing (pure, host-tested), streams into the other slot, reboots; the new image confirms itself once WiFi and the API are up within 90 s, otherwise it rolls back;
+    - `docs/OPERATOR.md` (MeshCore walkthrough, remote `start ota`) and `docs/RECOVERY.md`.
 
 ## M5: Browser installer (2–3 days)
 
@@ -161,9 +164,9 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 
 ## M6: v1.0 hardening (2 days)
 
-- Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX.
+- Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX. **Runner ready:** `tools/dfu32_bench.py --soak 20` (check 6.1, [BENCH.md §7](BENCH.md#soak-m6)), tested against the simulator; awaiting the bench.
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
-- `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API).
+- `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API). **Implemented** as `tools/dfu32_meshcore_fetch.py`, with tests against a fake GitHub API.
 - Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Remove the `pages` job's push-to-`main` trigger, so the installer page serves releases only. Tag v1.0, which also publishes the installer page.
 
 ## Later (post-v1, in rough priority order)

@@ -96,6 +96,66 @@ static void record_aborted_run() {
     runlog::idf::job_end();
 }
 
+// ---- self-OTA rollback (SPEC.md §10.1, §12.3) ---------------------------------------
+// After POST /api/v1/system/ota the bootloader starts the new image as
+// "pending verify". A failed self-check, or an HTTP API that doesn't start,
+// rolls back at once. WiFi is then the deciding signal, but only for faults
+// the new image could have caused:
+//  - an address within 90 s: confirmed;
+//  - no network stored: confirmed (there is nothing to test against);
+//  - the radio is demonstrably working but the network isn't reachable (the
+//    driver reported a disconnect: AP not found, wrong passphrase, ...):
+//    confirmed with a warning, so a router that is down during the update
+//    doesn't throw away a good image;
+//  - no sign of life from WiFi at all: rolled back.
+
+namespace {
+
+constexpr uint32_t kOtaConfirmMs = 90000;
+
+bool ota_pending_verify() {
+    esp_ota_img_states_t st{};
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    return running != nullptr && esp_ota_get_state_partition(running, &st) == ESP_OK &&
+           st == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+/// A boot step failed. A just-installed image goes back to the previous one;
+/// otherwise there is nothing to roll back to, so keep running degraded.
+void boot_failed(const char* why) {
+    ESP_LOGE(TAG, "%s", why);
+    if (ota_pending_verify()) {
+        ESP_LOGE(TAG, "new firmware failed its first boot: rolling back to the previous image");
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+    }
+}
+
+void ota_confirm_task(void*) {
+    const bool up = dfu32::net::status().provisioned && dfu32::net::wait_connected(kOtaConfirmMs);
+    const dfu32::net::Status ns = dfu32::net::status();
+    if (up) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGI(TAG, "new firmware confirmed: WiFi and the HTTP API are up");
+    } else if (!ns.provisioned) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(TAG, "new firmware confirmed without a network test: no WiFi network is stored");
+    } else if (ns.last_disconnect_reason != 0) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(TAG, "new firmware confirmed: WiFi works but \"%s\" isn't reachable (reason %u); not the "
+                      "firmware's fault",
+                 ns.ssid.c_str(), ns.last_disconnect_reason);
+    } else {
+        ESP_LOGE(TAG, "new firmware shows no WiFi activity after %u s: rolling back to the previous image",
+                 static_cast<unsigned>(kOtaConfirmMs / 1000));
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+    }
+    vTaskDelete(nullptr);
+}
+
+}  // namespace
+
 extern "C" void app_main(void) {
     runlog::idf::log_capture_start(static_cast<size_t>(CONFIG_DFU32_LOG_RING_KB) * 1024);
     const esp_app_desc_t* app = esp_app_get_description();
@@ -118,17 +178,17 @@ extern "C" void app_main(void) {
     ok &= check_data_partition("runlog", kSubtypeRunlog, kMinRunlogSlots * kRunlogSlotSize);
 
     if (!ok) {
-        ESP_LOGE(TAG, "layout self-check FAILED; refusing to mark this image valid");
+        boot_failed("layout self-check FAILED; refusing to mark this image valid");
         return;
     }
     ESP_LOGI(TAG, "layout self-check OK");
 
     if (psa_crypto_init() != PSA_SUCCESS) {
-        ESP_LOGE(TAG, "psa_crypto_init failed");
+        boot_failed("psa_crypto_init failed");
         return;
     }
     if (!dfu32::ble::init()) {
-        ESP_LOGE(TAG, "BLE init failed; refusing to mark this image valid");
+        boot_failed("BLE init failed; refusing to mark this image valid");
         return;
     }
 
@@ -138,11 +198,12 @@ extern "C" void app_main(void) {
     if (!net_ok) ESP_LOGE(TAG, "WiFi init failed; networking disabled");
 
     if (!dfu32::job::init()) {
-        ESP_LOGE(TAG, "job orchestrator failed to start; refusing to mark this image valid");
+        boot_failed("job orchestrator failed to start; refusing to mark this image valid");
         return;
     }
     // The API needs the network stack; without it the console still works.
-    if (net_ok && !dfu32::api::start()) ESP_LOGE(TAG, "HTTP API failed to start");
+    const bool api_ok = net_ok && dfu32::api::start();
+    if (net_ok && !api_ok) ESP_LOGE(TAG, "HTTP API failed to start");
 
     // Improv BLE (SPEC.md §9.2): open while no network is stored; the button
     // (or `improv start`) opens it later.
@@ -198,9 +259,17 @@ extern "C" void app_main(void) {
     };
     dfu32::indicator::start(hooks);
 
-    // Mark valid once the self-check and BLE init pass. M4 (self-OTA) moves
-    // this after WiFi + HTTP come up (SPEC.md §12.3, rollback).
-    esp_ota_mark_app_valid_cancel_rollback();
+    if (ota_pending_verify()) {
+        if (!api_ok) {
+            boot_failed("new firmware can't start WiFi or the HTTP API");
+        } else {
+            ESP_LOGW(TAG, "new firmware: confirming once WiFi is up (up to %u s)",
+                     static_cast<unsigned>(kOtaConfirmMs / 1000));
+            xTaskCreate(&ota_confirm_task, "ota_confirm", 3072, nullptr, 3, nullptr);
+        }
+    } else {
+        esp_ota_mark_app_valid_cancel_rollback();  // normal boot: nothing pending
+    }
 
     dfu32::start_console();
 }

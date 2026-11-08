@@ -28,6 +28,9 @@ jobs:
       - name: Partition tables
         run: python3 tools/check_partitions.py --baseline partitions/baseline.json partitions/4mb.csv:4M partitions/8mb.csv:8M
 
+      - name: Web UI size budget
+        run: python3 tools/dfu32_ui.py check components/api/ui/index.html
+
       - name: Python tool tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 
@@ -63,7 +66,8 @@ jobs:
           echo "boards=$boards" >> "$GITHUB_OUTPUT"
 
   firmware:
-    name: Firmware (${{ matrix.board }})
+    # The release name is unchanged so existing required checks still match.
+    name: Firmware (${{ matrix.board }}${{ matrix.variant == 'debug' && '-debug' || '' }})
     needs: boards
     runs-on: ubuntu-24.04
     container: espressif/idf:v6.1
@@ -71,6 +75,10 @@ jobs:
       fail-fast: false
       matrix:
         board: ${{ fromJSON(needs.boards.outputs.boards) }}
+        # debug is the same firmware with the fault-injection endpoints, for
+        # the bench runner's safety checks (tools/dfu32_bench.py, section 4).
+        # Its own job so it builds in parallel with the release image.
+        variant: [release, debug]
     defaults:
       run:
         shell: bash
@@ -83,6 +91,7 @@ jobs:
       # Hash the compiler binary rather than its mtime, which can change when
       # the image tag is rebuilt even though the toolchain is identical.
       CCACHE_COMPILERCHECK: content
+      BUILD_DIR: build/${{ matrix.board }}${{ matrix.variant == 'debug' && '-debug' || '' }}
     steps:
       # Full history and tags, so ESP-IDF's `git describe` gives the firmware
       # version (v0.4.0, or v0.4.0-3-gabc1234 between tags) instead of a bare
@@ -95,6 +104,8 @@ jobs:
       # container paths from $GITHUB_WORKSPACE at runtime instead. The cache
       # key embeds the IDF version read from the image itself, so it can't
       # drift from the container tag above; bump "v1" to drop all caches.
+      # Each variant gets its own cache: the debug option changes sdkconfig.h,
+      # which nearly every object depends on, so they share little anyway.
       - name: Configure ccache
         id: ccache-config
         run: |
@@ -103,12 +114,12 @@ jobs:
           idf_ver=$(sed -n 's/^set(IDF_VERSION_\(MAJOR\|MINOR\|PATCH\) \([0-9]*\))$/\2/p' \
             "$IDF_PATH/tools/cmake/version.cmake" | paste -sd.)
           test -n "$idf_ver" || { echo "::error::could not read IDF version"; exit 1; }
-          echo "key-prefix=ccache-v1-idf${idf_ver}-${{ matrix.board }}" >> "$GITHUB_OUTPUT"
+          echo "key-prefix=ccache-v1-idf${idf_ver}-${{ matrix.board }}-${{ matrix.variant }}" >> "$GITHUB_OUTPUT"
 
       # Every run saves under a unique key. Caches are scoped to the ref that
       # saved them, and a restore-keys prefix match searches the current ref
       # first, then the base branch: a PR run gets its own latest cache for
-      # this board, falling back to main's on its first run.
+      # this board and variant, falling back to main's on its first run.
       - name: Restore ccache
         id: ccache-restore
         uses: actions/cache/restore@v5
@@ -119,16 +130,29 @@ jobs:
             ${{ steps.ccache-config.outputs.key-prefix }}-
 
       - name: Build
+        if: matrix.variant == 'release'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
           ccache --zero-stats
           idf.py --preset "${{ matrix.board }}" build
 
+      - name: Build (debug, bench only)
+        if: matrix.variant == 'debug'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          ccache --zero-stats
+          idf.py --preset "${{ matrix.board }}" -B "$BUILD_DIR" -DDFU32_DEBUG_ENDPOINTS=ON build
+          grep -q '^CONFIG_DFU32_DEBUG_ENDPOINTS=y' "$BUILD_DIR/sdkconfig"
+          cp "$BUILD_DIR/dfu32.bin" "$BUILD_DIR/dfu32-${{ matrix.board }}-debug.bin"
+
       # The Component Manager rewrites the lock if the committed one doesn't
       # match what it resolves, and creates it if it is missing. Either way
-      # the committed pin was not what this build used.
+      # the committed pin was not what this build used. Both variants resolve
+      # the same lock, so the release job alone checks it.
       - name: Component lock unchanged
+        if: matrix.variant == 'release'
         run: |
           if [ -n "$(git status --porcelain -- 'dependencies.lock*')" ]; then
             git status --short -- 'dependencies.lock*'
@@ -136,16 +160,6 @@ jobs:
             echo "::error::the build changed dependencies.lock.*; build this profile locally and commit the result"
             exit 1
           fi
-
-      # The same firmware with the fault-injection endpoints, for the bench
-      # runner's safety checks (tools/dfu32_bench.py, section 4). Built
-      # before the cache is saved so its objects are cached too.
-      - name: Build debug variant (bench only)
-        run: |
-          . "$IDF_PATH/export.sh"
-          idf.py --preset "${{ matrix.board }}" -B "build/${{ matrix.board }}-debug" -DDFU32_DEBUG_ENDPOINTS=ON build
-          grep -q '^CONFIG_DFU32_DEBUG_ENDPOINTS=y' "build/${{ matrix.board }}-debug/sdkconfig"
-          cp "build/${{ matrix.board }}-debug/dfu32.bin" "build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin"
 
       - name: ccache stats
         if: always()
@@ -162,21 +176,33 @@ jobs:
 
       # Where the bytes go, so a budget failure (next step) says what grew.
       - name: Size by component
+        if: matrix.variant == 'release'
         run: |
           . "$IDF_PATH/export.sh"
           # Into a file first: piping straight into `head` kills idf.py with SIGPIPE.
-          idf.py -B "build/${{ matrix.board }}" size-components > size-components.txt 2>&1
+          idf.py -B "$BUILD_DIR" size-components > size-components.txt 2>&1
           head -45 size-components.txt
 
+      # Release-only: the budget leaves headroom in the image that ships. The
+      # bench-only debug build just has to fit its OTA slot, which the IDF
+      # build already enforces.
       - name: App size budget
-        run: python3 tools/check_app_size.py "build/${{ matrix.board }}"
+        if: matrix.variant == 'release'
+        run: python3 tools/check_app_size.py "$BUILD_DIR"
+
+      # The firmware upload checks this tag at a fixed offset; prove the
+      # linker put it there in the real image.
+      - name: Board tag in dfu32.bin
+        run: python3 tools/check_board_tag.py "$BUILD_DIR/dfu32.bin" "${{ matrix.board }}"
 
       - name: Merged image (single file, flash at 0x0)
+        if: matrix.variant == 'release'
         run: |
           . "$IDF_PATH/export.sh"
           idf.py --preset "${{ matrix.board }}" merge-bin -o "dfu32-${{ matrix.board }}-merged.bin"
 
       - name: Upload artifacts
+        if: matrix.variant == 'release'
         uses: actions/upload-artifact@v7
         with:
           name: dfu32-${{ matrix.board }}
@@ -196,10 +222,12 @@ jobs:
       # Its own artifact, so nothing that picks up dfu32-<board> for a
       # release can ship the fault-injection build by accident.
       - name: Upload debug build (bench only, never release)
+        if: matrix.variant == 'debug'
         uses: actions/upload-artifact@v7
         with:
           name: dfu32-${{ matrix.board }}-debug
-          path: build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin
+          path: ${{ env.BUILD_DIR }}/dfu32-${{ matrix.board }}-debug.bin
+          if-no-files-found: error
 
   # Whether this run updates the installer page. Pushes to main deploy, so the
   # page always offers the latest main build while DFU32 is pre-release. A

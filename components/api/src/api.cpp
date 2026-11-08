@@ -16,10 +16,12 @@
 #include "dfu32_core/job.hpp"
 #include "dfu32_core/json.hpp"
 #include "dfu32_core/manifest.hpp"
+#include "dfu32_core/ota_image.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -34,6 +36,13 @@
 #include "runlog/runlog_idf.hpp"
 #include "sdkconfig.h"
 #include "staging/staging.hpp"
+
+// DFU32's custom app descriptor (SPEC.md §10.1, firmware upload): the board
+// profile this image was built for, right after esp_app_desc_t in the image.
+// POST /api/v1/system/ota compares an upload's tag with this one, which also
+// keeps the linker from dropping the section.
+__attribute__((section(".rodata_custom_desc"), used)) const dfu32::ota::BoardTag dfu32_board_tag = {
+    {'D', 'F', '3', '2', 'B', 'R', 'D', '1'}, CONFIG_DFU32_BOARD_NAME};
 
 namespace dfu32::api {
 namespace {
@@ -597,16 +606,17 @@ esp_err_t h_config(httpd_req_t* req) {
     }
     json::ObjectWriter w;
     write_json(w, c);
-    w.add("hostname_active", net::status().hostname).add_bool("reboot_required", reboot);
+    // Read-only details that /status (unauthenticated) leaves out.
+    const net::Status ns = net::status();
+    w.add("hostname_active", ns.hostname).add_bool("reboot_required", reboot).add("wifi_ssid", ns.ssid);
+    if (const esp_partition_t* running = esp_ota_get_running_partition()) w.add("partition", running->label);
     return send_obj(req, "200 OK", w);
 }
 
 void reboot_cb(void*) { esp_restart(); }
 
-esp_err_t h_reboot(httpd_req_t* req) {
-    if (job::busy() && query_param(req->uri, "force") != "1") {
-        return send_error(req, "409 Conflict", "BUSY", "a job is running (add ?force=1 to reboot anyway)");
-    }
+/// Reboots shortly, so the response that announces it goes out first.
+void schedule_reboot(uint64_t delay_us) {
     static esp_timer_handle_t t = nullptr;
     if (t == nullptr) {
         esp_timer_create_args_t a{};
@@ -614,8 +624,16 @@ esp_err_t h_reboot(httpd_req_t* req) {
         a.name = "reboot";
         esp_timer_create(&a, &t);
     }
+    esp_timer_stop(t);
+    esp_timer_start_once(t, delay_us);
+}
+
+esp_err_t h_reboot(httpd_req_t* req) {
+    if (job::busy() && query_param(req->uri, "force") != "1") {
+        return send_error(req, "409 Conflict", "BUSY", "a job is running (add ?force=1 to reboot anyway)");
+    }
     ESP_LOGW(TAG, "reboot requested over HTTP");
-    esp_timer_start_once(t, 500 * 1000);  // let the response go out first
+    schedule_reboot(500 * 1000);
     json::ObjectWriter w;
     w.add_bool("rebooting", true);
     return send_obj(req, "202 Accepted", w);
@@ -653,7 +671,142 @@ esp_err_t h_fault(httpd_req_t* req) {
 #endif
 }
 
-// ---- slow requests (check, scan) on their own task --------------------------------
+// ---- firmware upload (POST /api/v1/system/ota) ----------------------------------------
+
+constexpr size_t kOtaChunk = 4096;
+constexpr int kOtaMaxTimeouts = 3;  // x recv_wait_timeout (5 s)
+constexpr size_t kOtaDrainMax = 4u * 1024 * 1024;  // never read more than this to discard a refused upload
+
+/// Fills `buf` with up to `want` body bytes; false (and `err` set) on a dead client.
+bool recv_exact(httpd_req_t* req, uint8_t* buf, size_t want, std::string& err) {
+    size_t got = 0;
+    int timeouts = 0;
+    while (got < want) {
+        const int n = httpd_req_recv(req, reinterpret_cast<char*>(buf) + got, want - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < kOtaMaxTimeouts) continue;
+        if (n <= 0) {
+            err = "upload stalled or the connection closed";
+            return false;
+        }
+        got += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+/// Reads and discards up to `n` more body bytes (capped), so an early error
+/// response isn't answered with a connection reset: browsers that are still
+/// sending the upload then see the JSON error instead.
+void drain(httpd_req_t* req, size_t n) {
+    char buf[512];
+    if (n > kOtaDrainMax) n = kOtaDrainMax;
+    int timeouts = 0;
+    while (n > 0) {
+        const int got = httpd_req_recv(req, buf, n < sizeof(buf) ? n : sizeof(buf));
+        if (got == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < kOtaMaxTimeouts) continue;
+        if (got <= 0) break;
+        n -= static_cast<size_t>(got);
+    }
+}
+
+/// Streams the body into the other OTA slot. The image is checked (chip,
+/// project, board tag) before anything is written, verified by esp_ota_end(),
+/// and only then made the boot partition. Rollback: the new image must come
+/// up with WiFi and HTTP, or the bootloader returns to this one (main.cpp).
+esp_err_t h_ota(httpd_req_t* req, bool force) {
+    if (req->content_len == 0) {
+        return send_error(req, "411 Length Required", "BAD_REQUEST", "send dfu32.bin as the raw body, with Content-Length");
+    }
+    size_t remaining = req->content_len;
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+    if (next == nullptr) {
+        drain(req, remaining);
+        return send_error(req, "500 Internal Server Error", "INTERNAL", "no OTA partition to update");
+    }
+    if (req->content_len > next->size) {
+        drain(req, remaining);
+        return send_error(req, "413 Content Too Large", "BAD_REQUEST",
+                          "image is " + std::to_string(req->content_len) + " B, the OTA slot holds " +
+                              std::to_string(next->size) + " B");
+    }
+    job::Lease lease("ota");
+    if (!lease.ok()) {
+        drain(req, remaining);
+        return send_error(req, "409 Conflict", "BUSY", busy_detail());
+    }
+
+    std::vector<uint8_t> buf(kOtaChunk);
+    std::string err;
+    ota::ImageInfo info;
+    esp_ota_handle_t h = 0;
+    bool begun = false;
+    // `remaining` is what the client has yet to send; read it (bounded) before
+    // answering, except when the client itself stopped sending.
+    bool client_gone = false;
+    const auto fail = [&](const char* status, const char* code, const std::string& detail) {
+        if (begun) esp_ota_abort(h);
+        ESP_LOGE(TAG, "firmware upload refused: %s", detail.c_str());
+        if (!client_gone) drain(req, remaining);
+        return send_error(req, status, code, detail);
+    };
+    const int64_t t0 = esp_timer_get_time();
+    unsigned last_decile = 0;
+    while (remaining > 0) {
+        const size_t want = remaining < buf.size() ? remaining : buf.size();
+        if (!recv_exact(req, buf.data(), want, err)) {
+            client_gone = true;
+            return fail("408 Request Timeout", "BAD_REQUEST", err);
+        }
+        remaining -= want;  // consumed from the socket, whatever happens next
+        if (!begun) {
+            ota::Expect expect;
+            expect.chip_id = static_cast<uint16_t>(CONFIG_IDF_FIRMWARE_CHIP_ID);
+            expect.project = esp_app_get_description()->project_name;
+            expect.board = std::string_view(dfu32_board_tag.board, strnlen(dfu32_board_tag.board, sizeof(dfu32_board_tag.board)));
+            expect.allow_other_board = force;
+            if (auto why = ota::check_image_start({buf.data(), want}, expect, info); !why.empty()) {
+                return fail("422 Unprocessable Content", "IMAGE_REJECTED", why);
+            }
+            const esp_err_t e = esp_ota_begin(next, OTA_WITH_SEQUENTIAL_WRITES, &h);
+            if (e != ESP_OK) return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_begin: ") + esp_err_to_name(e));
+            begun = true;
+            ESP_LOGI(TAG, "firmware upload: \"%s\" (%s) into %s, %u B", info.version.c_str(),
+                     info.board.empty() ? "untagged" : info.board.c_str(), next->label,
+                     static_cast<unsigned>(req->content_len));
+        }
+        if (const esp_err_t e = esp_ota_write(h, buf.data(), want); e != ESP_OK) {
+            return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_write: ") + esp_err_to_name(e));
+        }
+        const unsigned decile = static_cast<unsigned>((req->content_len - remaining) * 10 / req->content_len);
+        if (decile > last_decile && decile < 10) {
+            last_decile = decile;
+            ESP_LOGI(TAG, "firmware upload %u%%", decile * 10);
+        }
+    }
+    begun = false;  // esp_ota_end frees the handle whatever it returns
+    if (const esp_err_t e = esp_ota_end(h); e != ESP_OK) {
+        const bool invalid = e == ESP_ERR_OTA_VALIDATE_FAILED || e == ESP_ERR_INVALID_SIZE;
+        return fail(invalid ? "422 Unprocessable Content" : "500 Internal Server Error",
+                    invalid ? "IMAGE_REJECTED" : "STAGING_IO",
+                    std::string("image failed verification: ") + esp_err_to_name(e));
+    }
+    if (const esp_err_t e = esp_ota_set_boot_partition(next); e != ESP_OK) {
+        return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_set_boot_partition: ") + esp_err_to_name(e));
+    }
+    const auto ms = static_cast<uint32_t>((esp_timer_get_time() - t0) / 1000);
+    ESP_LOGW(TAG, "firmware \"%s\" written to %s in %u ms; rebooting into it", info.version.c_str(), next->label,
+             static_cast<unsigned>(ms));
+    json::ObjectWriter w;
+    w.add("version", info.version).add("partition", next->label).add_bool("rebooting", true).add(
+        "note", "If the new firmware can't bring up WiFi and the API, it rolls back to the current one on its next reboot.");
+    // Keep the BLE lease until the reboot, so no job starts in the last second
+    // and gets cut off by the restart.
+    lease.keep();
+    const esp_err_t sent = send_obj(req, "200 OK", w);
+    schedule_reboot(1000 * 1000);
+    return sent;
+}
+
+// ---- slow requests (check, scan, firmware upload) on their own task ---------------
 // esp_http_server has one worker thread. A manifest fetch or a BLE scan can
 // take many seconds, so those requests are handed to this task through
 // httpd's async-request API and the server keeps answering /status and
@@ -664,6 +817,7 @@ struct SlowRequest {
     Route route = Route::NotFound;
     RouteMatch match;
     ScanRequest scan;
+    bool force = false;  // SystemOta: ?force=1
 };
 
 QueueHandle_t g_slow_q = nullptr;
@@ -676,6 +830,8 @@ void slow_task(void*) {
         std::unique_ptr<SlowRequest> r(raw);
         if (r->route == Route::TargetCheck) {
             h_check(r->req, r->match);
+        } else if (r->route == Route::SystemOta) {
+            h_ota(r->req, r->force);
         } else {
             h_scan(r->req, r->scan);
         }
@@ -687,7 +843,7 @@ void slow_task(void*) {
 esp_err_t start_slow(httpd_req_t* req, std::unique_ptr<SlowRequest> r) {
     if (g_slow_q == nullptr) return send_error(req, "500 Internal Server Error", "INTERNAL", "worker not running");
     if (g_slow_busy.exchange(true)) {
-        return send_error(req, "409 Conflict", "BUSY", "another check or scan is still running");
+        return send_error(req, "409 Conflict", "BUSY", "another check, scan or firmware upload is still running");
     }
     if (httpd_req_async_handler_begin(req, &r->req) != ESP_OK) {
         g_slow_busy = false;
@@ -709,6 +865,16 @@ esp_err_t queue_check(httpd_req_t* req, const RouteMatch& m) {
     r->route = Route::TargetCheck;
     r->match = m;
     return start_slow(req, std::move(r));
+}
+
+esp_err_t queue_ota(httpd_req_t* req) {
+    if (httpd_req_get_hdr_value_len(req, "Transfer-Encoding") != 0) {
+        return send_error(req, "411 Length Required", "BAD_REQUEST", "send the image with Content-Length, not chunked");
+    }
+    auto r = std::make_unique<SlowRequest>();
+    r->route = Route::SystemOta;
+    r->force = query_param(req->uri, "force") == "1";
+    return start_slow(req, std::move(r));  // the body is read on the worker
 }
 
 esp_err_t queue_scan(httpd_req_t* req) {
@@ -756,6 +922,7 @@ esp_err_t dispatch(httpd_req_t* req) {
         case Route::Run: return h_run(req, m);
         case Route::Staging: return h_staging(req);
         case Route::BleScan: return queue_scan(req);
+        case Route::SystemOta: return queue_ota(req);
         case Route::Logs: return h_logs(req);
         case Route::Config: return h_config(req);
         case Route::Reboot: return h_reboot(req);
@@ -766,14 +933,18 @@ esp_err_t dispatch(httpd_req_t* req) {
     return send_error(req, "404 Not Found", "NOT_FOUND");
 }
 
+// The web UI (SPEC.md §10.2): components/api/ui/index.html, gzipped at build
+// time (tools/dfu32_ui.py) and embedded. It works while unclaimed (the claim
+// screen), which is where an Improv redirect lands.
+extern "C" const uint8_t ui_gz_start[] asm("_binary_index_html_gz_start");
+extern "C" const uint8_t ui_gz_end[] asm("_binary_index_html_gz_end");
+
 esp_err_t h_root(httpd_req_t* req) {
-    static constexpr char kPage[] =
-        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
-        "<title>DFU32</title><body style='font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em'>"
-        "<h1>DFU32</h1><p>The web UI arrives in M4. Until then use the JSON API: "
-        "<a href='/api/v1/status'>/api/v1/status</a>. See docs/BENCH.md for curl examples.</p>";
-    httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, kPage, sizeof(kPage) - 1);
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(ui_gz_start), ui_gz_end - ui_gz_start);
 }
 
 }  // namespace
