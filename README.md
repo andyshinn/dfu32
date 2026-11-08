@@ -58,7 +58,7 @@ To also check the CRC16 against a real image, point two environment variables at
 DFU32_TEST_BIN=path/to/firmware.bin DFU32_TEST_DAT=path/to/firmware.dat ctest --test-dir build-host --output-on-failure
 ```
 
-Test the Python staging tool:
+Test the Python tools (staging, packing and the bench runner):
 
 ```bash
 python3 -m unittest discover -s tools -p 'test_*.py'
@@ -69,6 +69,10 @@ Check the partition tables:
 ```bash
 python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
 ```
+
+## Bench runner
+
+With DFU32 and a repeater on your desk, `tools/dfu32_bench.py` runs the bench checklist automatically through the serial console and the HTTP API. It stops only when you need to send `start ota`. See [docs/BENCH.md §7](docs/BENCH.md#7-automated-bench-run).
 
 ## License
 

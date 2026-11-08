@@ -27,7 +27,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 | Old bootloaders | Warn only |
 | Retries | Configurable, default 3 full restarts with backoff |
 | Hardware | Portable, 4 MB flash floor, **2 MB PSRAM required**; bench on Feather ESP32-S3 #5477 (4 MB/2 MB) (+ Feather V2) |
-| WiFi during transfer | Option (`wifi_off_dfu` + per-request `wifi_off`); default set after bench A/B |
+| WiFi during transfer | Option (`wifi_off_dfu` + per-request `wifi_off`); default on (WiFi kept up), from the 2026-11-07 bench A/B |
 | Reference bootloader | OTAFIX 2.2 (`0.9.2-OTAFIX2.2-BP1.3`) on the production repeater |
 | Logs | RAM ring + persisted run records (last 14–16) |
 | License | MIT |
@@ -67,7 +67,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 
    That's about 55% of the app ceiling, so the brief's "~800 KB" was really the region limit, not the image size. The 832 KB staging partition has ample headroom. DFU32's CRC16 matches the `.dat` on all four images. The RAKSHARE UF2 payload is byte-identical to its `.bin` and loads at `0x26000` (S140 6.1.1 app start).
 
-4. **B — Default for WiFi-off during the transfer.** **Resolved as an option:** config `wifi_off_dfu`, a per-request `wifi_off` override, and a UI checkbox, recorded in every run record. You'll compare on/off on the bench, and the shipped default comes from that. Your hypothesis is that nRF52 flash writes are the bottleneck, so it may not matter. Original notes:
+4. ~~**B — Default for WiFi-off during the transfer.**~~ **Answered (2026-11-07): WiFi stays on by default** (`wifi_off_dfu` = false). On the bench, WiFi off was about 20% faster (12.3 vs 10.2 kB/s, 39 vs 47 s for the T096 image) with no failures either way; under a minute is fast enough, and WiFi on keeps live progress. History: **resolved as an option:** config `wifi_off_dfu`, a per-request `wifi_off` override, and a UI checkbox, recorded in every run record. You'll compare on/off on the bench, and the shipped default comes from that. Your hypothesis is that nRF52 flash writes are the bottleneck, so it may not matter. Original notes:
    - The spec defaults to **true**, as you preferred: there is no live HTTP progress during the transfer; the LED and run record cover it.
    - On S3, software coexistence may make WiFi-on transfers reliable enough to keep live progress.
    - Plan: measure both in the M2 throughput matrix, then decide the default. Do you want the default fixed now regardless?
