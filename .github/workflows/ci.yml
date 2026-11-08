@@ -173,6 +173,9 @@ jobs:
           idf.py -B "$BUILD_DIR" size-components > size-components.txt 2>&1
           head -45 size-components.txt
 
+      # Release-only: the budget leaves headroom in the image that ships. The
+      # bench-only debug build just has to fit its OTA slot, which the IDF
+      # build already enforces.
       - name: App size budget
         if: matrix.variant == 'release'
         run: python3 tools/check_app_size.py "$BUILD_DIR"
@@ -207,5 +210,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dfu32-${{ matrix.board }}-debug
-          path: build/${{ matrix.board }}-debug/dfu32-${{ matrix.board }}-debug.bin
+          path: ${{ env.BUILD_DIR }}/dfu32-${{ matrix.board }}-debug.bin
           if-no-files-found: error
