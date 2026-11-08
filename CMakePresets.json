@@ -24,6 +24,14 @@
             "cacheVariables": {
                 "DFU32_BOARD": "esp32s3_n16r8"
             }
+        },
+        {
+            "name": "rak11200_rak19007",
+            "displayName": "RAKwireless RAK11200 on RAK19007 (4 MB / 8 MB PSRAM)",
+            "binaryDir": "build/rak11200_rak19007",
+            "cacheVariables": {
+                "DFU32_BOARD": "rak11200_rak19007"
+            }
         }
     ]
 }
