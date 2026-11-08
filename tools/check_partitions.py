@@ -6,10 +6,21 @@ Checks: no overlaps, required partitions present, app partitions 64 KB aligned,
 data partitions 4 KB aligned, table fits the flash size, staging can hold a
 4 KB header plus the largest nRF52840 application, runlog has enough slots.
 
-Usage: check_partitions.py partitions/4mb.csv:4MB partitions/8mb.csv:8MB
+With --baseline, also checks that nvs, runlog and staging keep the offsets and
+sizes recorded in that file (SPEC §9.4). Settings survive a browser-installer
+update only while those three stay put, so a change there is breaking: update
+the baseline in the same PR (--write-baseline) and set that table's
+"erase_notice", which the installer page shows above its button.
+
+Usage:
+  check_partitions.py partitions/4mb.csv:4MB partitions/8mb.csv:8MB
+  check_partitions.py --baseline partitions/baseline.json partitions/4mb.csv:4MB partitions/8mb.csv:8MB
+  check_partitions.py --write-baseline partitions/baseline.json partitions/4mb.csv:4MB partitions/8mb.csv:8MB
 """
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -20,6 +31,8 @@ MAX_NRF52840_APP = 802816  # S140 6.1.1 (larger of the two SoftDevice cases)
 MIN_RUNLOG_SLOTS = 10
 FIRST_FREE = 0x9000  # after bootloader (0x0/0x1000) and partition table (0x8000)
 REQUIRED = {"nvs", "otadata", "phy_init", "runlog", "ota_0", "ota_1", "staging", "coredump"}
+# Partitions whose contents a keep-settings update must find where it left them.
+KEPT = ("nvs", "runlog", "staging")
 
 
 def parse_size(text: str) -> int:
@@ -80,20 +93,66 @@ def check(path: Path, flash_size: int) -> list[str]:
     return errors
 
 
+def kept_layout(rows: list[dict]) -> dict:
+    by_name = {r["name"]: r for r in rows}
+    return {n: {"offset": f"0x{by_name[n]['offset']:X}", "size": f"0x{by_name[n]['size']:X}"}
+            for n in KEPT if n in by_name}
+
+
+def check_baseline(path: Path, baseline: dict) -> list[str]:
+    entry = baseline.get("tables", {}).get(path.name)
+    if entry is None:
+        return [f"no baseline for {path.name}; add one with --write-baseline"]
+    want, have = entry.get("partitions", {}), kept_layout(load(path))
+    errors = []
+    for name in KEPT:
+        w, h = want.get(name), have.get(name)
+        if w is None:
+            errors.append(f"{name}: not in the baseline for {path.name}")
+        elif h is not None and (int(w["offset"], 0), int(w["size"], 0)) != (int(h["offset"], 0), int(h["size"], 0)):
+            errors.append(f"{name}: {h['offset']} size {h['size']} differs from the baseline "
+                          f"{w['offset']} size {w['size']}. Updates that keep settings would break. "
+                          f"If deliberate, update the baseline (--write-baseline) and set erase_notice (SPEC §9.4)")
+    return errors
+
+
+def write_baseline(path: Path, tables: list[Path]) -> None:
+    """Record the kept partitions of each table, keeping any erase_notice already set."""
+    data = json.loads(path.read_text()) if path.exists() else {}
+    out = {"tables": dict(data.get("tables", {}))}
+    for t in tables:
+        old = out["tables"].get(t.name, {})
+        out["tables"][t.name] = {"partitions": kept_layout(load(t)), "erase_notice": old.get("erase_notice")}
+    out["tables"] = dict(sorted(out["tables"].items()))
+    path.write_text(json.dumps(out, indent=2) + "\n")
+
+
 def main(argv: list[str]) -> int:
-    if not argv:
-        print(__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("tables", nargs="*", metavar="CSV[:FLASH]", help="partition CSV, with flash size (default 4M)")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--baseline", type=Path, help="also check nvs/runlog/staging against this file")
+    g.add_argument("--write-baseline", type=Path, help="record nvs/runlog/staging of the given tables in this file")
+    a = ap.parse_args(argv)
+    if not a.tables:
+        ap.print_help()
         return 2
+    baseline = json.loads(a.baseline.read_text()) if a.baseline else None
     failed = False
-    for arg in argv:
+    for arg in a.tables:
         csv, _, flash = arg.partition(":")
         flash_size = parse_size(flash or "4M")
         errs = check(Path(csv), flash_size)
+        if baseline is not None:
+            errs += check_baseline(Path(csv), baseline)
         status = "OK" if not errs else "FAIL"
         print(f"{status}: {csv} (flash {flash_size // MB} MB)")
         for e in errs:
             print(f"  - {e}")
         failed |= bool(errs)
+    if a.write_baseline and not failed:
+        write_baseline(a.write_baseline, [Path(t.partition(":")[0]) for t in a.tables])
+        print(f"wrote {a.write_baseline}")
     return 1 if failed else 0
 
 

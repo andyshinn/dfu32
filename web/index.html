@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>DFU32 installer</title>
+<meta name="description" content="Flash DFU32 onto an ESP32 board from your browser, then join it to WiFi.">
+<script>
+  // Mirrors ESP Web Tools' own two checks, so the page shows the right panel
+  // before anything renders: web (default), unsupported or notallowed.
+  document.documentElement.dataset.mode = !window.isSecureContext ? 'notallowed' : ('serial' in navigator ? 'web' : 'unsupported');
+</script>
+<!-- ESP Web Tools, served from this site: tools/fetch_esp_web_tools.py copies it here from a hash-pinned npm tarball. -->
+<script type="module" src="vendor/esp-web-tools-10.4.0/install-button.js"></script>
+<style>
+:root {
+  --bg: #fff; --surface: #fff; --surface-2: #f1f3f4;
+  --text: #1b1f23; --muted: #5f6670;
+  --border: #e2e5e8; --border-strong: #c9ced3;
+  --accent: #0d8273; --accent-ink: #0b6e62; --on-accent: #fff; --accent-soft: #e7f4f1;
+  --radius: 6px; --radius-lg: 8px;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1e22; --surface: #1b1e22; --surface-2: #22262b;
+    --text: #eceef0; --muted: #a0a7af;
+    --border: #2d3237; --border-strong: #3d434a;
+    --accent: #3cbfa9; --accent-ink: #5fd2be; --on-accent: #062520; --accent-soft: #123631;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 var(--font); -webkit-font-smoothing: antialiased; }
+a { color: var(--accent-ink); text-underline-offset: 3px; }
+a:hover { color: var(--text); }
+p, li, dd { text-wrap: pretty; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+main { max-width: 640px; margin: 0 auto; padding: 72px 24px 56px; display: flex; flex-direction: column; gap: 44px; }
+
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.title { display: flex; align-items: center; gap: 10px; }
+.title h1 { margin: 0; font-size: 34px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.2; }
+.version { font: 12px var(--mono); color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.version[hidden] { display: none; }
+.tagline { margin: 6px 0 0; color: var(--muted); }
+.gh { font-size: 14px; color: var(--text); text-decoration: none; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 12px; white-space: nowrap; background: var(--surface); }
+.gh:hover { border-color: var(--border-strong); color: var(--text); }
+
+section { display: flex; flex-direction: column; gap: 14px; }
+.sh { display: flex; align-items: baseline; gap: 10px; }
+.sh h2 { margin: 0; font-size: 21px; font-weight: 500; letter-spacing: -0.005em; }
+.note { margin: 0; font-size: 13.5px; color: var(--muted); }
+.note strong { color: var(--text); font-weight: 600; }
+.note[hidden] { display: none; }
+
+.picker { position: relative; }
+.trigger { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 11px 14px; border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); }
+.trigger[aria-expanded="true"], .trigger:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.trigger b, .option b { display: block; font-weight: 550; }
+.trigger small, .option small { font: 12.5px var(--mono); color: var(--muted); }
+.trigger .placeholder { color: var(--muted); }
+.trigger .count { font: 12px var(--mono); color: var(--muted); }
+.popover { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: 0 10px 30px rgb(0 0 0 / .14); overflow: hidden; }
+.popover[hidden] { display: none; }
+.filter { display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--border); }
+.filter span { font: 13px var(--mono); color: var(--muted); }
+.filter input { all: unset; flex: 1; min-width: 0; padding: 12px 0; font-size: 14.5px; color: var(--text); }
+.listbox { margin: 0; padding: 4px; list-style: none; max-height: 264px; overflow: auto; }
+.listbox[hidden] { display: none; }
+.option { display: grid; grid-template-columns: minmax(0,1fr) 16px; gap: 12px; align-items: center; padding: 9px 10px; border-radius: var(--radius); cursor: pointer; }
+.option.active { background: var(--surface-2); }
+.option small { font-size: 12px; }
+.option[aria-selected="true"]::after { content: "✓"; color: var(--accent-ink); }
+.empty { margin: 0; padding: 18px 14px; font-size: 14px; color: var(--muted); }
+.empty[hidden] { display: none; }
+.steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; counter-reset: s; }
+.steps li { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 12px; counter-increment: s; }
+.steps li::before { content: counter(s); font: 12px var(--mono); width: 22px; height: 22px; margin-top: 1px; border: 1px solid var(--border-strong); border-radius: 50%; display: grid; place-content: center; color: var(--muted); }
+
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.install { padding: 0; border: 0; margin-top: 8px; display: flex; flex-wrap: wrap; gap: 20px 24px; align-items: flex-start; }
+.action { flex: 0 1 220px; min-width: 200px; display: flex; flex-direction: column; gap: 8px; }
+.btn { all: unset; box-sizing: border-box; width: 100%; text-align: center; cursor: pointer; font-weight: 600; padding: 12px 20px; border-radius: var(--radius); background: var(--accent); color: var(--on-accent); }
+.btn:hover { filter: brightness(1.08); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:disabled { cursor: not-allowed; filter: none; background: var(--surface-2); color: var(--muted); border: 1px dashed var(--border-strong); }
+esp-web-install-button { display: block; }
+.action .hint { font-size: 12.5px; color: var(--muted); }
+.action .hint.mono { font-size: 12px; }
+.erase { flex: 1 1 260px; padding-left: 16px; border-left: 1px solid var(--border); font-size: 13.5px; line-height: 1.5; }
+.erase strong { display: block; font-weight: 600; margin-bottom: 4px; }
+.erase p { margin: 0; color: var(--muted); }
+
+.unsupported > div { padding: 20px; display: flex; flex-direction: column; gap: 6px; }
+.unsupported > div + div { border-top: 1px solid var(--border); gap: 12px; }
+.unsupported h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.unsupported h4 { margin: 0; font-size: 15px; font-weight: 600; }
+.unsupported p { margin: 0; color: var(--muted); }
+.links { display: flex; flex-wrap: wrap; gap: 8px; }
+.links a { display: flex; align-items: center; gap: 8px; text-decoration: none; font-size: 14px; font-weight: 550; padding: 9px 6px; }
+.links a.secondary { color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 9px 14px; }
+.links a.secondary:hover { border-color: var(--muted); }
+.links a.secondary span { font: 12px var(--mono); color: var(--muted); }
+.plain { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; font-size: 14px; color: var(--muted); }
+
+/* Page states, set by the script in <head>: web (default), unsupported, notallowed */
+[data-mode="unsupported"] .web-only, [data-mode="notallowed"] .web-only,
+:root:not([data-mode="unsupported"]) .unsupported-only,
+:root:not([data-mode="notallowed"]) .notallowed-only { display: none; }
+
+/* ESP Web Tools appends its dialog to <body>, and the dialog surface is always
+   white, so the light-mode accent is used in both themes. */
+ewt-install-dialog { --md-sys-color-primary: #0d8273; --md-sys-color-on-primary: #fff; }
+
+details { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; padding: 16px 0; font-size: 17px; font-weight: 600; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: "+"; font-family: var(--mono); font-weight: 400; font-size: 16px; color: var(--muted); }
+details[open] summary::after { content: "−"; }
+dl { margin: 0 0 20px; display: flex; flex-direction: column; gap: 16px; font-size: 14px; }
+dt { font-weight: 600; }
+dd { margin: 2px 0 0; color: var(--muted); }
+dd code { font: 13px var(--mono); color: var(--text); }
+
+footer { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13.5px; }
+footer a { color: var(--muted); }
+
+@media (max-width: 640px) {
+  main { padding: 28px 20px 36px; }
+  /* On phones the unsupported message is the first thing after the header */
+  [data-mode="unsupported"] #install { order: -1; }
+  header { order: -2; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="title"><h1>DFU32</h1><span class="version" id="version" hidden></span></div>
+      <p class="tagline">Flash nRF52 repeaters over Bluetooth from an ESP32</p>
+    </div>
+    <a class="gh" href="https://github.com/andyshinn/dfu32">GitHub <span class="muted">↗</span></a>
+  </header>
+
+  <section>
+    <div class="sh"><h2 id="board-label">Choose your board</h2></div>
+    <div class="picker" id="picker">
+      <button class="trigger" id="trigger" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="board-label trigger-label">
+        <span id="trigger-label" class="placeholder">Select a board…</span>
+        <span class="count" id="count"></span>
+      </button>
+      <div class="popover" id="popover" hidden>
+        <div class="filter"><span>/</span><input id="filter" role="combobox" aria-expanded="true" aria-autocomplete="list" placeholder="Filter by name, chip or memory" aria-label="Filter boards" aria-controls="listbox" autocomplete="off"></div>
+        <ul class="listbox" id="listbox" role="listbox" aria-labelledby="board-label" tabindex="-1"></ul>
+        <p class="empty" id="empty" role="status" hidden></p>
+      </div>
+    </div>
+    <p class="note"><strong>PSRAM is required.</strong> Boards without it won’t run DFU32.</p>
+  </section>
+
+  <section id="install">
+    <div class="sh"><h2>Install</h2></div>
+
+    <ol class="steps web-only">
+      <li>Connect the board with a USB data cable and click Install.</li>
+      <li><span>Pick the serial port, and it flashes <span class="muted">(about a minute)</span>.</span></li>
+      <li><span>Enter your WiFi network name and password, then click <strong>Visit device</strong> to open DFU32’s own web UI and claim it.</span></li>
+    </ol>
+
+    <p class="note web-only" id="erase-notice" hidden><strong>This release needs an erase.</strong> <span id="erase-notice-text"></span></p>
+
+    <div class="panel install web-only">
+      <div class="action">
+        <esp-web-install-button id="esp">
+          <button slot="activate" class="btn" id="install-btn" disabled>Choose a board</button>
+          <span slot="unsupported"></span><span slot="not-allowed"></span>
+        </esp-web-install-button>
+        <span class="hint" id="install-hint">Select a board above to continue.</span>
+      </div>
+      <div class="erase">
+        <strong>About “Erase device”</strong>
+        <p>ESP Web Tools may offer it. Erasing removes the saved WiFi, the API token and the configured target. Updating without erasing keeps them. Only erase for a clean start.</p>
+      </div>
+    </div>
+
+    <div class="panel unsupported unsupported-only">
+      <div>
+        <h3>Installing needs a desktop browser</h3>
+        <p>The installer talks to the board over Web Serial, which works in Chrome, Edge and Firefox (151 or later) on a desktop or laptop. Open this page there with the board plugged in.</p>
+      </div>
+      <div>
+        <h4>Or flash it yourself</h4>
+        <p>Download the image for your board and flash it with esptool. It’s a full image, so it resets saved settings. The README has the command.</p>
+        <div class="links">
+          <a class="secondary" id="download" href="https://github.com/andyshinn/dfu32/releases/latest">Download image <span id="download-board">choose a board</span></a>
+          <a href="https://github.com/andyshinn/dfu32#install-from-your-browser">esptool guide in README ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="plain notallowed-only">This page needs HTTPS to reach USB devices. Open <a class="mono" href="https://dfu32.app/">https://dfu32.app</a> instead.</div>
+
+    <p class="note web-only"><strong>Already installed?</strong> The same button detects DFU32 and offers to update or change WiFi. Settings are kept unless you erase.</p>
+  </section>
+
+  <details>
+    <summary>Troubleshooting</summary>
+    <dl>
+      <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver.</dd></div>
+      <div><dt>ESP32-S3 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Install again.</dd></div>
+      <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Install. Afterwards, release BOOT0 and press RESET again.</dd></div>
+      <div><dt>WiFi failed</dt><dd>DFU32 joins 2.4 GHz networks only. Check the password and retry.</dd></div>
+      <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network.</dd></div>
+    </dl>
+  </details>
+
+  <footer>
+    <a href="https://github.com/andyshinn/dfu32#readme">README</a>
+    <a href="https://github.com/andyshinn/dfu32/blob/main/docs/OPERATOR.md">Operator guide</a>
+    <a href="https://github.com/andyshinn/dfu32/blob/main/docs/RECOVERY.md">Recovery guide</a>
+    <a href="https://github.com/andyshinn/dfu32/blob/main/LICENSE">MIT licence</a>
+  </footer>
+</main>
+
+<script>
+  // One manifest per board profile, next to this page: manifest-<id>.json,
+  // written by tools/dfu32_web_manifest.py in the CI pages job.
+  const esp = document.getElementById('esp');
+  const btn = document.getElementById('install-btn');
+  const hint = document.getElementById('install-hint');
+  const download = document.getElementById('download');
+  const dlBoard = document.getElementById('download-board');
+  const versionEl = document.getElementById('version');
+  const eraseNotice = document.getElementById('erase-notice');
+  const eraseNoticeText = document.getElementById('erase-notice-text');
+
+  // id = the DFU32_BOARD profile name (boards/<id>/, CMakePresets.json).
+  const BOARDS = [
+    { id: 'feather_esp32s3', name: 'Adafruit Feather ESP32-S3 (#5477)', short: 'Feather ESP32-S3', spec: 'ESP32-S3 · 4 MB flash · 2 MB PSRAM' },
+    { id: 'feather_esp32_v2', name: 'Adafruit Feather ESP32 V2', short: 'Feather ESP32 V2', spec: 'ESP32 · 8 MB flash · 2 MB PSRAM' },
+    { id: 'esp32s3_n16r8', name: 'ESP32-S3 N16R8 DevKitC', short: 'S3 N16R8 DevKitC', spec: 'ESP32-S3 · 16 MB flash · 8 MB PSRAM' },
+    { id: 'rak11200_rak19007', name: 'RAKwireless WisBlock RAK11200 (RAK19007 base)', short: 'RAK11200', spec: 'ESP32 · 4 MB flash · 8 MB PSRAM' },
+  ];
+  const manifestUrl = id => `manifest-${id}.json`;
+  const imageUrl = id => `https://github.com/andyshinn/dfu32/releases/latest/download/dfu32-${id}-merged.bin`;
+
+  const picker = document.getElementById('picker');
+  const trigger = document.getElementById('trigger');
+  const triggerLabel = document.getElementById('trigger-label');
+  const popover = document.getElementById('popover');
+  const filter = document.getElementById('filter');
+  const listbox = document.getElementById('listbox');
+  const empty = document.getElementById('empty');
+  document.getElementById('count').textContent = BOARDS.length + ' boards ▾';
+  let selected = null, results = BOARDS, active = 0, version = '';
+
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const tokens = q => q.trim().split(/\s+/).filter(Boolean).map(norm).filter(Boolean);
+  const subseq = (t, hay) => { let i = 0; for (const c of hay) { if (c === t[i]) i++; if (i === t.length) break; } return i === t.length; };
+  // Substring match per token; fall back to loose subsequence matching only when nothing matches exactly.
+  const fuzzyFilter = (q, list) => {
+    const ts = tokens(q), hay = b => norm(b.name + b.spec);
+    const exact = list.filter(b => ts.every(t => hay(b).includes(t)));
+    return exact.length ? exact : list.filter(b => ts.every(t => subseq(t, hay(b))));
+  };
+  const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function render() {
+    results = fuzzyFilter(filter.value, BOARDS);
+    active = Math.min(active, Math.max(results.length - 1, 0));
+    listbox.innerHTML = results.map((b, i) => `<li role="option" id="opt-${b.id}" class="option${i === active ? ' active' : ''}" aria-selected="${!!selected && selected.id === b.id}" data-i="${i}"><span><b>${esc(b.name)}</b><small>${esc(b.spec)}</small></span></li>`).join('');
+    listbox.hidden = !results.length;
+    empty.hidden = !!results.length;
+    empty.textContent = results.length ? '' : `No boards match “${filter.value}”. Only boards with PSRAM are listed.`;
+    if (results[active]) filter.setAttribute('aria-activedescendant', 'opt-' + results[active].id);
+    else filter.removeAttribute('aria-activedescendant');
+    const el = listbox.querySelector('.active'); if (el) listbox.scrollTop = Math.max(0, el.offsetTop - listbox.clientHeight + el.offsetHeight);
+  }
+  function setOpen(open) {
+    popover.hidden = !open;
+    trigger.setAttribute('aria-expanded', open);
+    if (open) { filter.value = ''; active = Math.max(0, BOARDS.indexOf(selected)); render(); filter.focus(); }
+  }
+  trigger.addEventListener('click', () => setOpen(popover.hidden));
+  filter.addEventListener('input', () => { active = 0; render(); });
+  filter.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); active = Math.min(active + 1, results.length - 1); render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); active = Math.max(active - 1, 0); render(); }
+    else if (e.key === 'Enter' && results[active]) { e.preventDefault(); select(results[active]); }
+    else if (e.key === 'Escape') { setOpen(false); trigger.focus(); }
+  });
+  // Keep focus in the filter while the mouse works the popover, so the focusout rule below doesn't close it mid-click.
+  popover.addEventListener('mousedown', e => { if (e.target !== filter) e.preventDefault(); });
+  listbox.addEventListener('mousemove', e => { const li = e.target.closest('.option'); if (li && +li.dataset.i !== active) { active = +li.dataset.i; render(); } });
+  listbox.addEventListener('click', e => { const li = e.target.closest('.option'); if (li) select(results[+li.dataset.i]); });
+  document.addEventListener('click', e => { if (!popover.hidden && !e.target.closest('.picker')) setOpen(false); });
+  picker.addEventListener('focusout', e => { if (!popover.hidden && !picker.contains(e.relatedTarget)) setOpen(false); });
+
+  // `git describe` strings: add a "v" only to a bare release number, never to a hash.
+  const fmtVersion = v => /^\d+\.\d+/.test(v) ? 'v' + v : v;
+  function showVersion(v) {
+    version = v ? fmtVersion(String(v)) : '';
+    versionEl.textContent = version;
+    versionEl.hidden = !version;
+    if (selected) hint.textContent = version ? `${selected.short} · ${version}` : selected.short;
+  }
+  // no-cache revalidates, so the copy ESP Web Tools fetches next is the same one.
+  async function loadManifest(id) {
+    const r = await fetch(manifestUrl(id), { cache: 'no-cache' });
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }
+
+  async function select(board) {
+    selected = board;
+    setOpen(false); trigger.focus();
+    triggerLabel.className = '';
+    triggerLabel.innerHTML = `<b>${esc(board.name)}</b><small>${esc(board.spec)}</small>`;
+    esp.setAttribute('manifest', manifestUrl(board.id));
+    btn.disabled = false;
+    btn.textContent = 'Install DFU32';
+    hint.className = 'hint mono';
+    showVersion(version);
+    dlBoard.textContent = board.short;
+    download.href = imageUrl(board.id);
+    eraseNotice.hidden = true;
+    try {
+      const m = await loadManifest(board.id);
+      if (selected !== board) return;
+      if (m.version) showVersion(m.version);
+      // Set by the pages job when a release moves nvs, runlog or staging (SPEC §9.4).
+      if (typeof m.dfu32_erase_notice === 'string' && m.dfu32_erase_notice) {
+        eraseNoticeText.textContent = m.dfu32_erase_notice;
+        eraseNotice.hidden = false;
+      }
+    } catch (e) { /* keep the version shown */ }
+  }
+
+  // All boards share one version, so the first board's manifest fills the pill.
+  loadManifest(BOARDS[0].id).then(m => { if (m.version && !version) showVersion(m.version); }).catch(() => {});
+</script>
+</body>
+</html>

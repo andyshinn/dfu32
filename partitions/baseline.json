@@ -1,0 +1,38 @@
+{
+  "tables": {
+    "4mb.csv": {
+      "partitions": {
+        "nvs": {
+          "offset": "0x9000",
+          "size": "0x6000"
+        },
+        "runlog": {
+          "offset": "0x12000",
+          "size": "0xE000"
+        },
+        "staging": {
+          "offset": "0x300000",
+          "size": "0xD0000"
+        }
+      },
+      "erase_notice": null
+    },
+    "8mb.csv": {
+      "partitions": {
+        "nvs": {
+          "offset": "0x9000",
+          "size": "0xF000"
+        },
+        "runlog": {
+          "offset": "0x1B000",
+          "size": "0x10000"
+        },
+        "staging": {
+          "offset": "0x630000",
+          "size": "0x100000"
+        }
+      },
+      "erase_notice": null
+    }
+  }
+}

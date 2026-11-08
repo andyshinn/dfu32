@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Releases build from the tag in this run and attach the merged images; the
+  # latest stable release also redeploys the installer page (SPEC §9.4).
+  release:
+    types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,8 +23,10 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
 
+      # The baseline guards nvs/runlog/staging: moving them breaks updates
+      # from the installer page that keep settings (SPEC §9.4).
       - name: Partition tables
-        run: python3 tools/check_partitions.py partitions/4mb.csv:4M partitions/8mb.csv:8M
+        run: python3 tools/check_partitions.py --baseline partitions/baseline.json partitions/4mb.csv:4M partitions/8mb.csv:8M
 
       - name: Web UI size budget
         run: python3 tools/dfu32_ui.py check components/api/ui/index.html
@@ -186,7 +193,7 @@ jobs:
       # The firmware upload checks this tag at a fixed offset; prove the
       # linker put it there in the real image.
       - name: Board tag in dfu32.bin
-        run: python3 tools/check_board_tag.py "build/${{ matrix.board }}/dfu32.bin" "${{ matrix.board }}"
+        run: python3 tools/check_board_tag.py "$BUILD_DIR/dfu32.bin" "${{ matrix.board }}"
 
       - name: Merged image (single file, flash at 0x0)
         if: matrix.variant == 'release'
@@ -207,6 +214,7 @@ jobs:
             build/${{ matrix.board }}/bootloader/bootloader.bin
             build/${{ matrix.board }}/partition_table/partition-table.bin
             build/${{ matrix.board }}/flasher_args.json
+            build/${{ matrix.board }}/project_description.json
             build/${{ matrix.board }}/sdkconfig
             dependencies.lock.*
           if-no-files-found: warn
@@ -220,3 +228,151 @@ jobs:
           name: dfu32-${{ matrix.board }}-debug
           path: ${{ env.BUILD_DIR }}/dfu32-${{ matrix.board }}-debug.bin
           if-no-files-found: error
+
+  # Whether this run updates the installer page. Pushes to main deploy, so the
+  # page always offers the latest main build while DFU32 is pre-release. A
+  # release deploys only if it is the latest stable one, so a pre-release or a
+  # patch to an older line never replaces the page.
+  pages-gate:
+    name: Installer page (deploy?)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      deploy: ${{ steps.check.outputs.deploy }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          deploy=false
+          if [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; then
+            if [ "$REF" = refs/heads/main ]; then
+              deploy=true
+            else
+              echo "$REF is not main: page left alone"
+            fi
+          elif [ "$EVENT" = release ]; then
+            if [ "$PRERELEASE" = true ]; then
+              echo "$TAG is a pre-release: page left alone"
+            else
+              latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+              if [ "$latest" = "$TAG" ]; then
+                deploy=true
+              else
+                echo "$TAG is not the latest release ($latest): page left alone"
+              fi
+            fi
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
+  # web/ plus one manifest and its parts per board, served from Pages. The
+  # parts must come from Pages itself: release-asset downloads don't send
+  # CORS headers, so the page couldn't fetch them.
+  pages:
+    name: Installer page
+    needs: [boards, host, firmware, pages-gate]
+    if: needs.pages-gate.outputs.deploy == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only this run's builds; the -debug artifacts are downloaded too but
+      # never read.
+      - name: Download firmware
+        uses: actions/download-artifact@v8
+        with:
+          pattern: dfu32-*
+          path: artifacts
+
+      - name: Assemble site
+        env:
+          BOARDS: ${{ needs.boards.outputs.boards }}
+        run: |
+          mkdir -p _site
+          cp -R web/. _site/
+          for b in $(jq -r '.[]' <<<"$BOARDS"); do
+            python3 tools/dfu32_web_manifest.py "artifacts/dfu32-$b/build/$b" \
+              --board "$b" --site _site --baseline partitions/baseline.json
+          done
+          # The page shows one version for every board.
+          versions=$(jq -r .version _site/manifest-*.json | sort -u)
+          if [ "$(wc -l <<<"$versions")" -ne 1 ]; then
+            echo "::error::boards were built at different versions: $versions"
+            exit 1
+          fi
+          echo "### Installer page: $versions" >> "$GITHUB_STEP_SUMMARY"
+          # ESP Web Tools from the npm tarball, checked against a pinned SHA-256.
+          python3 tools/fetch_esp_web_tools.py --site _site
+          find _site -type f | sort
+
+      # pages-gate ran before this job waited for the pages concurrency group,
+      # so a newer release may have been published (and deployed) meanwhile.
+      - name: Still the latest release?
+        id: recheck
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [ "$latest" = "$TAG" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$TAG is no longer the latest release ($latest): page left alone"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.recheck.outputs.deploy != 'false'
+        with:
+          path: _site
+
+      - id: deploy
+        if: steps.recheck.outputs.deploy != 'false'
+        uses: actions/deploy-pages@v5
+
+  # Fresh-install images for esptool users, on every published release
+  # (pre-releases included). They reset settings; the page never uses them.
+  # They appear once the firmware matrix finishes, a few minutes after the
+  # release is published; until then releases/latest/download/... 404s.
+  # --clobber lets a re-run of this job (after a failed upload) replace a
+  # partial set with images built from the same tag.
+  release-assets:
+    name: Release images
+    needs: [boards, host, firmware]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware
+        uses: actions/download-artifact@v8
+        with:
+          pattern: dfu32-*
+          path: artifacts
+
+      - name: Attach merged images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOARDS: ${{ needs.boards.outputs.boards }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          files=()
+          for b in $(jq -r '.[]' <<<"$BOARDS"); do
+            files+=("artifacts/dfu32-$b/build/$b/dfu32-$b-merged.bin")
+          done
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
