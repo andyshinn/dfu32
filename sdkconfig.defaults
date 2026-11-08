@@ -25,12 +25,17 @@ CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=32
 CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 
 # ---- WiFi / lwIP: drop what DFU32 never uses (app size, SPEC.md §12.1) ---------
-# Station only: no soft-AP. Personal networks only: no WPA2/3-Enterprise (and
-# its 192-bit GMAC suites) and no OWE "enhanced open". WPA3-Personal (SAE) stays.
+# Station only: no soft-AP. WPA2-Personal (and open) networks only: no
+# WPA3-Personal (SAE), no WPA2/3-Enterprise (and its 192-bit GMAC suites), no
+# OWE "enhanced open". WPA2/WPA3 transition-mode networks still connect over
+# WPA2; WPA3-only networks don't. Without SAE/OWE the supplicant's built-in
+# crypto is enough, which leaves out mbedTLS's elliptic-curve code.
 # CONFIG_ESP_WIFI_SOFTAP_SUPPORT is not set
+# CONFIG_ESP_WIFI_ENABLE_WPA3_SAE is not set
 # CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
 # CONFIG_ESP_WIFI_GMAC_SUPPORT is not set
 # CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA is not set
+# CONFIG_ESP_WIFI_MBEDTLS_CRYPTO is not set
 # IPv4 only: the API, manifest fetches, SNTP and mDNS all run over IPv4.
 # CONFIG_LWIP_IPV6 is not set
 

@@ -235,7 +235,7 @@ bool set_credentials(const std::string& ssid, const std::string& password) {
     std::memcpy(cfg.sta.password, password.data(), password.size());
     // Refuse to fall back to an open network when a password was given.
     cfg.sta.threshold.authmode = password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-    cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;  // unused while WPA3 is off (sdkconfig.defaults)
     s_want_connect = false;
     local_disconnect();
     const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
