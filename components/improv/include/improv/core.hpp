@@ -59,6 +59,7 @@ struct DeviceInfo {
     std::string version;    // git describe string
     std::string chip;       // "ESP32-S3"
     std::string name;       // hostname
+    std::string board;      // DFU32_BOARD profile, "feather_esp32s3"; empty if unknown
 };
 
 /// What the core needs from the device and the transport. Called with the
@@ -147,5 +148,11 @@ void wipe(std::string& s) noexcept;
 
 /// "ESP32-S3" from CONFIG_IDF_TARGET's "esp32s3".
 std::string chip_name(std::string_view idf_target);
+
+/// Device info's "hardware chip/variant" string: "ESP32-S3 / feather_esp32s3",
+/// or just the chip when the board is unknown. Improv has no board field, and
+/// the installer page reads the board from here to pick its manifest, because
+/// two board profiles share each chip (SPEC.md §9.2, §9.4).
+std::string hardware_variant(std::string_view chip, std::string_view board);
 
 }  // namespace dfu32::improv

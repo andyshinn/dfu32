@@ -281,7 +281,7 @@ struct SerialHost : IHost {
         return true;
     }
     void identify() override { ++identifies; }
-    DeviceInfo device_info() override { return {"DFU32", "v0.5.0", "ESP32-S3", "dfu32-ab12"}; }
+    DeviceInfo device_info() override { return {"DFU32", "v0.5.0", "ESP32-S3", "dfu32-ab12", "esp32s3_n16r8"}; }
     bool online_url(std::string& out) override {
         out = url;
         return !url.empty();
@@ -378,7 +378,7 @@ TEST_CASE("Improv Serial core: device info", "[improv][serial]") {
     REQUIRE(h.results.size() == 1);
     const auto [cmd, strs] = decode(h.results[0]);
     CHECK(cmd == kCmdGetDeviceInfo);
-    CHECK(strs == std::vector<std::string>{"DFU32", "v0.5.0", "ESP32-S3", "dfu32-ab12"});
+    CHECK(strs == std::vector<std::string>{"DFU32", "v0.5.0", "ESP32-S3 / esp32s3_n16r8", "dfu32-ab12"});
 }
 
 TEST_CASE("Improv Serial core: WiFi networks, then an empty result", "[improv][serial]") {
