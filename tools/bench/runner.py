@@ -241,6 +241,9 @@ class Ctx:
         if self.device_ip:
             self._make_api(self.device_ip)
 
+    def close(self) -> None:
+        self.http_log.close()
+
     # ---- output ------------------------------------------------------------------------
 
     def say(self, msg: str) -> None:

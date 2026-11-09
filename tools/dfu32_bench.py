@@ -278,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\ninterrupted", file=sys.stderr)
     finally:
         con.close()
+        ctx.close()
         site.stop()
 
     print("\n" + "=" * 72)

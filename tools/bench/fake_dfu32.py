@@ -490,6 +490,8 @@ class FakeDfu32:
     def stop(self) -> None:
         if self._server:
             self._server.shutdown()
+            self._server.server_close()
+            self._server = None
 
     def auth(self, header: str):
         if not self.claimed:
