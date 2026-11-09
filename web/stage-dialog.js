@@ -21,7 +21,6 @@ import * as S from './staging.js';
 
 const ESPTOOL_JS = './vendor/esptool-js-0.7.0/bundle.js';
 const ITEM_ID = 'dfu32-stage-item';
-const BOARD_KEY = 'dfu32.stage.board';
 const DFU32 = 'DFU32';  // the firmware name DFU32 reports over Improv
 
 const ICON_UPLOAD = '<svg slot="start" viewBox="0 0 24 24"><path d="M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M18,20H6V4H13V9H18V20M12,12L16,16H13.5V19H10.5V16H8L12,12Z"/></svg>';
@@ -36,12 +35,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const LOGS_ITEM = 'Logs & Console';  // the device dialog's last fixed item; HOOK_ITEM in fetch_esp_web_tools.py
 const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
 
-function remembered() {
-  try { return localStorage.getItem(BOARD_KEY) || ''; } catch (e) { return ''; }
-}
-function remember(board) {
-  try { localStorage.setItem(BOARD_KEY, board); } catch (e) { /* private window */ }
-}
 
 // ---- the item in ESP Web Tools' device dialog ----
 
@@ -264,9 +257,7 @@ class StageDialog extends HTMLElement {
     try {
       const { bin, dat } = await S.loadPackage(new Uint8Array(await file.arrayBuffer()));
       const pkt = S.validate(bin, dat);
-      // The file name says which board the image is for; the last board staged
-      // is only a fallback for names it can't be read from.
-      this.pkg = { file, bin, dat, pkt, board: S.guessBoard(file.name) || remembered(), version: S.guessVersion(file.name) };
+      this.pkg = { file, bin, dat, pkt, version: S.guessVersion(file.name) };
       this.showReview();
     } catch (e) {
       this.pkg = null;
@@ -284,29 +275,22 @@ class StageDialog extends HTMLElement {
           <div slot="supporting-text">${kB(p.bin.length)} · ${kind} (${h4(t.deviceType)}) · SoftDevice ${t.sdReq.map(h4).join(', ')} · CRC OK</div>
         </ew-list-item>
       </ew-list>
-      <ew-filled-text-field id="board" label="Target board" required
-        supporting-text="The board set on DFU32's target, e.g. rak4631"></ew-filled-text-field>
       <ew-filled-text-field id="version" label="Version" required
         supporting-text="As the repeater's ver command prints it"></ew-filled-text-field>
-      <p class="fine">Writes to ${this.deviceLine()}, then restarts it. Afterwards, flash the repeater from DFU32's page with <b>Flash from: staged image</b>.</p>`,
+      <p class="fine">Check that it's built for your repeater's board: DFU32 doesn't check that for an image staged here. Writes to ${this.deviceLine()}, then restarts it. Afterwards, flash the repeater from DFU32's page with <b>Flash from: staged image</b>.</p>`,
       `<ew-text-button data-act="another">Choose another</ew-text-button><ew-text-button data-act="stage">Stage</ew-text-button>`);
-    const board = this.dialog.querySelector('#board'), version = this.dialog.querySelector('#version');
-    board.value = p.board;
+    const version = this.dialog.querySelector('#version');
     version.value = p.version;
-    board.addEventListener('input', () => { p.board = board.value.trim(); this.checkFields(); });
     version.addEventListener('input', () => { p.version = version.value.trim(); this.checkFields(); });
     this.checkFields();
   }
 
-  // The board must match the target's (DFU32 refuses BOARD_MISMATCH at flash time).
   checkFields() {
     const p = this.pkg, d = this.dialog;
-    const board = d.querySelector('#board'), version = d.querySelector('#version'), btn = d.querySelector('[data-act="stage"]');
-    const boardErr = !p.board ? '' : /\s/.test(p.board) ? 'No spaces' : utf8len(p.board) > 31 ? 'At most 31 bytes' : '';
+    const version = d.querySelector('#version'), btn = d.querySelector('[data-act="stage"]');
     const versionErr = utf8len(p.version) > 63 ? 'At most 63 bytes' : '';
-    board.error = !!boardErr; board.errorText = boardErr;
     version.error = !!versionErr; version.errorText = versionErr;
-    btn.disabled = !p.board || !p.version || !!boardErr || !!versionErr;
+    btn.disabled = !p.version || !!versionErr;
   }
 
   // ESP Web Tools' progress page: a spinner, or a ring with a percentage once pct is given.
@@ -330,11 +314,11 @@ class StageDialog extends HTMLElement {
     try {
       this.setProgress('Building the image');
       const image = await S.buildImage(p.bin, p.dat, {
-        board: p.board, version: p.version, manifestUrl: S.clipUtf8('usb:' + p.file.name, 255),
+        // No board: DFU32 checks the board only on images that name one (SPEC §8).
+        version: p.version, manifestUrl: S.clipUtf8('usb:' + p.file.name, 255),
         stagedAt: Math.floor(Date.now() / 1000),
       });
       await writeStaging(this.port, image, (label, pct) => this.setProgress(label, pct));
-      remember(p.board);
     } catch (e) {
       this.busy = false;
       console.error('DFU32 staging failed', e);
@@ -345,7 +329,7 @@ class StageDialog extends HTMLElement {
     }
     this.busy = false;
     this.render('', `<ewt-page-message label="Image staged"></ewt-page-message>
-      <p class="fine center">${esc(p.version)} for <b>${esc(p.board)}</b> is on ${this.deviceLine()}. DFU32 is restarting; once it's back on WiFi, open its page and flash the repeater with <b>Flash from: staged image</b>.</p>`,
+      <p class="fine center"><b>${esc(p.version)}</b> is on ${this.deviceLine()}. DFU32 is restarting; once it's back on WiFi, open its page and flash the repeater with <b>Flash from: staged image</b>.</p>`,
       `<ew-text-button data-act="close">Close</ew-text-button>`);
     this.dialog.querySelector('ewt-page-message').icon = OK_ICON;
   }

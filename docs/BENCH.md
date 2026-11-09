@@ -151,7 +151,7 @@ Worth trying on the bench:
 
 ### From the browser over USB
 
-On [dfu32.app](https://dfu32.app/), click **Connect device**, pick DFU32's port, then choose **Stage nRF52 image** and the DFU `.zip`. Check the target board (it must match `target board`) and the version, then click **Stage**. The page validates the package like `dfu32_stage_image.py`, finds the staging partition from the partition table, writes it and restarts DFU32. Quit any serial monitor first so the port is free. When DFU32 is back, `staged` should end with `result OK`.
+On [dfu32.app](https://dfu32.app/), click **Connect device**, pick DFU32's port, then choose **Stage nRF52 image** and the DFU `.zip`. Check the version, then click **Stage**. The image carries no board, so DFU32 doesn't compare it with `target board`: picking the right zip is up to you. The page validates the package like `dfu32_stage_image.py`, finds the staging partition from the partition table, writes it and restarts DFU32. Quit any serial monitor first so the port is free. When DFU32 is back, `staged` should end with `result OK`.
 
 ### From the PC with esptool
 
@@ -281,7 +281,7 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 
 - **Happy path with curl only:** claim, PUT target, flash, `start ota` from the companion app, `status` ends `SUCCEEDED`; `GET /targets/t096` shows `last_ok_version`.
 - **Bad hash:** edit `bin.sha256` in the manifest, `POST /stage` with `{"force":true}`. `status` ends `FAILED` with `HASH_MISMATCH`.
-- **Wrong board:** `PUT` the target with `"board":"rak4631"`, then flash. `FAILED`, `BOARD_MISMATCH` (from the manifest, or from the staged header with `"source":"staged"`), and the repeater is never touched.
+- **Wrong board:** `PUT` the target with `"board":"rak4631"`, then flash. `FAILED`, `BOARD_MISMATCH` (from the manifest, or from the staged header with `"source":"staged"` when that header names a board), and the repeater is never touched.
 - **Arm timeout:** flash with `{"arm_timeout_s":30}` and don't run `start ota`. `FAILED`, `TARGET_NOT_FOUND`, with a run record.
 - **Busy:** while a job runs, a second `flash`, `stage`, `ble/scan` or target `PUT` gets `409`; so does the console's `scan`.
 - **Abort while armed:** `POST /jobs/current/abort` during `AWAITING_TARGET`: `FAILED`, `ABORTED`, target untouched.

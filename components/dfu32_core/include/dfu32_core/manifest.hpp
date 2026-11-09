@@ -69,6 +69,12 @@ Status parse_manifest(std::string_view text, std::string_view manifest_url, Mani
 /// `board` is listed in manifest.boards (exact, ASCII case-insensitive).
 bool board_matches(const Manifest& m, std::string_view board) noexcept;
 
+/// A staged image whose header names `image_board` may be flashed to a target
+/// whose board is `target_board`. Checked only when both are set (ASCII
+/// case-insensitive): an image staged over USB from the installer page carries
+/// no board, so the operator's choice of package is the check (SPEC §8).
+bool staged_board_ok(std::string_view image_board, std::string_view target_board) noexcept;
+
 /// Cross-checks a parsed .dat against the manifest's optional `init` block.
 /// DAT_INVALID on any disagreement (a server-side .dat mix-up).
 Status check_init_against_manifest(const Manifest& m, const dfu::InitPacket& init);

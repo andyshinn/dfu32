@@ -57,6 +57,19 @@ TEST_CASE("Manifest: board matching is exact and case-insensitive", "[manifest]"
     CHECK_FALSE(dfu32::board_matches(m, ""));
 }
 
+TEST_CASE("Manifest: a staged image's board against the target's", "[manifest]") {
+    using dfu32::staged_board_ok;
+    CHECK(staged_board_ok("rak4631", "rak4631"));
+    CHECK(staged_board_ok("RAK4631", "rak4631"));
+    CHECK_FALSE(staged_board_ok("heltec_t114", "rak4631"));
+    CHECK_FALSE(staged_board_ok("rak4631x", "rak4631"));
+    // Unlabelled image (staged over USB from the installer page): not checked.
+    CHECK(staged_board_ok("", "rak4631"));
+    // Target with no board set: not checked, as before.
+    CHECK(staged_board_ok("rak4631", ""));
+    CHECK(staged_board_ok("", ""));
+}
+
 TEST_CASE("Manifest: schema handling", "[manifest]") {
     Manifest m;
     CHECK(parse_manifest(manifest("", R"(["x"])", "2"), kUrl, m).code == Err::ManifestUnsupported);

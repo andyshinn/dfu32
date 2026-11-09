@@ -53,7 +53,7 @@ for (const q of reqs) {
     else if (q.op === 'crc16') v = s.crc16(fromHex(q.data));
     else if (q.op === 'staging') v = s.findStaging(fromHex(q.data));
     else if (q.op === 'parts') v = s.parsePartitionTable(fromHex(q.data));
-    else if (q.op === 'guess') v = { board: s.guessBoard(q.name), version: s.guessVersion(q.name) };
+    else if (q.op === 'guess') v = { version: s.guessVersion(q.name) };
     else if (q.op === 'clip') v = { clipped: s.clipUtf8(q.text, q.max), len: s.utf8len(q.text), h4: s.h4(q.max) };
     out.push({ ok: v });
   } catch (e) {
@@ -231,16 +231,15 @@ class PartitionTable(unittest.TestCase):
 class Guesses(unittest.TestCase):
     def test_meshcore_names(self):
         cases = {
-            "RAK_4631_repeater-v1.18.0-81dbae5.zip": ("rak4631", "v1.18.0-81dbae5"),
-            "Heltec_t114_repeater-v1.18.0-81dbae5.zip": ("heltec_t114", "v1.18.0-81dbae5"),
-            "Xiao_nrf52_room_server-v1.9.1-abcdef0.zip": ("xiao_nrf52", "v1.9.1-abcdef0"),
-            "C:\\Downloads\\LilyGo_T-Echo_companion_radio_ble-v1.18.0-81dbae5.zip": ("lilygo_t_echo", "v1.18.0-81dbae5"),
-            "firmware.zip": ("", "firmware"),
-            "my build.zip": ("", "my build"),
+            "RAK_4631_repeater-v1.18.0-81dbae5.zip": "v1.18.0-81dbae5",
+            "Xiao_nrf52_room_server-v1.9.1-abcdef0.zip": "v1.9.1-abcdef0",
+            "C:\\Downloads\\LilyGo_T-Echo_companion_radio_ble-v1.18.0-81dbae5.zip": "v1.18.0-81dbae5",
+            "firmware.zip": "firmware",
+            "my build.zip": "my build",
         }
         got = run_js([{"op": "guess", "name": n} for n in cases])
-        for (name, (board, version)), g in zip(cases.items(), got):
-            self.assertEqual((g["ok"]["board"], g["ok"]["version"]), (board, version), name)
+        for (name, version), g in zip(cases.items(), got):
+            self.assertEqual(g["ok"]["version"], version, name)
 
     def test_clip_never_splits_a_character(self):
         text = "aé€😀" * 20  # 1, 2, 3 and 4 UTF-8 bytes
