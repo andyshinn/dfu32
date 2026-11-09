@@ -119,7 +119,11 @@ bool setup_neopixel() {
 bool setup_red() {
 #if CONFIG_DFU32_STATUS_LED_GPIO >= 0
     led_indicator_gpio_config_t gpio{};
+#if CONFIG_DFU32_STATUS_LED_ACTIVE_LOW
+    gpio.is_active_level_high = false;
+#else
     gpio.is_active_level_high = true;
+#endif
     gpio.gpio_num = CONFIG_DFU32_STATUS_LED_GPIO;
     led_indicator_config_t cfg{};
     cfg.blink_lists = kRedLists;

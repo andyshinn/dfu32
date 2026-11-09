@@ -80,10 +80,13 @@ Build directories from the older `idf.py -B build/<profile> -DDFU32_BOARD=<profi
 | `feather_esp32_v2` | Adafruit Feather ESP32 V2 | 8 MB / 2 MB |
 | `esp32s3_n16r8` | Generic ESP32-S3 N16R8 DevKitC | 16 MB / 8 MB |
 | `rak11200_rak19007` | RAKwireless WisBlock RAK11200 on a RAK19007 base | 4 MB / 8 MB (4 MB mapped) |
+| `xiao_esp32s3` | Seeed Studio XIAO ESP32S3 (or XIAO ESP32S3 Sense) | 8 MB / 8 MB |
 
 PSRAM is required. A board without it won't boot this firmware.
 
 The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into download mode by itself. Pull BOOT0 to GND, press reset, flash, then release BOOT0 and press reset again. Its status LED is the blue one on GPIO2 (the RAK19007 has no NeoPixel). It has no user button, so a lost API token is cleared with `token clear` on the USB console (or by reflashing with an NVS erase); while you still have the token, `POST /api/v1/system/token/clear` turns it off and `/rotate` replaces it.
+
+The XIAO ESP32S3 has no on-board antenna, so fit the U.FL antenna it ships with before using WiFi or BLE. Its attention LED is the orange user LED (GPIO21); it has no NeoPixel. The BOOT button is the user button.
 
 Change settings for a profile with `idf.py --preset <profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
 

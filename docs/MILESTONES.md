@@ -9,7 +9,7 @@ Each milestone ends with something demonstrable on the bench.
 
 ## M0: Skeleton (½ day)
 
-- IDF v6.1 project, `sdkconfig.defaults` plus the `feather_esp32s3` / `feather_esp32_v2` / `esp32s3_n16r8` / `rak11200_rak19007` profiles, `partitions/4mb.csv` and `8mb.csv`.
+- IDF v6.1 project, `sdkconfig.defaults` plus the `feather_esp32s3` / `feather_esp32_v2` / `esp32s3_n16r8` / `rak11200_rak19007` / `xiao_esp32s3` profiles, `partitions/4mb.csv` and `8mb.csv`.
 - `idf_component.yml` with `esp-nimble-cpp` pinned to 2.6.0.
 - GitHub Actions: build esp32s3 + esp32, enforce the app size budget (fail above 1.30 MB on the 4 MB profile), run host unit tests.
 - `components/dfu_proto` with CRC16, the `.dat` parser, the chunk planner and host tests (§14.1 subset).
@@ -137,7 +137,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
   - it stays on after provisioning, so the page can recognise an installed DFU32 and offer to change WiFi or open the device's page. USB access already allows this through the `wifi` console command.
 - **`web/`**: `index.html` plus a little CSS. No framework and no build step.
   - The `<esp-web-install-button>` comes from ESP Web Tools, pinned to an exact version.
-  - A board picker sets the button's `manifest`. One manifest can't serve every board, because the Feather S3 and the N16R8 are both `ESP32-S3`.
+  - A board picker sets the button's `manifest`. One manifest can't serve every board, because the Feather S3, the N16R8 and the XIAO ESP32S3 are all `ESP32-S3`.
   - With no board chosen, the button ("Connect device") still connects with a board-less manifest. Improv device info reports the board (`ESP32-S3 / feather_esp32s3`), and the page fills in that board's builds, so an installed DFU32 can be updated and managed without picking its board.
   - The button's `unsupported` slot shows a message in browsers without Web Serial.
   - A warning next to the button: choosing "Erase device" removes WiFi, the token and the target.

@@ -105,10 +105,13 @@ Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top
 | `feather_esp32_v2` | 8 MB / 2 MB | `partitions/8mb.csv` | UART0 via USB bridge | GPIO0 / GPIO2 (shared with STEMMA I2C power) | GPIO13 | SW GPIO38 (input-only) |
 | `esp32s3_n16r8` | 16 MB / 8 MB | `partitions/8mb.csv` (8 MB is plenty) | USB-Serial-JTAG | GPIO48 / none *(varies by clone, verify)* | none | BOOT GPIO0 |
 | `rak11200_rak19007` (WisBlock RAK11200 core on a RAK19007 base) | 4 MB / 8 MB (ESP32-WROVER-B; 4 MB mapped) | `partitions/4mb.csv` | UART0 via the base board's USB-C | none | blue LED2 GPIO2 *(not red)* | none (reset only) |
+| `xiao_esp32s3` (Seeed Studio XIAO ESP32S3; also the Sense) | 8 MB / 8 MB octal PSRAM (ESP32-S3R8) | `partitions/8mb.csv` | USB-Serial-JTAG | none | orange user LED GPIO21, active low *(not red)* | BOOT GPIO0 |
 
 The Feather pins are verified against Adafruit's board definitions: arduino-esp32 `variants/adafruit_feather_esp32s3/pins_arduino.h` and `variants/adafruit_feather_esp32_v2/pins_arduino.h`, plus CircuitPython `ports/espressif/boards/adafruit_feather_esp32s3_4mbflash_2mbpsram/`. The NeoPixel power pin must be driven HIGH before the LED is used.
 
 The RAK11200 pins come from RAK's `WisCore_RAK11200_Board` variant (as carried in meshtastic/firmware `variants/esp32/rak11200/pins_arduino.h`): LED1 green on GPIO12, LED2 blue on GPIO2. The attention LED is LED2: GPIO2 is a strapping pin only in combination with GPIO0 low (download mode), so driving it high can't affect a normal boot. GPIO12 is the MTDI strapping pin that selects the flash voltage; if it were still driven high when the chip samples it across a reset, the WROVER-B's 3.3 V flash could get 1.8 V, so the firmware never drives it. The board has no auto-reset circuit, so flashing needs BOOT0 held low at reset. It has no NeoPixel, so its only indicator is the attention LED (§13.4). With no button, a lost token is cleared with `token clear` on the USB console or by reflashing with an NVS erase; `token/clear` and `token/rotate` over HTTP need the current token (§9.3).
+
+The XIAO ESP32S3 pins come from arduino-esp32 `variants/XIAO_ESP32S3/pins_arduino.h` (`LED_BUILTIN` 21) and Zephyr `boards/seeed/xiao_esp32s3` (GPIO21 `GPIO_ACTIVE_LOW`); flash size and octal PSRAM from the arduino-esp32 `XIAO_ESP32S3` board entry. The user LED is lit when GPIO21 is low, so the profile sets `DFU32_STATUS_LED_ACTIVE_LOW`. GPIO21 is not a strapping pin on the S3. The board has no NeoPixel, so its only indicator is the attention LED (§13.4). The BOOT button (GPIO0) has the same strapping-pin caveat as the Feather S3's. The radio needs the external U.FL antenna; without one, WiFi and BLE range is very short.
 
 Both button pins have quirks:
 - Feather S3 BOOT (GPIO0) is a strapping pin. A long-press is only interpreted once the app is running; holding it at reset enters the ROM download mode, as normal.
@@ -813,6 +816,7 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
 DFU32 Kconfig (`main/Kconfig.projbuild`):
 - `DFU32_MAX_TARGETS` (default 1)
 - `DFU32_NEOPIXEL_GPIO`, `DFU32_NEOPIXEL_POWER_GPIO`, `DFU32_STATUS_LED_GPIO` (plain red LED), `DFU32_BUTTON_GPIO`. −1 = none; set by the board profile.
+- `DFU32_STATUS_LED_ACTIVE_LOW` (n): the plain LED is lit when its GPIO is low (`xiao_esp32s3`)
 - `DFU32_LOG_RING_KB` (default 64, in PSRAM)
 - `DFU32_IMPROV_BLE` (y)
 - `DFU32_DEBUG_ENDPOINTS` (n): fault injection (§14.2)
