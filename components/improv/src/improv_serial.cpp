@@ -61,7 +61,8 @@ public:
     bool begin_connect(const std::string& ssid, const std::string& password) override;
     void identify() override {}  // not a Serial command
     DeviceInfo device_info() override {
-        return {"DFU32", esp_app_get_description()->version, chip_name(CONFIG_IDF_TARGET), net::status().hostname};
+        return {"DFU32", esp_app_get_description()->version, chip_name(CONFIG_IDF_TARGET), net::status().hostname,
+            CONFIG_DFU32_BOARD_NAME};
     }
     bool online_url(std::string& url) override {
         const net::Status st = net::status();

@@ -381,7 +381,7 @@ These need a phone or a computer with Bluetooth, and eyes on the board, so the b
 3. **Wrong passphrase:** after `wifi forget` and `improv start`, send a wrong passphrase. After about 30 s the client shows "unable to connect"; retrying with the right one works. If a network was stored before, `wifi` shows it again after the failed attempt.
 4. **Identify:** the Improv web page's identify, if offered, blinks the NeoPixel white quickly for 10 s.
 5. **Busy:** while Improv is open, the console's `scan` says "Improv BLE provisioning is open", and `POST /flash` answers `409` with holder `improv`. `improv stop` frees it.
-6. **Device info:** the Improv web page shows DFU32, the firmware version (from `git describe`, e.g. `v0.3.0-12-gabc1234`), the chip and the hostname. `/api/v1/status` shows the same version.
+6. **Device info:** the Improv web page shows DFU32, the firmware version (from `git describe`, e.g. `v0.3.0-12-gabc1234`), the chip and board (e.g. `ESP32-S3 / feather_esp32s3`) and the hostname. `/api/v1/status` shows the same version.
 
 **Button** (BOOT on the Feather S3 and N16R8, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
 
@@ -414,7 +414,7 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 
 Improv Serial shares the console port with the REPL (SPEC §9.2). Before the installer page serves a build with it (it deploys from `main`), the PR build can be checked with https://www.improv-wifi.com/ in desktop Chrome or Edge: **Connect device to Wi-Fi → via USB/Serial**. Close any serial monitor first; only one program can hold the port.
 
-1. **Fresh device:** `idf.py -p PORT erase-flash`, then flash the build. Connect from improv-wifi.com: within a couple of seconds it shows DFU32, the version, the chip and the hostname, and lists nearby networks. Pick yours, enter the passphrase: it shows success and a link to `http://<ip>/`. The console log says "joined …; provisioned", and `improv` shows Improv BLE "closed" (it had opened because no network was stored).
+1. **Fresh device:** `idf.py -p PORT erase-flash`, then flash the build. Connect from improv-wifi.com: within a couple of seconds it shows DFU32, the version, the chip and board (`ESP32-S3 / feather_esp32s3`) and the hostname, and lists nearby networks. Pick yours, enter the passphrase: it shows success and a link to `http://<ip>/`. The console log says "joined …; provisioned", and `improv` shows Improv BLE "closed" (it had opened because no network was stored).
 2. **Wrong passphrase:** after `wifi forget`, try a wrong one. After about 25 s the page shows "unable to connect"; the right one then works. With a network stored beforehand, `wifi` shows it again after the failed attempt.
 3. **Already provisioned:** connect again. The page shows the device as connected, with its link, and offers to change WiFi; changing it works.
 4. **Terminal still works:** close the browser tab and open a monitor (`idf.py -p PORT monitor`). The prompt, arrow-key history, Tab completion and hints work as before. Typing a command that starts with a capital `I` (`Improv` → "Unrecognized command") echoes the `I` at most 0.1 s late.
@@ -435,6 +435,7 @@ Once `main` has it, the installer page itself (MILESTONES M5 bench):
 10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens the claim screen.
 11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
+13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.
 
 ## Bench results so far
 

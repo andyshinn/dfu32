@@ -85,7 +85,7 @@ void Core::handle_rpc(std::span<const uint8_t> packet) {
             return;
         case ::improv::GET_DEVICE_INFO: {
             const DeviceInfo d = host_.device_info();
-            publish(kCmdGetDeviceInfo, {d.firmware, d.version, d.chip, d.name});
+            publish(kCmdGetDeviceInfo, {d.firmware, d.version, hardware_variant(d.chip, d.board), d.name});
             return;
         }
         case ::improv::GET_WIFI_NETWORKS: {
@@ -187,6 +187,15 @@ std::string chip_name(std::string_view idf_target) {
     std::string out;
     for (const char c : idf_target) out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     if (out.size() > 5 && out.compare(0, 5, "ESP32") == 0) out.insert(5, "-");
+    return out;
+}
+
+std::string hardware_variant(std::string_view chip, std::string_view board) {
+    std::string out(chip);
+    if (!board.empty()) {
+        out += " / ";
+        out += board;
+    }
     return out;
 }
 

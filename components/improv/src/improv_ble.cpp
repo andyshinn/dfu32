@@ -166,7 +166,8 @@ void Host::identify() {
 }
 
 DeviceInfo Host::device_info() {
-    return {"DFU32", esp_app_get_description()->version, chip_name(CONFIG_IDF_TARGET), net::status().hostname};
+    return {"DFU32", esp_app_get_description()->version, chip_name(CONFIG_IDF_TARGET), net::status().hostname,
+            CONFIG_DFU32_BOARD_NAME};
 }
 
 /// Ends the connection attempt: keep the new network, or go back to the old one.

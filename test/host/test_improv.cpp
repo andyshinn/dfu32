@@ -27,7 +27,7 @@ struct FakeHost : IHost {
         return connect_starts;
     }
     void identify() override { ++identifies; }
-    DeviceInfo device_info() override { return {"DFU32", "v0.4.0", "ESP32-S3", "dfu32-ab12"}; }
+    DeviceInfo device_info() override { return {"DFU32", "v0.4.0", "ESP32-S3", "dfu32-ab12", "feather_esp32s3"}; }
 };
 
 uint8_t checksum(const std::vector<uint8_t>& p) {
@@ -177,7 +177,8 @@ TEST_CASE("Improv: identify and device info", "[improv]") {
     c.handle_rpc(packet(kCmdGetDeviceInfo, {}));
     REQUIRE(h.results.size() == 1);
     CHECK(h.results[0][0] == kCmdGetDeviceInfo);
-    CHECK(strings(h.results[0]) == std::vector<std::string>{"DFU32", "v0.4.0", "ESP32-S3", "dfu32-ab12"});
+    CHECK(strings(h.results[0]) ==
+          std::vector<std::string>{"DFU32", "v0.4.0", "ESP32-S3 / feather_esp32s3", "dfu32-ab12"});
     c.stop();
     CHECK(c.state() == State::Stopped);
 }
@@ -204,6 +205,9 @@ TEST_CASE("Improv: chip names", "[improv]") {
     CHECK(chip_name("esp32s3") == "ESP32-S3");
     CHECK(chip_name("esp32") == "ESP32");
     CHECK(chip_name("esp32c6") == "ESP32-C6");
+    CHECK(hardware_variant("ESP32-S3", "feather_esp32s3") == "ESP32-S3 / feather_esp32s3");
+    CHECK(hardware_variant("ESP32", "rak11200_rak19007") == "ESP32 / rak11200_rak19007");
+    CHECK(hardware_variant("ESP32", "") == "ESP32");
 }
 
 TEST_CASE("Improv: passphrase buffers are wiped", "[improv]") {

@@ -107,7 +107,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - Web UI: status, target form with the **scan picker**, runs, logs, system. `GET /` works while unclaimed and opens on the claim screen, because that's where an Improv redirect lands.
 - Improv core plus Improv BLE (only while unprovisioned), built on `improv-wifi/sdk-cpp` (SPEC §4.1, §9.2). Keep the core separate from the transport so M5 can add Improv Serial without changing it:
   - takes the WiFi settings, saves them with `net::set_credentials`, waits for the connection (with a timeout), then reports provisioned with the redirect URL `http://<ip>/`, or reports an error;
-  - answers device info with `DFU32`, the firmware version, the chip and the hostname.
+  - answers device info with `DFU32`, the firmware version, the chip (since M5 with the board profile: `ESP32-S3 / feather_esp32s3`) and the hostname.
 - The button (unclaim / factory reset) and the LED states, built on `espressif/button` and `espressif/led_indicator` + `led_strip` (SPEC §4.1) rather than local code.
 - DFU32 self-OTA upload with rollback (`esp_ota_mark_app_valid_cancel_rollback` once WiFi and HTTP are up).
 - Firmware version from the git tag: CI checks out full history (`fetch-depth: 0`) so `git describe` gives `v0.4.0` rather than a bare hash. The same string shows in `/api/v1/status`, the UI, Improv device info and, in M5, the installer manifests.
@@ -138,7 +138,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 - **`web/`**: `index.html` plus a little CSS. No framework and no build step.
   - The `<esp-web-install-button>` comes from ESP Web Tools, pinned to an exact version.
   - A board picker sets the button's `manifest`. One manifest can't serve every board, because the Feather S3 and the N16R8 are both `ESP32-S3`.
-  - With no board chosen, the button ("Connect device") still connects with a board-less manifest, so an installed DFU32 can be managed without knowing its board.
+  - With no board chosen, the button ("Connect device") still connects with a board-less manifest. Improv device info reports the board (`ESP32-S3 / feather_esp32s3`), and the page fills in that board's builds, so an installed DFU32 can be updated and managed without picking its board.
   - The button's `unsupported` slot shows a message in browsers without Web Serial.
   - A warning next to the button: choosing "Erase device" removes WiFi, the token and the target.
   - Links to the README, `OPERATOR.md` and `RECOVERY.md`.
