@@ -7,7 +7,7 @@ Sources:
   - dependencies.lock.<target>: the registry components and the ESP-IDF version
     each firmware build uses;
   - the vendored improv-wifi/sdk-cpp (components/improv/third_party/sdk-cpp);
-  - ESP Web Tools, at the version tools/fetch_esp_web_tools.py pins;
+  - ESP Web Tools and esptool-js, at the versions tools/fetch_esp_web_tools.py pins;
   - tools/notices/: ESP-IDF's own copyright list for the locked IDF release
     (docs/en/COPYRIGHT.rst, which names the code ESP-IDF bundles) and the
     license texts that need their copyright lines kept (cJSON).
@@ -30,6 +30,9 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fetch_esp_web_tools  # noqa: E402  (the pinned installer-page versions)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTICES_DIR = Path(__file__).resolve().parent / "notices"
@@ -150,12 +153,11 @@ def improv_sdk_version(root: Path) -> str:
 
 
 def esp_web_tools_version() -> str:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    try:
-        import fetch_esp_web_tools
-    finally:
-        sys.path.pop(0)
     return fetch_esp_web_tools.VERSION
+
+
+def esptool_js_version() -> str:
+    return fetch_esp_web_tools.ESPTOOL_JS_VERSION
 
 
 def idf_copyright(idf_version: str, notices_dir: Path = NOTICES_DIR) -> tuple[str, str]:
@@ -177,7 +179,7 @@ def heading(title: str, char: str = "-") -> str:
 
 
 def render(root: Path = ROOT, locks: list[Path] | None = None, notices_dir: Path = NOTICES_DIR,
-           ewt_version: str | None = None) -> str:
+           ewt_version: str | None = None, ejs_version: str | None = None) -> str:
     lock_paths = locks if locks is not None else find_locks(root)
     parsed = [parse_lock(p.read_text(encoding="utf-8"), p.name) for p in lock_paths]
 
@@ -198,6 +200,7 @@ def render(root: Path = ROOT, locks: list[Path] | None = None, notices_dir: Path
     copyright_name, copyright_text = idf_copyright(idf, notices_dir)
     apache = (root / IMPROV_SDK / "LICENSE").read_text(encoding="utf-8")
     ewt = ewt_version or esp_web_tools_version()
+    ejs = ejs_version or esptool_js_version()
 
     out: list[str] = []
     out.append(heading("DFU32 third-party notices", "="))
@@ -235,6 +238,12 @@ def render(root: Path = ROOT, locks: list[Path] | None = None, notices_dir: Path
         "            licenses; see its repository)\n"
         "  Source:   https://github.com/esphome/esp-web-tools\n"
         "  Used for: flashing over Web Serial and Improv Serial in the browser\n")
+    out.append(
+        f"esptool-js {ejs} (served from vendor/esptool-js-{ejs}/, with its LICENSE)\n"
+        "  License:  Apache-2.0; its bundle includes pako (MIT and Zlib) and\n"
+        "            atob-lite (MIT)\n"
+        "  Source:   https://github.com/espressif/esptool-js\n"
+        "  Used for: writing an nRF52 image to the staging partition from the page\n")
 
     out.append(heading("ESP-IDF copyrights"))
     out.append(f"ESP-IDF's own list (tools/notices/{copyright_name}, from its docs/en/COPYRIGHT.rst):\n")

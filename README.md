@@ -16,6 +16,8 @@ DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
 The installer page at **[dfu32.app](https://dfu32.app/)** flashes DFU32 over USB from a desktop browser with Web Serial (Chrome, Edge, or Firefox 151 or later); no toolchain needed. Pick your board, click **Connect device**, then **Install DFU32**. A device that already runs DFU32 tells the page its board, so you can connect without picking one to update it, change its WiFi or open its page. Updating from the page keeps WiFi, the API token, the target and the staged image, unless you choose "Erase device". Until v1.0 the page serves the latest `main` build; after that, the latest release.
 
+To stage a repeater image without an artifact server, connect a DFU32 from the page and choose **Stage nRF52 image**, then pick the DFU `.zip` (a MeshCore release asset, for example) and enter the target's board. The page checks the package, writes it to DFU32's staging partition over USB and restarts DFU32, keeping its settings; then flash the repeater from DFU32's page with **Flash from: staged image**.
+
 After installing, the page asks for your WiFi network (Improv Serial) and then offers a link to the device's web UI. Coming back later, it recognises an installed DFU32 and can change its WiFi or open its page. WiFi can also be set over Improv BLE (Home Assistant or [improv-wifi.com](https://www.improv-wifi.com/)) or with the `wifi <ssid> <password>` console command.
 
 To flash without the page, each release carries a merged image per board, `dfu32-<board>-merged.bin`. It's a full image for a fresh install: it **resets saved settings** (WiFi, token, target and run log). Flash it at offset 0:
@@ -24,7 +26,7 @@ To flash without the page, each release carries a merged image per board, `dfu32
 esptool.py --chip auto -p PORT write_flash 0x0 dfu32-feather_esp32s3-merged.bin
 ```
 
-To preview the page locally, copy in ESP Web Tools (from a hash-pinned npm tarball; `web/vendor/` is git-ignored) and serve `web/`. Localhost counts as a secure context, so Web Serial works; the manifests only exist on the deployed site.
+To preview the page locally, copy in ESP Web Tools and esptool-js (from hash-pinned npm tarballs; `web/vendor/` is git-ignored) and serve `web/`. Localhost counts as a secure context, so Web Serial works; the manifests only exist on the deployed site.
 
 ```bash
 python3 tools/fetch_esp_web_tools.py --site web && python3 -m http.server -d web 8000
@@ -103,7 +105,7 @@ To also check the CRC16 against a real image, point two environment variables at
 DFU32_TEST_BIN=path/to/firmware.bin DFU32_TEST_DAT=path/to/firmware.dat ctest --test-dir build-host --output-on-failure
 ```
 
-Test the Python tools (staging, packing, the MeshCore release fetcher and the bench runner):
+Test the Python tools (staging, packing, the MeshCore release fetcher and the bench runner) and the installer page's staging code (`web/staging.js`, run under Node 20 or later and checked against the Python tool; skipped without Node):
 
 ```bash
 python3 -m unittest discover -s tools -p 'test_*.py'
