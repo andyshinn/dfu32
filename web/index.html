@@ -60,6 +60,7 @@ section { display: flex; flex-direction: column; gap: 14px; }
 .note code { font: 12.5px var(--mono); color: var(--text); }
 .linkish { all: unset; cursor: pointer; color: var(--accent-ink); text-decoration: underline; text-underline-offset: 3px; }
 .linkish:hover { color: var(--text); }
+.linkish[hidden] { display: none; }
 .linkish:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 
 .picker { position: relative; }
@@ -166,7 +167,7 @@ footer a { color: var(--muted); }
       </div>
     </div>
     <p class="note"><strong>PSRAM is required.</strong> Boards without it won’t run DFU32.</p>
-    <p class="note" id="remembered" hidden><span id="remembered-text"></span> <button class="linkish" id="forget" type="button">Forget it</button></p>
+    <p class="note" id="remembered" hidden><span id="remembered-text"></span> <button class="linkish" id="forget" type="button">Forget saved board</button></p>
   </section>
 
   <section id="install">
@@ -256,16 +257,21 @@ footer a { color: var(--muted); }
   const rememberedText = document.getElementById('remembered-text');
   const hintDefault = hint.textContent;
 
-  // The chosen board is kept in a first-party cookie, so coming back to update
-  // or re-flash starts with it selected. Nothing else is stored.
+  // The board the user picks is kept in a first-party cookie, so coming back to
+  // update or re-flash starts with it selected. Nothing else is stored, and a
+  // board a device reports is never saved on its own (see select()).
   const BOARD_COOKIE = 'dfu32_board';
   const COOKIE_MAX_AGE = 400 * 24 * 3600;  // 400 days, the most Chrome keeps a cookie
+  // One writer, so saving and deleting always use the same attributes.
+  function setBoardCookie(value, maxAge) {
+    document.cookie = `${BOARD_COOKIE}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; SameSite=Lax` + (location.protocol === 'https:' ? '; Secure' : '');
+  }
+  // True only if the cookie stuck: blocked cookies and file:// drop it silently.
   function saveBoard(id) {
-    document.cookie = `${BOARD_COOKIE}=${encodeURIComponent(id)}; Max-Age=${COOKIE_MAX_AGE}; Path=/; SameSite=Lax` + (location.protocol === 'https:' ? '; Secure' : '');
+    setBoardCookie(id, COOKIE_MAX_AGE);
+    return savedBoard() === id;
   }
-  function forgetBoard() {
-    document.cookie = `${BOARD_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax` + (location.protocol === 'https:' ? '; Secure' : '');
-  }
+  const forgetBoard = () => setBoardCookie('', 0);
   function savedBoard() {
     const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${BOARD_COOKIE}=([^;]*)`));
     if (!m) return null;
@@ -298,16 +304,26 @@ footer a { color: var(--muted); }
   // The device's board also wins over a different board chosen on the page
   // (usually one remembered from an earlier visit with another device), so a
   // remembered board can't put the wrong profile's image on a running DFU32.
+  //
+  // The object must be changed in place: it is the one ESP Web Tools flashes
+  // from, so every key is replaced with the reported board's manifest (name,
+  // version, erase settings, builds). The decision never depends on what the
+  // page has selected: the dialog keeps the manifest URL it opened with and
+  // downloads it again after installing, and that fresh copy must get the
+  // same treatment. dfu32_board marks a manifest already done.
   function adoptDeviceBoard(manifest, info) {
     if (!info) return;
     const id = String(info.chipFamily || '').split(' / ')[1];
     const board = BOARDS.find(b => b.id === id), m = manifests[id];
     if (!board || !m) return;
-    const boardless = manifest.dfu32_boardless && !manifest.builds.length;
-    if (!boardless && (!selected || selected.id === id)) return;
-    const base = new URL(manifestUrl(id), location.href);
-    manifest.builds = m.builds.map(b => ({ ...b, parts: b.parts.map(p => ({ ...p, path: new URL(p.path, base).href })) }));
-    if (m.version) manifest.version = m.version;
+    if (manifest.dfu32_board !== id) {
+      const base = new URL(manifestUrl(id), location.href);
+      for (const k of Object.keys(manifest)) delete manifest[k];
+      Object.assign(manifest, structuredClone(m), {
+        builds: m.builds.map(b => ({ ...b, parts: b.parts.map(p => ({ ...p, path: new URL(p.path, base).href })) })),
+        dfu32_board: id,
+      });
+    }
     if (!selected || selected.id !== id) select(board, { fromDevice: true });
   }
   esp.overrides = {
@@ -382,8 +398,10 @@ footer a { color: var(--muted); }
   }
   // The only writer of the button's manifest: the chosen board's, or the board-less one.
   function updateManifest() {
-    esp.setAttribute('manifest', selected ? manifestUrl(selected.id) : boardlessManifest());
+    const url = selected ? manifestUrl(selected.id) : boardlessManifest();
+    if (esp.getAttribute('manifest') !== url) esp.setAttribute('manifest', url);
   }
+  const prefetched = {};  // board id -> promise of its start-up fetch
   // no-cache revalidates, so the copy ESP Web Tools fetches next is the same one.
   async function loadManifest(id) {
     const r = await fetch(manifestUrl(id), { cache: 'no-cache' });
@@ -391,15 +409,29 @@ footer a { color: var(--muted); }
     return r.json();
   }
 
+  // The note under the picker says what the cookie holds; forget: show "Forget saved board".
+  function setNote(text, forget = true) {
+    rememberedText.textContent = text || '';
+    document.getElementById('forget').hidden = !forget;
+    remembered.hidden = !text;
+  }
+  // Only a board the user picks is saved. A device-reported one is shown but
+  // leaves the saved board alone, so connecting another board once doesn't
+  // replace the one normally used.
+  function noteFor(board, { fromDevice, restored }) {
+    if (restored) return setNote('Remembered from your last visit.');
+    if (!fromDevice) return setNote(saveBoard(board.id) ? 'Saved in this browser for next time.' : '');
+    const kept = BOARDS.find(b => b.id === savedBoard());
+    if (!kept) return setNote('Reported by the connected device. Choose it in the list to save it for next time.', false);
+    if (kept === board) return setNote('Reported by the connected device, and saved in this browser.');
+    setNote(`Reported by the connected device. ${kept.short} stays saved in this browser; choose this board in the list to save it instead.`);
+  }
+
   // fromDevice: the board came from a connected DFU32, so leave focus in its dialog.
   // restored: the board came from the cookie on page load, so leave focus alone.
   async function select(board, { fromDevice = false, restored = false } = {}) {
     selected = board;
-    if (!restored) saveBoard(board.id);
-    rememberedText.textContent = restored ? 'Remembered from your last visit.'
-      : fromDevice ? 'Reported by the connected device and saved in this browser for next time.'
-      : 'Saved in this browser for next time.';
-    remembered.hidden = false;
+    noteFor(board, { fromDevice, restored });
     if (!popover.hidden) setOpen(false);
     if (!fromDevice && !restored) trigger.focus();
     triggerLabel.className = '';
@@ -410,7 +442,8 @@ footer a { color: var(--muted); }
     download.href = imageUrl(board.id);
     eraseNotice.hidden = true;
     try {
-      const m = await loadManifest(board.id);
+      // On restore, share the start-up fetch instead of making a second one.
+      const m = await (restored && prefetched[board.id] || loadManifest(board.id));
       if (selected !== board) return;
       if (m.version) showVersion(m.version);
       // Set by the pages job when a release moves nvs, runlog or staging (SPEC §9.4).
@@ -425,7 +458,7 @@ footer a { color: var(--muted); }
   function deselect() {
     selected = null;
     forgetBoard();
-    remembered.hidden = true;
+    setNote('');
     triggerLabel.className = 'placeholder';
     triggerLabel.textContent = 'Select a board…';
     hint.className = 'hint';
@@ -438,16 +471,20 @@ footer a { color: var(--muted); }
   }
   document.getElementById('forget').addEventListener('click', deselect);
 
-  updateManifest();
-  const savedId = savedBoard(), saved = BOARDS.find(b => b.id === savedId);
-  if (saved) select(saved, { restored: true });
-  else if (savedId !== null) forgetBoard();  // a board this page no longer lists
   // All boards share one version, so whichever manifest arrives first fills the pill.
   for (const b of BOARDS) {
-    loadManifest(b.id).then(m => {
+    prefetched[b.id] = loadManifest(b.id);
+    prefetched[b.id].then(m => {
       manifests[b.id] = m;
       if (m.version && !version) showVersion(m.version);
     }).catch(() => {});
+  }
+  // The button's manifest is set once: the saved board's, or the board-less one.
+  const savedId = savedBoard(), saved = BOARDS.find(b => b.id === savedId);
+  if (saved) select(saved, { restored: true });
+  else {
+    if (savedId !== null) forgetBoard();  // a board this page no longer lists
+    updateManifest();
   }
 </script>
 </body>
