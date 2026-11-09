@@ -14,7 +14,7 @@ DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
 ## Install from your browser
 
-The installer page at **[dfu32.app](https://dfu32.app/)** flashes DFU32 over USB from a desktop browser with Web Serial (Chrome, Edge, or Firefox 151 or later); no toolchain needed. Pick your board, click **Connect device**, then **Install DFU32**. To manage a device that already runs DFU32 (WiFi, its page, the console), connect without picking a board. Updating from the page keeps WiFi, the API token, the target and the staged image, unless you choose "Erase device". Until v1.0 the page serves the latest `main` build; after that, the latest release.
+The installer page at **[dfu32.app](https://dfu32.app/)** flashes DFU32 over USB from a desktop browser with Web Serial (Chrome, Edge, or Firefox 151 or later); no toolchain needed. Pick your board, click **Connect device**, then **Install DFU32**. A device that already runs DFU32 tells the page its board, so you can connect without picking one to update it, change its WiFi or open its page. Updating from the page keeps WiFi, the API token, the target and the staged image, unless you choose "Erase device". Until v1.0 the page serves the latest `main` build; after that, the latest release.
 
 After installing, the page asks for your WiFi network (Improv Serial) and then offers a link to the device's web UI. Coming back later, it recognises an installed DFU32 and can change its WiFi or open its page. WiFi can also be set over Improv BLE (Home Assistant or [improv-wifi.com](https://www.improv-wifi.com/)) or with the `wifi <ssid> <password>` console command.
 

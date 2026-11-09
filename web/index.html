@@ -178,7 +178,7 @@ footer a { color: var(--muted); }
           <button slot="activate" class="btn" id="install-btn">Connect device</button>
           <span slot="unsupported"></span><span slot="not-allowed"></span>
         </esp-web-install-button>
-        <span class="hint" id="install-hint">No board chosen: you can manage a device, but installing needs a board.</span>
+        <span class="hint" id="install-hint">No board chosen: fine for a device already running DFU32. A new install needs a board.</span>
       </div>
       <div class="erase">
         <strong>About “Erase device”</strong>
@@ -203,7 +203,7 @@ footer a { color: var(--muted); }
 
     <div class="plain notallowed-only">This page needs HTTPS to reach USB devices. Open <a class="mono" href="https://dfu32.app/">https://dfu32.app</a> instead.</div>
 
-    <p class="note web-only"><strong>Already installed?</strong> Connect without choosing a board to change WiFi, open the device’s page or use the console. To update, choose its board first. Settings are kept unless you erase.</p>
+    <p class="note web-only"><strong>Already installed?</strong> Connect without choosing a board: DFU32 tells the page which board it is, so you can update it, change WiFi or open its page. Settings are kept unless you erase.</p>
   </section>
 
   <details>
@@ -212,7 +212,7 @@ footer a { color: var(--muted); }
       <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver.</dd></div>
       <div><dt>ESP32-S3 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Connect device again.</dd></div>
       <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Connect device and Install DFU32. Afterwards, release BOOT0 and press RESET again.</dd></div>
-      <div><dt>“Your ESP32 board is not supported”</dt><dd>No board is chosen, so the page has no image to install. Close the dialog, choose your board above and connect again.</dd></div>
+      <div><dt>“Your ESP32 board is not supported”</dt><dd>No board is chosen and the device didn’t report one (it isn’t running DFU32 yet, or runs a release from before boards were reported), so the page doesn’t know which image to install. Close the dialog, choose your board above and connect again.</dd></div>
       <div><dt>WiFi failed</dt><dd>DFU32 joins 2.4 GHz WPA2-Personal and open networks (WPA2/WPA3 mixed works, WPA3-only doesn’t). Check the password and retry.</dd></div>
       <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network.</dd></div>
     </dl>
@@ -246,12 +246,36 @@ footer a { color: var(--muted); }
     { id: 'rak11200_rak19007', name: 'RAKwireless WisBlock RAK11200 (RAK19007 base)', short: 'RAK11200', spec: 'ESP32 · 4 MB flash · 8 MB PSRAM' },
   ];
   const manifestUrl = id => `manifest-${id}.json`;
-  // With no board chosen the button still connects, so an installed DFU32 can
-  // be managed (WiFi, its page, the console). This manifest has no builds:
-  // installing needs a board, because two profiles share each chip family.
+  // With no board chosen the button still connects, with this manifest. It has
+  // no builds, because two profiles share each chip family; adoptDeviceBoard()
+  // fills them in once a running DFU32 reports its board over Improv.
   const boardlessManifest = () => 'data:application/json,' + encodeURIComponent(JSON.stringify({
-    name: 'DFU32', version: rawVersion, new_install_prompt_erase: true, builds: [],
+    name: 'DFU32', version: rawVersion, new_install_prompt_erase: true, builds: [], dfu32_boardless: true,
   }));
+  const manifests = {};  // board id -> its manifest, prefetched at start-up
+
+  // DFU32's Improv device info reports "ESP32-S3 / feather_esp32s3" as the
+  // hardware variant (SPEC §9.2). ESP Web Tools passes that info, and the very
+  // manifest object it will flash from, to overrides.checkSameFirmware()
+  // before it shows the device's options, so the board-less manifest gets that
+  // board's builds there. Part paths are made absolute: the board-less
+  // manifest's own URL is a data: URL, which they can't be resolved against.
+  function adoptDeviceBoard(manifest, info) {
+    if (!manifest.dfu32_boardless || manifest.builds.length || !info) return;
+    const id = String(info.chipFamily || '').split(' / ')[1];
+    const board = BOARDS.find(b => b.id === id), m = manifests[id];
+    if (!board || !m) return;
+    const base = new URL(manifestUrl(id), location.href);
+    manifest.builds = m.builds.map(b => ({ ...b, parts: b.parts.map(p => ({ ...p, path: new URL(p.path, base).href })) }));
+    if (m.version) manifest.version = m.version;
+    if (!selected) select(board, { fromDevice: true });
+  }
+  esp.overrides = {
+    checkSameFirmware(manifest, info) {
+      adoptDeviceBoard(manifest, info);
+      return info.firmware === manifest.name;
+    },
+  };
   const imageUrl = id => `https://github.com/andyshinn/dfu32/releases/latest/download/dfu32-${id}-merged.bin`;
 
   const picker = document.getElementById('picker');
@@ -327,9 +351,11 @@ footer a { color: var(--muted); }
     return r.json();
   }
 
-  async function select(board) {
+  // fromDevice: the board came from a connected DFU32, so leave focus in its dialog.
+  async function select(board, { fromDevice = false } = {}) {
     selected = board;
-    setOpen(false); trigger.focus();
+    setOpen(false);
+    if (!fromDevice) trigger.focus();
     triggerLabel.className = '';
     triggerLabel.innerHTML = `<b>${esc(board.name)}</b><small>${esc(board.spec)}</small>`;
     hint.className = 'hint mono';
@@ -350,8 +376,13 @@ footer a { color: var(--muted); }
   }
 
   updateManifest();
-  // All boards share one version, so the first board's manifest fills the pill.
-  loadManifest(BOARDS[0].id).then(m => { if (m.version && !version) showVersion(m.version); }).catch(() => {});
+  // All boards share one version, so whichever manifest arrives first fills the pill.
+  for (const b of BOARDS) {
+    loadManifest(b.id).then(m => {
+      manifests[b.id] = m;
+      if (m.version && !version) showVersion(m.version);
+    }).catch(() => {});
+  }
 </script>
 </body>
 </html>
