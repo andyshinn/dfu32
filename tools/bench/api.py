@@ -108,7 +108,8 @@ class ApiClient:
         return Response(status, body, text, elapsed, {k.title(): v for k, v in headers.items()})
 
     def _write(self, line: str) -> None:
-        if self._log:
+        # A check's helper thread can outlive the run (it is joined with a timeout) and land here after shutdown.
+        if self._log and not self._log.closed:
             stamp = time.strftime("%H:%M:%S")
             self._log.write(f"[{stamp}] {self._redact(line)}\n")
             self._log.flush()

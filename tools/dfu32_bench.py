@@ -30,6 +30,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -246,40 +247,40 @@ def main(argv: list[str] | None = None) -> int:
                   "logs (masking it would mangle every line)", file=sys.stderr)
     eol = {"cr": "\r", "lf": "\n", "crlf": "\r\n"}[args.eol]
     echo = (lambda line: print(f"      | {line}", flush=True)) if args.echo else None
-    con = SerialConsole(args.port, args.baud, log_path=out / "serial.log", eol=eol, redactor=redactor, echo=echo)
+    with contextlib.ExitStack() as cleanup:  # unwinds in reverse, and every step runs even if one raises
+        cleanup.callback(site.stop)
+        con = SerialConsole(args.port, args.baud, log_path=out / "serial.log", eol=eol, redactor=redactor,
+                            echo=echo)
+        cleanup.callback(con.close)
 
-    def flash_log(line: str) -> None:
-        print("  " + line, flush=True)
-        con.note(line)
+        def flash_log(line: str) -> None:
+            print("  " + line, flush=True)
+            con.note(line)
 
-    flasher = Flasher(args.port, baud=args.flash_baud, esptool=args.esptool, log=flash_log)
-    print(f"DFU32 bench: {len(selected)} check(s): {' '.join(t.id for t in selected)}")
-    print(f"image {site.version} ({len(site.bin)} B) for board {args.board}; results in {out}/")
-    try:
-        site.start()
-        con.open()
-    except Exception as e:
-        print(f"error: {e}", file=sys.stderr)
-        site.stop()
-        return 2
-
-    ctx = Ctx(args, out, con, site, flasher)
-    finished = False
-    try:
+        flasher = Flasher(args.port, baud=args.flash_baud, esptool=args.esptool, log=flash_log)
+        print(f"DFU32 bench: {len(selected)} check(s): {' '.join(t.id for t in selected)}")
+        print(f"image {site.version} ({len(site.bin)} B) for board {args.board}; results in {out}/")
         try:
-            setup(ctx)
-        except Exception as e:  # any setup failure, esptool's included; Ctrl+C isn't an Exception and goes on up
-            print(f"\nsetup failed: {e}", file=sys.stderr)
+            site.start()
+            con.open()
+        except Exception as e:
+            print(f"error: {e}", file=sys.stderr)
             return 2
-        if ctx.host_ip:
-            print(f"serving the firmware at {site.url(ctx.host_ip)}")
-        finished = run_checks(ctx, selected, checks.HOOKS)
-    except KeyboardInterrupt:
-        print("\ninterrupted", file=sys.stderr)
-    finally:
-        con.close()
-        ctx.close()
-        site.stop()
+
+        ctx = Ctx(args, out, con, site, flasher)
+        cleanup.callback(ctx.close)
+        finished = False
+        try:
+            try:
+                setup(ctx)
+            except Exception as e:  # any setup failure, esptool's included; Ctrl+C isn't an Exception and goes on up
+                print(f"\nsetup failed: {e}", file=sys.stderr)
+                return 2
+            if ctx.host_ip:
+                print(f"serving the firmware at {site.url(ctx.host_ip)}")
+            finished = run_checks(ctx, selected, checks.HOOKS)
+        except KeyboardInterrupt:
+            print("\ninterrupted", file=sys.stderr)
 
     print("\n" + "=" * 72)
     bad = 0
