@@ -58,6 +58,7 @@ from dfu32_web_manifest import BOARD_RE, version_slug  # noqa: E402
 IMAGE_MAGIC = 0xE9
 PARTITION_TABLE_OFFSET = 0x8000  # CONFIG_PARTITION_TABLE_OFFSET
 PARTITION_TABLE_SIZE = 0xC00     # what partition-table.bin holds
+APP_MIN_OFFSET = 0x10000         # app partitions are 64 KB aligned, so the first can't start lower
 APP_DESC_OFFSET = 24 + 8         # image header + first segment header
 APP_DESC_MAGIC = 0xABCD5432
 BOARD_TAG_OFFSET = APP_DESC_OFFSET + 256
@@ -161,16 +162,22 @@ def split_merged(merged: bytes) -> dict:
         raise SplitError("the partition table has no otadata or no ota_0")
     if otadata["offset"] + otadata["size"] > len(merged):
         raise SplitError("the image ends before otadata")
+    # A corrupt table must never point a part at the bootloader or the table itself:
+    # data partitions start after the table's sector, apps on a 64 KB boundary.
+    if otadata["offset"] < PARTITION_TABLE_OFFSET + 0x1000:
+        raise SplitError(f"otadata at 0x{otadata['offset']:X} overlaps the bootloader or the partition table")
+    if app_part["offset"] < APP_MIN_OFFSET or app_part["offset"] % APP_MIN_OFFSET:
+        raise SplitError(f"app partition at 0x{app_part['offset']:X} is not on a 64 KB boundary past the table")
     app = merged[app_part["offset"]:app_part["offset"] + image_length(merged, app_part["offset"])]
     if len(app) > app_part["size"]:
         raise SplitError("the app is larger than its partition")
-    return {
-        "chip_family": family,
-        "parts": [(boot_off, boot), (PARTITION_TABLE_OFFSET, table),
-                  (otadata["offset"], merged[otadata["offset"]:otadata["offset"] + otadata["size"]]),
-                  (app_part["offset"], app)],
-        "app": app_info(app),
-    }
+    parts = [(boot_off, boot), (PARTITION_TABLE_OFFSET, table),
+             (otadata["offset"], merged[otadata["offset"]:otadata["offset"] + otadata["size"]]),
+             (app_part["offset"], app)]
+    spans = sorted((off, off + len(data)) for off, data in parts)
+    if any(end > nxt for (_, end), (nxt, _) in zip(spans, spans[1:])):
+        raise SplitError("two parts overlap")
+    return {"chip_family": family, "parts": parts, "app": app_info(app)}
 
 
 def default_entry(site: Path, channel: str, tag: str | None) -> dict:
@@ -186,17 +193,29 @@ def default_entry(site: Path, channel: str, tag: str | None) -> dict:
     return {"version": versions.pop(), "channel": channel, "tag": tag, "published_at": None, "manifests": manifests}
 
 
-def default_table(site: Path, manifest: str) -> bytes | None:
-    m = json.loads((site / manifest).read_text())
-    part = next((p for p in m["builds"][0]["parts"] if p["offset"] == PARTITION_TABLE_OFFSET), None)
-    return (site / part["path"]).read_bytes() if part else None
+def default_layouts(site: Path, default: dict) -> dict[str, dict | None]:
+    """Where this run's build keeps nvs, runlog and staging, per board (None if its table isn't listed)."""
+    out = {}
+    for board, manifest in default["manifests"].items():
+        m = json.loads((site / manifest).read_text())
+        part = next((p for p in m["builds"][0]["parts"] if p["offset"] == PARTITION_TABLE_OFFSET), None)
+        out[board] = kept_layout((site / part["path"]).read_bytes()) if part else None
+    return out
 
 
-def add_release(site: Path, release: dict, assets: Path, default: dict, warn) -> dict | None:
+def channel_of(release: dict) -> str:
+    pre = bool(release.get("isPrerelease")) or bool(SEMVER_PRE.match(release["tagName"]))
+    return "pre-release" if pre else "release"
+
+
+def add_release(site: Path, release: dict, assets: Path, default: dict, layouts: dict, warn) -> dict | None:
     """Split one release's merged images into SITE. Returns its versions.json entry, or None."""
     tag = release["tagName"]
-    pre = bool(release.get("isPrerelease")) or bool(SEMVER_PRE.match(tag))
-    entry = {"version": None, "channel": "pre-release" if pre else "release", "tag": tag,
+    if tag == default["tag"]:
+        # This run is that release (its assets may not even be attached yet): label the default entry.
+        default["channel"] = channel_of(release)
+        return None
+    entry = {"version": None, "channel": channel_of(release), "tag": tag,
              "published_at": release.get("publishedAt"), "manifests": {}}
     files = sorted((assets / tag).glob("dfu32-*-merged.bin")) if (assets / tag).is_dir() else []
     for path in files:
@@ -231,8 +250,8 @@ def add_release(site: Path, release: dict, assets: Path, default: dict, warn) ->
                         "parts": [{"path": name, "offset": off}
                                   for name, (off, _) in zip(PART_FILES, split["parts"])]}],
         }
-        current = default_table(site, default["manifests"][board])
-        if current is not None and kept_layout(current) != kept_layout(split["parts"][1][1]):
+        current = layouts[board]
+        if current is not None and current != kept_layout(split["parts"][1][1]):
             manifest["dfu32_erase_notice"] = (
                 f"{entry['version']} keeps its settings partitions somewhere other than {default['version']}, "
                 "so moving between the two needs “Erase device”, which removes WiFi, the API token and the target.")
@@ -246,22 +265,24 @@ def add_release(site: Path, release: dict, assets: Path, default: dict, warn) ->
         (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         entry["manifests"][board] = (rel / "manifest.json").as_posix()
     if entry["version"] == default["version"]:
-        # Pushed to main at the tag, or this run is the release: one entry, labelled as the release.
+        # Pushed to main at the tag: one entry, labelled as the release (or pre-release).
         default["tag"] = default["tag"] or tag
-        if default["channel"] == "main":
-            default["channel"] = entry["channel"]
+        default["channel"] = entry["channel"]
         return None
     return entry if entry["manifests"] else None
 
 
 def build_index(site: Path, releases: list[dict], assets: Path, channel: str, tag: str | None = None,
                 limit: int = 20, warn=lambda msg: print(f"warning: {msg}", file=sys.stderr)) -> dict:
+    if channel == "release" and tag and SEMVER_PRE.match(tag):
+        channel = "pre-release"  # as the pages gate counts it, even if releases.json doesn't list it
     default = default_entry(site, channel, tag)
+    layouts = default_layouts(site, default)
     published = sorted((r for r in releases if not r.get("isDraft")),
                        key=lambda r: r.get("publishedAt") or "", reverse=True)[:limit]
     entries, seen = [default], {default["version"]}
     for release in published:
-        e = add_release(site, release, assets, default, warn)
+        e = add_release(site, release, assets, default, layouts, warn)
         if e and e["version"] not in seen:
             seen.add(e["version"])
             entries.append(e)

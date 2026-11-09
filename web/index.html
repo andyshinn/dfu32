@@ -344,12 +344,13 @@ footer a { color: var(--muted); }
   // With no board chosen the button still connects, with this manifest. It has
   // no builds, because two profiles share each chip family; adoptDeviceBoard()
   // fills them in, from the chosen version, once a running DFU32 reports its
-  // board over Improv. A custom build chosen but not yet loaded gets
-  // dfu32_custom, so nothing is filled in: the device can be managed, but
-  // nothing is installed until the zip is.
+  // board over Improv; dfu32_entry names that version (its index in VERSIONS,
+  // which only ever grows), since its version string may not be known yet.
+  // A custom build chosen but not yet loaded gets dfu32_custom, so nothing is
+  // filled in: the device can be managed, but nothing is installed until the zip is.
   const boardlessManifest = () => 'data:application/json,' + encodeURIComponent(JSON.stringify({
     name: 'DFU32', version: chosen === CUSTOM ? '' : chosen.version, new_install_prompt_erase: true, builds: [], dfu32_boardless: true,
-    ...(chosen === CUSTOM ? { dfu32_custom: true } : {}),
+    ...(chosen === CUSTOM ? { dfu32_custom: true } : { dfu32_entry: VERSIONS.indexOf(chosen) }),
   }));
   const manifests = {};  // manifest URL -> its JSON, once loaded (adoptDeviceBoard needs them at hand)
   const loading = {};    // manifest URL -> the promise of its fetch
@@ -380,8 +381,9 @@ footer a { color: var(--muted); }
   // version, erase settings, builds). The decision never depends on what the
   // page has selected: the dialog keeps the manifest URL it opened with and
   // downloads it again after installing, and that fresh copy must get the
-  // same treatment. So the version comes from the manifest itself, and
-  // dfu32_board marks a manifest already done.
+  // same treatment. So the version comes from the manifest itself (its
+  // dfu32_entry, else its version string), and dfu32_board marks a manifest
+  // already done.
   //
   // A custom build is never swapped for a published one. If the device reports
   // another board than the build's, its builds are emptied, so ESP Web Tools
@@ -390,7 +392,7 @@ footer a { color: var(--muted); }
     if (!info) return;
     const id = String(info.chipFamily || '').split(' / ')[1];
     if (manifest.dfu32_custom) return refuseOtherBoard(manifest, id);
-    const entry = VERSIONS.find(e => e.version === manifest.version);
+    const entry = Number.isInteger(manifest.dfu32_entry) ? VERSIONS[manifest.dfu32_entry] : VERSIONS.find(e => e.version === manifest.version);
     const board = BOARDS.find(b => b.id === id), url = entry && entry.manifests[id], m = url && manifests[url];
     if (!board || !m) return;
     if (manifest.dfu32_board !== id) {
@@ -554,9 +556,15 @@ footer a { color: var(--muted); }
     customStatus.innerHTML = html;
     customStatus.className = 'status' + (error ? ' error' : '');
   }
+  // The parts' blob: URLs are revoked once no install dialog can still be
+  // fetching them: now, or when the dialog that is open closes.
   function dropCustom() {
-    if (custom) custom.blobs.forEach(u => URL.revokeObjectURL(u));
+    if (!custom) return;
+    const blobs = custom.blobs, revoke = () => blobs.forEach(u => URL.revokeObjectURL(u));
     custom = null;
+    const dlg = document.querySelector('ewt-install-dialog');
+    if (dlg) dlg.addEventListener('closed', revoke, { once: true });
+    else revoke();
   }
   let customSeq = 0;
   async function loadCustom(file) {
@@ -648,6 +656,7 @@ footer a { color: var(--muted); }
     if (chosen !== CUSTOM && !chosen.manifests[board.id]) {
       choose(VERSIONS[0], `${fmtVersion(chosen.version)} has no ${board.short} build, so the latest is chosen instead.`);
     } else {
+      fwNote.textContent = fwNoteDefault;  // a note about the previous board no longer applies
       refresh();
       refreshNotice();
     }
@@ -663,6 +672,7 @@ footer a { color: var(--muted); }
     dlBoard.textContent = 'choose a board';
     download.href = 'https://github.com/andyshinn/dfu32/releases/latest';
     renderVersions();
+    fwNote.textContent = fwNoteDefault;
     refresh();
     refreshNotice();
     trigger.focus();

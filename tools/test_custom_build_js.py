@@ -223,6 +223,49 @@ class Rejects(unittest.TestCase):
         with BuildDir(tag_board="esp32s3_n16r8") as b:
             self.assertIn("tagged for esp32s3_n16r8", self.err(b.zip()))
 
+    def test_bad_offsets(self):
+        for offset in (None, "", " ", "0x", "abc", -1, 1.5, True):
+            with self.subTest(offset=offset), BuildDir() as b:
+                args = json.loads(b.files["flasher_args.json"])
+                args["otadata"]["offset"] = offset
+                b.files["flasher_args.json"] = json.dumps(args).encode()
+                self.assertIn("gives 'otadata' the offset", self.err(b.zip()))
+
+    def test_numeric_offsets_accepted(self):
+        with BuildDir() as b:
+            args = json.loads(b.files["flasher_args.json"])
+            args["otadata"]["offset"] = 0xF000
+            b.files["flasher_args.json"] = json.dumps(args).encode()
+            got = one({"op": "load", "zip": b.zip().hex()})["ok"]
+            self.assertEqual(got["parts"][2]["offset"], 0xF000)
+
+    def test_path_outside_the_build_directory(self):
+        with BuildDir() as b:
+            args = json.loads(b.files["flasher_args.json"])
+            args["app"]["file"] = "../../dfu32.bin"
+            b.files["flasher_args.json"] = json.dumps(args).encode()
+            self.assertIn("outside the build directory", self.err(b.zip(extra={"dfu32.bin": b.files["dfu32.bin"]})))
+
+    def test_dot_dot_inside_the_build_directory(self):
+        with BuildDir() as b:
+            args = json.loads(b.files["flasher_args.json"])
+            args["app"]["file"] = "bootloader/../dfu32.bin"
+            b.files["flasher_args.json"] = json.dumps(args).encode()
+            self.assertIn("ok", one({"op": "load", "zip": b.zip().hex()}))
+
+    def test_overlapping_parts(self):
+        with BuildDir() as b:
+            args = json.loads(b.files["flasher_args.json"])
+            args["otadata"]["offset"] = "0x8800"  # inside the partition table's 0xC00 bytes
+            b.files["flasher_args.json"] = json.dumps(args).encode()
+            self.assertIn("overlap", self.err(b.zip()))
+
+    def test_app_without_a_descriptor(self):
+        from test_dfu32_web_versions import esp_image
+        with BuildDir() as b:
+            b.files["dfu32.bin"] = esp_image(CHIP_S3, [b"\0" * 400])
+            self.assertIn("esp_app_desc_t", self.err(b.zip()))
+
     def test_not_a_zip(self):
         self.assertIn("not a zip", self.err(b"\xE9" * 1000))
 

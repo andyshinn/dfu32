@@ -48,11 +48,11 @@ export function parseSdkconfig(text) {
   return out;
 }
 
-/** Version, project and board tag from a DFU32 app image (empty strings where absent). */
+/** Version, project and board tag ('' if untagged) from an app image; null without esp_app_desc_t. */
 export function appInfo(app) {
-  if (app.length < BOARD_TAG_OFFSET + 40 || app[0] !== IMAGE_MAGIC) return { version: '', project: '', board: '' };
+  if (app.length < BOARD_TAG_OFFSET + 40 || app[0] !== IMAGE_MAGIC) return null;
   const dv = new DataView(app.buffer, app.byteOffset, app.byteLength);
-  if (dv.getUint32(APP_DESC_OFFSET, true) !== APP_DESC_MAGIC) return { version: '', project: '', board: '' };
+  if (dv.getUint32(APP_DESC_OFFSET, true) !== APP_DESC_MAGIC) return null;
   const tag = app.subarray(BOARD_TAG_OFFSET, BOARD_TAG_OFFSET + 40);
   return {
     version: cstr(app.subarray(APP_DESC_OFFSET + 16, APP_DESC_OFFSET + 48)),
@@ -77,14 +77,19 @@ export function layoutDiff(a, b) {
 const dirOf = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : '';
 const baseName = p => p.slice(p.lastIndexOf('/') + 1);
 // Join a flasher_args.json file path onto the build directory, resolving "./" and "../".
+// null if it leaves the build directory: IDF only names files inside it.
 function joinPath(dir, rel) {
-  const out = [];
-  for (const seg of (dir + rel.replace(/\\/g, '/')).split('/')) {
+  const out = dir.split('/').filter(Boolean), floor = out.length;
+  for (const seg of rel.replace(/\\/g, '/').split('/')) {
     if (seg === '' || seg === '.') continue;
-    if (seg === '..') out.pop(); else out.push(seg);
+    if (seg !== '..') out.push(seg);
+    else if (out.length > floor) out.pop();
+    else return null;
   }
   return out.join('/');
 }
+// flasher_args.json writes offsets as "0x8000"; a bare number is accepted too.
+const OFFSET_RE = /^(0x[0-9a-f]+|\d+)$/i;
 
 /**
  * Read a build zip. Returns { board, chipFamily, version, debug, table, parts: [{ name, offset, data }] }.
@@ -120,20 +125,25 @@ export async function loadBuild(bytes, fileName = '') {
   const parts = [];
   for (const name of PARTS) {
     const entry = args[name];
-    if (!entry || typeof entry.file !== 'string' || entry.offset === undefined) throw new StageError(`flasher_args.json has no '${name}' part`);
+    if (!entry || typeof entry.file !== 'string' || !entry.file) throw new StageError(`flasher_args.json has no '${name}' part`);
     const path = joinPath(dir, entry.file);
+    if (path === null) throw new StageError(`flasher_args.json puts '${name}' outside the build directory (${entry.file})`);
     if (!zip.names.includes(path)) throw new StageError(`it has no ${path}`);
-    const offset = Number(entry.offset);  // "0x8000" or 32768
-    if (!Number.isInteger(offset) || offset < 0) throw new StageError(`flasher_args.json gives '${name}' the offset ${entry.offset}`);
+    const raw = entry.offset;
+    const ok = (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) || (typeof raw === 'string' && OFFSET_RE.test(raw.trim()));
+    if (!ok) throw new StageError(`flasher_args.json gives '${name}' the offset ${JSON.stringify(raw)}`);
+    const offset = Number(typeof raw === 'string' ? raw.trim() : raw);
     parts.push({ name, file: baseName(path), offset, data: await zip.read(path) });
   }
-  if (new Set(parts.map(p => p.offset)).size !== parts.length) throw new StageError('two parts share an offset');
+  const spans = parts.map(p => [p.offset, p.offset + p.data.length]).sort((a, b) => a[0] - b[0]);
+  if (spans.some(([, end], i) => i + 1 < spans.length && end > spans[i + 1][0])) throw new StageError('two parts overlap');
   const [boot, table, , app] = parts;
   if (boot.data[0] !== IMAGE_MAGIC || app.data[0] !== IMAGE_MAGIC) throw new StageError("the bootloader or the app isn't an ESP32 image");
   if (table.offset !== PARTITION_TABLE_OFFSET || !parsePartitionTable(table.data).length) throw new StageError('the partition table is empty or not at 0x8000');
 
   const info = appInfo(app.data);
-  if (info.project && info.project !== 'dfu32') throw new StageError(`the app is '${info.project}', not DFU32`);
+  if (!info) throw new StageError('the app has no esp_app_desc_t, so it can\'t be told for DFU32');
+  if (info.project !== 'dfu32') throw new StageError(`the app is '${info.project}', not DFU32`);
   if (info.board && info.board !== board) throw new StageError(`the app is tagged for ${info.board} but sdkconfig says ${board}`);
 
   let version = '';

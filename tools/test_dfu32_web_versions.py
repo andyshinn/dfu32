@@ -159,6 +159,27 @@ class Split(unittest.TestCase):
         with self.assertRaisesRegex(wv.SplitError, "larger than its partition"):
             wv.split_merged(merged)
 
+    def test_parts_never_point_at_the_bootloader_or_table(self):
+        for name, off in (("otadata", 0x8000), ("otadata", 0x0), ("ota_0", 0x0), ("ota_0", 0x8000), ("ota_0", 0x28000)):
+            with self.subTest(part=name, offset=off):
+                table = [e if e[0] != name else (name, e[1], e[2], off, e[4]) for e in TABLE_4MB]
+                merged = bytearray(merged_image()[0])
+                merged[0x8000:0x8C00] = partition_table(table)
+                with self.assertRaisesRegex(wv.SplitError, "overlaps|64 KB boundary"):
+                    wv.split_merged(bytes(merged))
+
+    def test_otadata_running_into_the_app(self):
+        table = [e if e[0] != "otadata" else ("otadata", 1, 0, 0xF000, 0x11800) for e in TABLE_4MB]
+        merged = bytearray(merged_image()[0])
+        merged[0x8000:0x8C00] = partition_table(table)
+        with self.assertRaisesRegex(wv.SplitError, "overlap"):
+            wv.split_merged(bytes(merged))
+
+    def test_app_without_a_descriptor(self):
+        merged, _ = merged_image(app=esp_image(CHIP_S3, [b"\0" * 400]))
+        with self.assertRaisesRegex(wv.SplitError, "esp_app_desc_t"):
+            wv.split_merged(merged)
+
     def test_kept_layout(self):
         self.assertEqual(wv.kept_layout(partition_table(TABLE_4MB)),
                          {"nvs": (0x9000, 0x6000), "runlog": (0x12000, 0xE000), "staging": (0x300000, 0xD0000)})
@@ -294,6 +315,21 @@ class Index(unittest.TestCase):
         with Site(version="v0.5.0") as s:
             ix = s.index([], channel="release", tag="v0.5.0")
             self.assertEqual((ix["versions"][0]["channel"], ix["versions"][0]["tag"]), ("release", "v0.5.0"))
+
+    def test_release_run_of_a_prerelease(self):
+        # By its tag, or by the flag in releases.json even before its assets are attached.
+        with Site(version="v0.5.0-rc.1") as s:
+            ix = s.index([], channel="release", tag="v0.5.0-rc.1")
+            self.assertEqual(ix["versions"][0]["channel"], "pre-release")
+        with Site(version="v0.5.0b") as s:
+            ix = s.index([rel("v0.5.0b", "2026-03-01T00:00:00Z", pre=True)], channel="release", tag="v0.5.0b")
+            self.assertEqual((ix["versions"][0]["channel"], len(ix["versions"])), ("pre-release", 1))
+
+    def test_main_at_a_prerelease_tag(self):
+        with Site(version="v0.5.0-rc.1") as s:
+            s.release("v0.5.0-rc.1")
+            ix = s.index([rel("v0.5.0-rc.1", "2026-03-01T00:00:00Z")])
+            self.assertEqual((ix["versions"][0]["channel"], ix["versions"][0]["tag"]), ("pre-release", "v0.5.0-rc.1"))
 
     def test_other_board_or_project_skipped(self):
         with Site() as s:
