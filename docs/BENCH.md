@@ -440,6 +440,8 @@ Once `main` has it, the installer page itself (MILESTONES M5 bench):
 11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.
+14. **Earlier version:** choose an earlier release under **Choose a version** and update a configured device without erasing: `/api/v1/status` reports that version, and settings are kept. Choose the latest again to go back.
+15. **Custom build:** download a PR run's `dfu32-<board>` artifact, choose **Custom build from a .zip…** and pick it. The page names the board and version; installing keeps settings and the device reports the PR's version. With another board's artifact, the dialog refuses to install and the page says which board the device is.
 
 ## Bench results so far
 

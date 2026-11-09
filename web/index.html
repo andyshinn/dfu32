@@ -13,7 +13,8 @@
 </script>
 <!-- ESP Web Tools, served from this site: tools/fetch_esp_web_tools.py copies it here from a hash-pinned npm tarball. -->
 <script type="module" src="vendor/esp-web-tools-10.4.0/install-button.js"></script>
-<!-- "Stage nRF52 image" in the device dialog: staging.js builds the image, esptool-js writes it. -->
+<!-- "Stage nRF52 image" in the device dialog: staging.js builds the image, esptool-js writes it.
+     "Custom build" in the version list loads custom-build.js when a zip is chosen. -->
 <script type="module" src="stage-dialog.js"></script>
 <style>
 :root {
@@ -21,6 +22,7 @@
   --text: #1b1f23; --muted: #5f6670;
   --border: #e2e5e8; --border-strong: #c9ced3;
   --accent: #0d8273; --accent-ink: #0b6e62; --on-accent: #fff; --accent-soft: #e7f4f1;
+  --danger: #b3261e;
   --radius: 6px; --radius-lg: 8px;
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -31,6 +33,7 @@
     --text: #eceef0; --muted: #a0a7af;
     --border: #2d3237; --border-strong: #3d434a;
     --accent: #3cbfa9; --accent-ink: #5fd2be; --on-accent: #062520; --accent-soft: #123631;
+    --danger: #f2a49e;
   }
 }
 * { box-sizing: border-box; }
@@ -43,7 +46,8 @@ p, li, dd { text-wrap: pretty; }
 main { max-width: 640px; margin: 0 auto; padding: 72px 24px 56px; display: flex; flex-direction: column; gap: 44px; }
 
 header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-.title { display: flex; align-items: center; gap: 10px; }
+header > div { min-width: 0; }
+.title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .title h1 { margin: 0; font-size: 34px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.2; }
 .version { font: 12px var(--mono); color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 .version[hidden] { display: none; }
@@ -83,6 +87,20 @@ section { display: flex; flex-direction: column; gap: 14px; }
 .option[aria-selected="true"]::after { content: "✓"; color: var(--accent-ink); }
 .empty { margin: 0; padding: 18px 14px; font-size: 14px; color: var(--muted); }
 .empty[hidden] { display: none; }
+.select { position: relative; }
+.select select { appearance: none; -webkit-appearance: none; box-sizing: border-box; width: 100%; margin: 0; font: inherit; font-size: 14.5px; color: var(--text); padding: 11px 40px 11px 14px; border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); cursor: pointer; text-overflow: ellipsis; }
+.select::after { content: "▾"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%); pointer-events: none; font: 12px var(--mono); color: var(--muted); }
+.select select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.custom { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 14px 16px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); }
+.custom[hidden] { display: none; }
+.custom.over { border-color: var(--accent); background: var(--accent-soft); }
+.custom .status { flex: 1 1 260px; min-width: 0; margin: 0; font-size: 13.5px; color: var(--muted); overflow-wrap: anywhere; }
+.custom .status b { color: var(--text); font-weight: 600; }
+.custom .status.error { color: var(--danger); }
+.custom .status code { font: 12.5px var(--mono); color: var(--text); }
+.btn-2 { all: unset; box-sizing: border-box; cursor: pointer; font-size: 14px; font-weight: 600; padding: 8px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); color: var(--text); background: var(--surface); white-space: nowrap; }
+.btn-2:hover { border-color: var(--muted); }
+.btn-2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; counter-reset: s; }
 .steps li { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 12px; counter-increment: s; }
 .steps li::before { content: counter(s); font: 12px var(--mono); width: 22px; height: 22px; margin-top: 1px; border: 1px solid var(--border-strong); border-radius: 50%; display: grid; place-content: center; color: var(--muted); }
@@ -170,6 +188,22 @@ footer a { color: var(--muted); }
     <p class="note" id="remembered" hidden><span id="remembered-text"></span> <button class="linkish" id="forget" type="button">Forget saved board</button></p>
   </section>
 
+  <section class="web-only" id="firmware">
+    <div class="sh"><h2><label for="fw">Choose a version</label></h2></div>
+    <div class="select">
+      <select id="fw" aria-describedby="fw-note">
+        <option value="0">Latest</option>
+        <option value="custom">Custom build from a .zip…</option>
+      </select>
+    </div>
+    <div class="custom" id="custom" hidden>
+      <button class="btn-2" id="custom-choose" type="button">Choose build .zip</button>
+      <p class="status" id="custom-status" role="status">or drop it here: the <code>dfu32-&lt;board&gt;</code> artifact from a CI run, such as a pull request’s.</p>
+      <input type="file" id="custom-file" accept=".zip,application/zip" hidden>
+    </div>
+    <p class="note" id="fw-note">The latest build suits most boards. Pick an earlier release to go back to it, or a custom build to try one from a pull request.</p>
+  </section>
+
   <section id="install">
     <div class="sh"><h2>Connect and install</h2></div>
 
@@ -179,7 +213,7 @@ footer a { color: var(--muted); }
       <li><span>Enter your WiFi network name and password, then click <strong>Visit device</strong> to open DFU32’s own web UI and claim it.</span></li>
     </ol>
 
-    <p class="note web-only" id="erase-notice" hidden><strong>This release needs an erase.</strong> <span id="erase-notice-text"></span></p>
+    <p class="note web-only" id="erase-notice" hidden><strong>This version needs an erase.</strong> <span id="erase-notice-text"></span></p>
 
     <div class="panel install web-only">
       <div class="action">
@@ -227,7 +261,7 @@ footer a { color: var(--muted); }
       <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver.</dd></div>
       <div><dt>ESP32-S3 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Connect device again.</dd></div>
       <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Connect device and Install DFU32. Afterwards, release BOOT0 and press RESET again.</dd></div>
-      <div><dt>“Your ESP32 board is not supported”</dt><dd>No board is chosen and the device didn’t report one (it isn’t running DFU32 yet, or runs a release from before boards were reported), so the page doesn’t know which image to install. Close the dialog, choose your board above and connect again.</dd></div>
+      <div><dt>“Your ESP32 board is not supported”</dt><dd>No board is chosen and the device didn’t report one (it isn’t running DFU32 yet, or runs a release from before boards were reported), so the page doesn’t know which image to install. Close the dialog, choose your board above and connect again. With a custom build, it means the build is for another board than the connected DFU32 reports (the page says which under the version list), or for another chip.</dd></div>
       <div><dt>WiFi failed</dt><dd>DFU32 joins 2.4 GHz WPA2-Personal and open networks (WPA2/WPA3 mixed works, WPA3-only doesn’t). Check the password and retry.</dd></div>
       <div><dt>No “Stage nRF52 image” option</dt><dd>It appears only when the connected device runs DFU32 and answers over Improv. Install or update DFU32 first, then connect again.</dd></div>
       <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network.</dd></div>
@@ -245,7 +279,8 @@ footer a { color: var(--muted); }
 
 <script>
   // One manifest per board profile, next to this page: manifest-<id>.json,
-  // written by tools/dfu32_web_manifest.py in the CI pages job.
+  // written by tools/dfu32_web_manifest.py in the CI pages job. Earlier
+  // releases have their own, listed in versions.json (dfu32_web_versions.py).
   const esp = document.getElementById('esp');
   const hint = document.getElementById('install-hint');
   const download = document.getElementById('download');
@@ -255,7 +290,14 @@ footer a { color: var(--muted); }
   const eraseNoticeText = document.getElementById('erase-notice-text');
   const remembered = document.getElementById('remembered');
   const rememberedText = document.getElementById('remembered-text');
+  const fwSelect = document.getElementById('fw');
+  const fwNote = document.getElementById('fw-note');
+  const customBox = document.getElementById('custom');
+  const customStatus = document.getElementById('custom-status');
+  const customFile = document.getElementById('custom-file');
   const hintDefault = hint.textContent;
+  const fwNoteDefault = fwNote.textContent;
+  const customStatusDefault = customStatus.innerHTML;
 
   // The board the user picks is kept in a first-party cookie, so coming back to
   // update or re-flash starts with it selected. Nothing else is stored, and a
@@ -285,14 +327,43 @@ footer a { color: var(--muted); }
     { id: 'esp32s3_n16r8', name: 'ESP32-S3 N16R8 DevKitC', short: 'S3 N16R8 DevKitC', spec: 'ESP32-S3 · 16 MB flash · 8 MB PSRAM' },
     { id: 'rak11200_rak19007', name: 'RAKwireless WisBlock RAK11200 (RAK19007 base)', short: 'RAK11200', spec: 'ESP32 · 4 MB flash · 8 MB PSRAM' },
   ];
+  const boardName = id => (BOARDS.find(b => b.id === id) || { short: id }).short;
   const manifestUrl = id => `manifest-${id}.json`;
+
+  // The versions the page offers. The first is this site's own build, the
+  // manifest-<id>.json files; versions.json, written by
+  // tools/dfu32_web_versions.py, names it and adds earlier releases, each with
+  // its own manifest per board. Without versions.json (a local preview) only
+  // the first is offered, and its version comes from whichever manifest loads first.
+  const VERSIONS = [{ version: '', channel: '', tag: null, published_at: null, manifests: Object.fromEntries(BOARDS.map(b => [b.id, manifestUrl(b.id)])) }];
+  const CUSTOM = 'custom';
+  let chosen = VERSIONS[0];  // a VERSIONS entry, or CUSTOM
+  // A loaded custom build: { file, build, blobs (part URLs), url (its manifest), notice }.
+  let custom = null;
+
   // With no board chosen the button still connects, with this manifest. It has
   // no builds, because two profiles share each chip family; adoptDeviceBoard()
-  // fills them in once a running DFU32 reports its board over Improv.
+  // fills them in, from the chosen version, once a running DFU32 reports its
+  // board over Improv; dfu32_entry names that version (its index in VERSIONS,
+  // which only ever grows), since its version string may not be known yet.
+  // A custom build chosen but not yet loaded gets dfu32_custom, so nothing is
+  // filled in: the device can be managed, but nothing is installed until the zip is.
   const boardlessManifest = () => 'data:application/json,' + encodeURIComponent(JSON.stringify({
-    name: 'DFU32', version: rawVersion, new_install_prompt_erase: true, builds: [], dfu32_boardless: true,
+    name: 'DFU32', version: chosen === CUSTOM ? '' : chosen.version, new_install_prompt_erase: true, builds: [], dfu32_boardless: true,
+    ...(chosen === CUSTOM ? { dfu32_custom: true } : { dfu32_entry: VERSIONS.indexOf(chosen) }),
   }));
-  const manifests = {};  // board id -> its manifest, prefetched at start-up
+  const manifests = {};  // manifest URL -> its JSON, once loaded (adoptDeviceBoard needs them at hand)
+  const loading = {};    // manifest URL -> the promise of its fetch
+  // no-cache revalidates, so the copy ESP Web Tools fetches next is the same one.
+  function loadManifest(url) {
+    if (!loading[url]) {
+      loading[url] = fetch(url, { cache: 'no-cache' })
+        .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(m => (manifests[url] = m));
+      loading[url].catch(() => { delete loading[url]; });  // try again next time
+    }
+    return loading[url];
+  }
 
   // DFU32's Improv device info reports "ESP32-S3 / feather_esp32s3" as the
   // hardware variant (SPEC §9.2). ESP Web Tools passes that info, and the very
@@ -310,21 +381,36 @@ footer a { color: var(--muted); }
   // version, erase settings, builds). The decision never depends on what the
   // page has selected: the dialog keeps the manifest URL it opened with and
   // downloads it again after installing, and that fresh copy must get the
-  // same treatment. dfu32_board marks a manifest already done.
+  // same treatment. So the version comes from the manifest itself (its
+  // dfu32_entry, else its version string), and dfu32_board marks a manifest
+  // already done.
+  //
+  // A custom build is never swapped for a published one. If the device reports
+  // another board than the build's, its builds are emptied, so ESP Web Tools
+  // refuses to install it ("not supported") and the page says why.
   function adoptDeviceBoard(manifest, info) {
     if (!info) return;
     const id = String(info.chipFamily || '').split(' / ')[1];
-    const board = BOARDS.find(b => b.id === id), m = manifests[id];
+    if (manifest.dfu32_custom) return refuseOtherBoard(manifest, id);
+    const entry = Number.isInteger(manifest.dfu32_entry) ? VERSIONS[manifest.dfu32_entry] : VERSIONS.find(e => e.version === manifest.version);
+    const board = BOARDS.find(b => b.id === id), url = entry && entry.manifests[id], m = url && manifests[url];
     if (!board || !m) return;
     if (manifest.dfu32_board !== id) {
-      const base = new URL(manifestUrl(id), location.href);
+      const base = new URL(url, location.href);
       for (const k of Object.keys(manifest)) delete manifest[k];
       Object.assign(manifest, structuredClone(m), {
         builds: m.builds.map(b => ({ ...b, parts: b.parts.map(p => ({ ...p, path: new URL(p.path, base).href })) })),
         dfu32_board: id,
       });
     }
-    if (!selected || selected.id !== id) select(board, { fromDevice: true });
+    if (chosen !== CUSTOM && (!selected || selected.id !== id)) select(board, { fromDevice: true });
+  }
+  function refuseOtherBoard(manifest, id) {
+    if (!id || !manifest.dfu32_board || id === manifest.dfu32_board) return;
+    manifest.builds = [];
+    if (custom && custom.build.board === manifest.dfu32_board) {
+      setCustomStatus(`The connected DFU32 is a <b>${esc(boardName(id))}</b>, but this build is for the <b>${esc(boardName(manifest.dfu32_board))}</b>, so it won’t be installed. Choose that board’s build.`, true);
+    }
   }
   esp.overrides = {
     checkSameFirmware(manifest, info) {
@@ -342,7 +428,7 @@ footer a { color: var(--muted); }
   const listbox = document.getElementById('listbox');
   const empty = document.getElementById('empty');
   document.getElementById('count').textContent = BOARDS.length + ' boards ▾';
-  let selected = null, results = BOARDS, active = 0, version = '', rawVersion = '';
+  let selected = null, results = BOARDS, active = 0;
 
   const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
   const tokens = q => q.trim().split(/\s+/).filter(Boolean).map(norm).filter(Boolean);
@@ -353,7 +439,7 @@ footer a { color: var(--muted); }
     const exact = list.filter(b => ts.every(t => hay(b).includes(t)));
     return exact.length ? exact : list.filter(b => ts.every(t => subseq(t, hay(b))));
   };
-  const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   function render() {
     results = fuzzyFilter(filter.value, BOARDS);
@@ -388,26 +474,153 @@ footer a { color: var(--muted); }
 
   // `git describe` strings: add a "v" only to a bare release number, never to a hash.
   const fmtVersion = v => /^\d+\.\d+/.test(v) ? 'v' + v : v;
-  function showVersion(v) {
-    rawVersion = v ? String(v) : '';
-    version = rawVersion ? fmtVersion(rawVersion) : '';
-    versionEl.textContent = version;
-    versionEl.hidden = !version;
-    if (selected) hint.textContent = version ? `${selected.short} · ${version}` : selected.short;
+  // The pill shows the site's own build; the hint under the button what installing would put on the board.
+  function refresh() {
+    const latest = fmtVersion(VERSIONS[0].version);
+    versionEl.textContent = latest;
+    versionEl.hidden = !latest;
+    if (chosen === CUSTOM) {
+      hint.className = 'hint mono';
+      hint.textContent = custom ? `Custom · ${boardName(custom.build.board)} · ${fmtVersion(custom.build.version)}` : 'Custom build: choose its .zip above first.';
+    } else if (selected) {
+      const v = fmtVersion(chosen.version);
+      hint.className = 'hint mono';
+      hint.textContent = v ? `${selected.short} · ${v}` : selected.short;
+    } else {
+      hint.className = 'hint';
+      hint.textContent = hintDefault;
+    }
     updateManifest();
   }
-  // The only writer of the button's manifest: the chosen board's, or the board-less one.
+  // The only writer of the button's manifest: the custom build's, the chosen
+  // version's for the chosen board, or the board-less one.
   function updateManifest() {
-    const url = selected ? manifestUrl(selected.id) : boardlessManifest();
+    let url;
+    if (chosen === CUSTOM) url = custom ? custom.url : boardlessManifest();
+    else url = (selected && chosen.manifests[selected.id]) || boardlessManifest();
     if (esp.getAttribute('manifest') !== url) esp.setAttribute('manifest', url);
   }
-  const prefetched = {};  // board id -> promise of its start-up fetch
-  // no-cache revalidates, so the copy ESP Web Tools fetches next is the same one.
-  async function loadManifest(id) {
-    const r = await fetch(manifestUrl(id), { cache: 'no-cache' });
-    if (!r.ok) throw new Error(r.status);
-    return r.json();
+
+  // Shown above the button: what the chosen version's manifest says (set by the
+  // pages job when a version moves nvs, runlog or staging, SPEC §9.4), or what
+  // the page found comparing a custom build with the latest one.
+  let noticeSeq = 0;
+  async function refreshNotice() {
+    const seq = ++noticeSeq;
+    eraseNotice.hidden = true;
+    let text = '';
+    if (chosen === CUSTOM) text = custom ? custom.notice : '';
+    else if (selected && chosen.manifests[selected.id]) {
+      try { text = (await loadManifest(chosen.manifests[selected.id])).dfu32_erase_notice; } catch (e) { /* none shown */ }
+    }
+    if (seq !== noticeSeq || typeof text !== 'string' || !text) return;
+    eraseNoticeText.textContent = text;
+    eraseNotice.hidden = false;
   }
+
+  // ---- version list ----
+
+  const shortDate = s => {
+    const d = s ? new Date(s) : null;
+    return d && !isNaN(d) ? d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+  };
+  function versionLabel(e, i) {
+    const v = fmtVersion(e.version);
+    if (!v) return 'Latest';
+    const what = i === 0 ? (e.channel === 'main' ? 'latest, from main' : 'latest') : [e.channel, shortDate(e.published_at)].filter(Boolean).join(', ');
+    const missing = selected && !e.manifests[selected.id] ? ` · no ${selected.short} build` : '';
+    return (what ? `${v} (${what})` : v) + missing;
+  }
+  // Versions without a build for the chosen board stay listed, greyed out.
+  function renderVersions() {
+    fwSelect.innerHTML = VERSIONS.map((e, i) =>
+      `<option value="${i}"${selected && !e.manifests[selected.id] ? ' disabled' : ''}>${esc(versionLabel(e, i))}</option>`).join('') +
+      '<option value="custom">Custom build from a .zip…</option>';
+    fwSelect.value = chosen === CUSTOM ? 'custom' : String(VERSIONS.indexOf(chosen));
+  }
+  function choose(c, note = '') {
+    chosen = c;
+    customBox.hidden = c !== CUSTOM;
+    fwNote.textContent = note || fwNoteDefault;
+    fwSelect.value = c === CUSTOM ? 'custom' : String(VERSIONS.indexOf(c));
+    // A device may report any board, so all of the version's manifests are fetched now.
+    if (c !== CUSTOM) for (const url of Object.values(c.manifests)) loadManifest(url).catch(() => {});
+    refresh();
+    refreshNotice();
+  }
+  fwSelect.addEventListener('change', () => choose(fwSelect.value === 'custom' ? CUSTOM : VERSIONS[+fwSelect.value]));
+
+  // ---- custom build ----
+
+  function setCustomStatus(html, error = false) {
+    customStatus.innerHTML = html;
+    customStatus.className = 'status' + (error ? ' error' : '');
+  }
+  // The parts' blob: URLs are revoked once no install dialog can still be
+  // fetching them: now, or when the dialog that is open closes.
+  function dropCustom() {
+    if (!custom) return;
+    const blobs = custom.blobs, revoke = () => blobs.forEach(u => URL.revokeObjectURL(u));
+    custom = null;
+    const dlg = document.querySelector('ewt-install-dialog');
+    if (dlg) dlg.addEventListener('closed', revoke, { once: true });
+    else revoke();
+  }
+  let customSeq = 0;
+  async function loadCustom(file) {
+    const seq = ++customSeq;
+    dropCustom();
+    refresh();
+    refreshNotice();
+    setCustomStatus(`Checking <b>${esc(file.name)}</b>…`);
+    let C, build;
+    try {
+      C = await import('./custom-build.js');
+      // Before reading it into memory: a multi-GB drop would stall the tab.
+      if (file.size > C.MAX_BUILD_ZIP) throw new Error('it is far too large for a DFU32 build');
+      build = await C.loadBuild(new Uint8Array(await file.arrayBuffer()), file.name);
+    } catch (e) {
+      if (seq !== customSeq) return;
+      setCustomStatus(`<b>${esc(file.name)}</b> can’t be installed: ${esc(e.message)}.`, true);
+      return;
+    }
+    if (seq !== customSeq) return;
+    // ESP Web Tools fetches each part by its path, and a blob: URL needs no server.
+    const blobs = build.parts.map(p => URL.createObjectURL(new Blob([p.data], { type: 'application/octet-stream' })));
+    const manifest = { ...C.buildManifest(build, p => blobs[build.parts.indexOf(p)]), dfu32_custom: true, dfu32_board: build.board };
+    custom = { file: file.name, build, blobs, url: 'data:application/json,' + encodeURIComponent(JSON.stringify(manifest)), notice: '' };
+    const known = BOARDS.some(b => b.id === build.board);
+    setCustomStatus(`<b>${esc(file.name)}</b>: DFU32 ${esc(fmtVersion(build.version))} for the ${esc(boardName(build.board))} (${esc(build.chipFamily)}). Click <b>Connect device</b> to install it.` +
+      (known ? '' : ' This page doesn’t list that board, so check it’s the one you have.') +
+      (build.debug ? ' It’s a bench build with the fault-injection endpoints: don’t leave it on a deployed DFU32.' : ''));
+    refresh();
+    refreshNotice();
+    // Settings survive only if nvs, runlog and staging stay put (SPEC §9.4), so
+    // compare the build's partition table with the latest build's for its board.
+    try {
+      const url = VERSIONS[0].manifests[build.board];
+      if (!url) return;
+      const part = (await loadManifest(url)).builds[0].parts.find(p => p.offset === C.PARTITION_TABLE_OFFSET);
+      const r = part && await fetch(new URL(part.path, new URL(url, location.href)));
+      if (!r || !r.ok || !custom || custom.build !== build) return;
+      const moved = C.layoutDiff(build.table, new Uint8Array(await r.arrayBuffer()));
+      if (!moved.length || !custom || custom.build !== build) return;
+      custom.notice = `This build puts ${moved.join(', ')} somewhere other than ${fmtVersion(VERSIONS[0].version) || 'the latest version'} does, so installing it over another version needs “Erase device”, which removes WiFi, the API token and the target.`;
+      refreshNotice();
+    } catch (e) { /* no comparison: no notice */ }
+  }
+  document.getElementById('custom-choose').addEventListener('click', () => customFile.click());
+  customFile.addEventListener('change', () => { const f = customFile.files[0]; customFile.value = ''; if (f) loadCustom(f); });
+  customBox.addEventListener('dragover', e => { e.preventDefault(); customBox.classList.add('over'); });
+  customBox.addEventListener('dragleave', () => customBox.classList.remove('over'));
+  customBox.addEventListener('drop', e => {
+    e.preventDefault();
+    customBox.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (f) loadCustom(f);
+  });
+
+  // ---- board ----
 
   // The note under the picker says what the cookie holds; forget: show "Forget saved board".
   function setNote(text, forget = true) {
@@ -429,29 +642,24 @@ footer a { color: var(--muted); }
 
   // fromDevice: the board came from a connected DFU32, so leave focus in its dialog.
   // restored: the board came from the cookie on page load, so leave focus alone.
-  async function select(board, { fromDevice = false, restored = false } = {}) {
+  function select(board, { fromDevice = false, restored = false } = {}) {
     selected = board;
     noteFor(board, { fromDevice, restored });
     if (!popover.hidden) setOpen(false);
     if (!fromDevice && !restored) trigger.focus();
     triggerLabel.className = '';
     triggerLabel.innerHTML = `<b>${esc(board.name)}</b><small>${esc(board.spec)}</small>`;
-    hint.className = 'hint mono';
-    showVersion(rawVersion);
     dlBoard.textContent = board.short;
     download.href = imageUrl(board.id);
-    eraseNotice.hidden = true;
-    try {
-      // On restore, share the start-up fetch instead of making a second one.
-      const m = await (restored && prefetched[board.id] || loadManifest(board.id));
-      if (selected !== board) return;
-      if (m.version) showVersion(m.version);
-      // Set by the pages job when a release moves nvs, runlog or staging (SPEC §9.4).
-      if (typeof m.dfu32_erase_notice === 'string' && m.dfu32_erase_notice) {
-        eraseNoticeText.textContent = m.dfu32_erase_notice;
-        eraseNotice.hidden = false;
-      }
-    } catch (e) { /* keep the version shown */ }
+    renderVersions();
+    // An earlier release may predate this board.
+    if (chosen !== CUSTOM && !chosen.manifests[board.id]) {
+      choose(VERSIONS[0], `${fmtVersion(chosen.version)} has no ${board.short} build, so the latest is chosen instead.`);
+    } else {
+      fwNote.textContent = fwNoteDefault;  // a note about the previous board no longer applies
+      refresh();
+      refreshNotice();
+    }
   }
 
   // Back to no board: the button connects with the board-less manifest again.
@@ -461,30 +669,49 @@ footer a { color: var(--muted); }
     setNote('');
     triggerLabel.className = 'placeholder';
     triggerLabel.textContent = 'Select a board…';
-    hint.className = 'hint';
-    hint.textContent = hintDefault;
     dlBoard.textContent = 'choose a board';
     download.href = 'https://github.com/andyshinn/dfu32/releases/latest';
-    eraseNotice.hidden = true;
-    updateManifest();
+    renderVersions();
+    fwNote.textContent = fwNoteDefault;
+    refresh();
+    refreshNotice();
     trigger.focus();
   }
   document.getElementById('forget').addEventListener('click', deselect);
 
-  // All boards share one version, so whichever manifest arrives first fills the pill.
+  // All boards share one version, so whichever manifest arrives first names the
+  // site's build (unless versions.json already has).
   for (const b of BOARDS) {
-    prefetched[b.id] = loadManifest(b.id);
-    prefetched[b.id].then(m => {
-      manifests[b.id] = m;
-      if (m.version && !version) showVersion(m.version);
+    loadManifest(manifestUrl(b.id)).then(m => {
+      if (m.version && !VERSIONS[0].version) {
+        VERSIONS[0].version = String(m.version);
+        renderVersions();
+        refresh();
+      }
     }).catch(() => {});
   }
+  fetch('versions.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(index => {
+    const list = index && Array.isArray(index.versions) ? index.versions : [];
+    if (!list.length) return;
+    const [first, ...rest] = list;
+    // The first is the site's own build: same manifests, so only its name and channel are taken.
+    if (first.version) VERSIONS[0].version = String(first.version);
+    Object.assign(VERSIONS[0], { channel: first.channel || '', tag: first.tag || null });
+    for (const e of rest) {
+      if (!e || !e.version || !e.manifests || VERSIONS.some(v => v.version === String(e.version))) continue;
+      VERSIONS.push({ version: String(e.version), channel: e.channel || '', tag: e.tag || null, published_at: e.published_at || null, manifests: e.manifests });
+    }
+    renderVersions();
+    refresh();
+  }).catch(() => {});
+
   // The button's manifest is set once: the saved board's, or the board-less one.
+  renderVersions();
   const savedId = savedBoard(), saved = BOARDS.find(b => b.id === savedId);
   if (saved) select(saved, { restored: true });
   else {
     if (savedId !== null) forgetBoard();  // a board this page no longer lists
-    updateManifest();
+    refresh();
   }
 </script>
 </body>

@@ -334,6 +334,32 @@ jobs:
           cp THIRD_PARTY_NOTICES _site/THIRD_PARTY_NOTICES.txt
           find _site -type f | sort
 
+      # Earlier releases (pre-releases too), so the page can install any of
+      # them: each one's merged images, split back into parts next to this
+      # run's build, and versions.json listing them all. The assets are
+      # downloaded here because the page itself can't fetch them (no CORS).
+      # A release published since the last deploy shows up at the next one.
+      - name: Earlier releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+          # How many releases the page offers: both the list and the script use it.
+          RELEASES: 20
+        run: |
+          set -o pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit "$RELEASES" \
+            --json tagName,isPrerelease,isDraft,publishedAt > releases.json
+          # About 1.5 MB per board and release, four at a time.
+          jq -r '.[].tagName' releases.json | xargs -r -P 4 -I{} sh -c \
+            'gh release download "$1" --repo "$GITHUB_REPOSITORY" -p "dfu32-*-merged.bin" -D "releases/$1" \
+               || echo "::warning::$1: no merged images to offer"' _ {}
+          if [ "$EVENT" = release ]; then set -- --channel release --tag "$TAG"; else set -- --channel main; fi
+          echo '### Versions offered' >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/dfu32_web_versions.py --site _site --releases releases.json --assets releases \
+            --limit "$RELEASES" "$@" \
+            | sed 's/^/    /' | tee -a "$GITHUB_STEP_SUMMARY"
+
       # pages-gate ran before this job waited for the pages concurrency group,
       # so a newer release may have been published (and deployed) meanwhile.
       - name: Still the latest release?
