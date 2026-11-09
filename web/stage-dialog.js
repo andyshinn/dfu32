@@ -31,9 +31,10 @@ const OK_ICON = '🎉', ERROR_ICON = '⚠️';  // ESP Web Tools' own
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const kB = n => (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
-const h4 = v => '0x' + v.toString(16).toUpperCase().padStart(4, '0');
+const { h4, utf8len } = S;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const utf8len = s => new TextEncoder().encode(s).length;
+const LOGS_ITEM = 'Logs & Console';  // the device dialog's last fixed item; HOOK_ITEM in fetch_esp_web_tools.py
+const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
 
 function remembered() {
   try { return localStorage.getItem(BOARD_KEY) || ''; } catch (e) { return ''; }
@@ -44,51 +45,78 @@ function remember(board) {
 
 // ---- the item in ESP Web Tools' device dialog ----
 
-// Improv device info for the dialog that's open. ESP Web Tools hands it to
+// ESP Web Tools' dialog that is open (it shows one at a time) and the Improv
+// device info for it. ESP Web Tools hands the info to
 // overrides.checkSameFirmware() (its public hook) whenever it renders the
-// device's options; the page's own override still decides the answer.
-let deviceInfo = null;
+// device's options; the page's own override still decides the answer. The
+// entry goes when that dialog closes, so a later dialog never sees old info.
+let current = null;  // { dlg, info, warned }
 
 function wrapOverrides(button) {
   const base = button.overrides || {};
   button.overrides = {
     ...base,
     checkSameFirmware(manifest, info) {
-      deviceInfo = info;
+      if (current) {
+        current.info = info;
+        if (info && info.firmware === DFU32) warnIfMissing(current);
+      }
       return base.checkSameFirmware ? base.checkSameFirmware(manifest, info) : info.firmware === manifest.name;
     },
   };
 }
 
+const logsItem = root => [...root.querySelectorAll('ew-list-item')].find(i => i.textContent.trim() === LOGS_ITEM);
+
+// The device options are showing for a DFU32 but the item couldn't be placed:
+// ESP Web Tools' markup changed in a way the deploy-time check didn't catch.
+function warnIfMissing(c) {
+  if (c.warned) return;
+  setTimeout(() => {
+    const root = c.dlg.shadowRoot;
+    if (c.warned || current !== c || !root || root.getElementById(ITEM_ID) || logsItem(root)) return;
+    c.warned = true;
+    console.warn(`DFU32: no "${LOGS_ITEM}" item in ESP Web Tools' device dialog, so "Stage nRF52 image" isn't offered. ` +
+      'Its markup may have changed: update web/stage-dialog.js.');
+  }, 1500);
+}
+
 function addItem(dlg) {
-  const root = dlg.shadowRoot;
-  if (!root || root.getElementById(ITEM_ID) || !deviceInfo || deviceInfo.firmware !== DFU32) return;
+  const root = dlg.shadowRoot, c = current;
+  if (!root || !c || c.dlg !== dlg || !c.info || c.info.firmware !== DFU32 || root.getElementById(ITEM_ID)) return;
   // Only on the device options page, before its last fixed item.
-  const logs = [...root.querySelectorAll('ew-list-item')].find(i => i.textContent.trim() === 'Logs & Console');
+  const logs = logsItem(root);
   if (!logs) return;
   const item = document.createElement('ew-list-item');
   item.id = ITEM_ID;
   item.type = 'button';
   item.innerHTML = `${ICON_UPLOAD}<div slot="headline">Stage nRF52 image</div>`;
-  item.addEventListener('click', () => leaveFor(dlg));
+  item.addEventListener('click', () => leaveFor(dlg, c.info));
   logs.before(item);
 }
 
+const portOpen = port => !!(port && (port.readable || port.writable));
+
 // Close ESP Web Tools' dialog, wait for it to release the port, open ours on it.
-async function leaveFor(dlg) {
+async function leaveFor(dlg, info) {
   const port = dlg.port || null;
-  const info = deviceInfo;
   const md = dlg.shadowRoot.querySelector('ew-dialog');
   if (md) md.close();
   const until = Date.now() + 5000;
-  while (Date.now() < until && (dlg.isConnected || (port && (port.readable || port.writable)))) await sleep(50);
-  openStageDialog({ port, info });
+  while (Date.now() < until && (dlg.isConnected || portOpen(port))) await sleep(50);
+  // Still held: say so now rather than fail later with a bootloader error. Without
+  // a port, Stage asks for one again.
+  if (portOpen(port)) openStageDialog({ info, error: PORT_BUSY });
+  else openStageDialog({ port, info });
 }
 
 function hook(dlg) {
   const obs = new MutationObserver(() => addItem(dlg));
   obs.observe(dlg.shadowRoot, { childList: true, subtree: true });
-  dlg.addEventListener('closed', () => obs.disconnect(), { once: true });
+  dlg.addEventListener('closed', () => {
+    obs.disconnect();
+    if (current && current.dlg === dlg) current = null;
+  }, { once: true });
   addItem(dlg);
 }
 
@@ -98,7 +126,7 @@ function watch(button) {
     for (const r of records) {
       for (const n of r.addedNodes) {
         if (n.localName !== 'ewt-install-dialog') continue;
-        deviceInfo = null;  // until this dialog's Improv answers
+        current = { dlg: n, info: null, warned: false };  // info arrives once its Improv answers
         // ESP Web Tools can append the dialog before its module has loaded;
         // it gets its shadow root when the element is upgraded.
         if (n.shadowRoot) hook(n);
@@ -153,6 +181,7 @@ class StageDialog extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this.port = null;     // a SerialPort the user already granted, or null to ask on Stage
     this.info = null;     // Improv device info, for the name shown
+    this.startError = ''; // shown instead of the first page
     this.pkg = null;      // { file, bin, dat, pkt }
     this.busy = false;
   }
@@ -169,7 +198,8 @@ class StageDialog extends HTMLElement {
     document.body.style.overflow = 'hidden';
     this.onUnload = e => { if (this.busy) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', this.onUnload);
-    this.showChoose();
+    if (this.startError) this.showError(this.startError);
+    else this.showChoose();
   }
 
   disconnectedCallback() {
@@ -224,11 +254,19 @@ class StageDialog extends HTMLElement {
   }
 
   async load(file) {
+    // Before reading it into memory: a multi-GB drop would stall the tab.
+    if (file.size > S.MAX_ZIP) {
+      this.pkg = null;
+      this.showError(`${file.name} can't be staged: it is ${kB(file.size)}, far too large for a DFU package.`);
+      return;
+    }
     this.render('Stage nRF52 image', `<ewt-page-progress label="Checking ${esc(file.name)}"></ewt-page-progress>`, '', { closable: false });
     try {
       const { bin, dat } = await S.loadPackage(new Uint8Array(await file.arrayBuffer()));
       const pkt = S.validate(bin, dat);
-      this.pkg = { file, bin, dat, pkt, board: remembered() || S.guessBoard(file.name), version: S.guessVersion(file.name) };
+      // The file name says which board the image is for; the last board staged
+      // is only a fallback for names it can't be read from.
+      this.pkg = { file, bin, dat, pkt, board: S.guessBoard(file.name) || remembered(), version: S.guessVersion(file.name) };
       this.showReview();
     } catch (e) {
       this.pkg = null;
@@ -342,6 +380,7 @@ export async function writeStaging(port, image, onStep) {
     try {
       await loader.main();
     } catch (e) {
+      if (e && e.name === 'InvalidStateError') throw new FriendlyError(PORT_BUSY, e);  // port.open() on a port already open
       throw new FriendlyError("Couldn't start the ESP32's bootloader. Close other programs using the port, or hold BOOT, tap RESET, release BOOT and try again.", e);
     }
     onStep('Reading the partition table');
@@ -375,10 +414,11 @@ export async function writeStaging(port, image, onStep) {
   }
 }
 
-export function openStageDialog({ port = null, info = null } = {}) {
+export function openStageDialog({ port = null, info = null, error = '' } = {}) {
   const el = document.createElement('dfu32-stage-dialog');
   el.port = port;
   el.info = info;
+  el.startError = error;
   document.body.appendChild(el);
   return el;
 }

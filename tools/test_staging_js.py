@@ -54,6 +54,7 @@ for (const q of reqs) {
     else if (q.op === 'staging') v = s.findStaging(fromHex(q.data));
     else if (q.op === 'parts') v = s.parsePartitionTable(fromHex(q.data));
     else if (q.op === 'guess') v = { board: s.guessBoard(q.name), version: s.guessVersion(q.name) };
+    else if (q.op === 'clip') v = { clipped: s.clipUtf8(q.text, q.max), len: s.utf8len(q.text), h4: s.h4(q.max) };
     out.push({ ok: v });
   } catch (e) {
     out.push({ err: e.message, stage: e instanceof s.StageError });
@@ -240,6 +241,15 @@ class Guesses(unittest.TestCase):
         got = run_js([{"op": "guess", "name": n} for n in cases])
         for (name, (board, version)), g in zip(cases.items(), got):
             self.assertEqual((g["ok"]["board"], g["ok"]["version"]), (board, version), name)
+
+    def test_clip_never_splits_a_character(self):
+        text = "aé€😀" * 20  # 1, 2, 3 and 4 UTF-8 bytes
+        reqs = [{"op": "clip", "text": text, "max": n} for n in range(0, 40)]
+        for n, got in zip(range(0, 40), run_js(reqs)):
+            want = text.encode()[:n].decode("utf-8", "ignore")
+            self.assertEqual(got["ok"]["clipped"], want, n)
+            self.assertEqual(got["ok"]["len"], len(text.encode()))
+            self.assertEqual(got["ok"]["h4"], f"0x{n:04X}")
 
     def test_version_clipped_to_63_bytes(self):
         self.assertEqual(one({"op": "guess", "name": "x" * 100 + ".zip"})["ok"]["version"], "x" * 63)

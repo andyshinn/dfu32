@@ -255,7 +255,7 @@ class StagingPage(unittest.TestCase):
         # Every ESP Web Tools element the dialog draws with is checked at deploy time.
         used = set(re.findall(r"<(ewt?-[a-z-]+)", self.DIALOG)) | {"ewt-install-dialog"}
         self.assertLessEqual(used, set(fewt.HOOK_ELEMENTS))
-        self.assertIn(fewt.HOOK_TEXT, self.DIALOG)
+        self.assertIn(f"const LOGS_ITEM = '{fewt.HOOK_LABEL}';", self.DIALOG)
 
 
 class PartitionBaseline(unittest.TestCase):

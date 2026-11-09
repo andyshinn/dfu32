@@ -73,7 +73,7 @@ class Repo:
 
     def render(self) -> str:
         return dn.render(self.root, dn.find_locks(self.root), self.notices, ewt_version="10.4.0",
-                         esptool_js_version_arg="0.7.0")
+                         ejs_version="0.7.0")
 
     def close(self) -> None:
         self._tmp.cleanup()

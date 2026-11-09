@@ -19,8 +19,8 @@ export const PARTITION_TABLE_OFFSET = 0x8000;  // CONFIG_PARTITION_TABLE_OFFSET 
 export const PARTITION_TABLE_SIZE = 0xC00;
 export const STAGING_SUBTYPE = 0x40;
 
-const MAX_ZIP = 16 * 1024 * 1024;    // a DFU zip is well under 1 MB
-const MAX_ENTRY = 4 * 1024 * 1024;   // inflated size cap per entry
+export const MAX_ZIP = 16 * 1024 * 1024;  // a DFU zip is well under 1 MB
+const MAX_ENTRY = 4 * 1024 * 1024;  // inflated size cap per entry
 
 export class StageError extends Error {}
 
@@ -59,6 +59,11 @@ export async function sha256(data) {
 }
 
 export const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+/** 0x0052-style: a .dat field as the bootloader docs write it. */
+export const h4 = v => '0x' + v.toString(16).toUpperCase().padStart(4, '0');
+
+const utf8 = new TextEncoder();
+export const utf8len = s => utf8.encode(s).length;
 
 // MD5 (RFC 1321), only to check the write: the flasher stub reports the MD5 of
 // the flash region it wrote, and Web Crypto has no MD5.
@@ -197,8 +202,6 @@ export function parseDat(dat) {
   return { deviceType, deviceRev, appVersion, sdReq, crc16: dv.getUint16(10 + 2 * n, true) };
 }
 
-const h4 = v => '0x' + v.toString(16).toUpperCase().padStart(4, '0');
-
 export function validate(bin, dat, maxAppSize = MAX_APP_SIZE) {
   const pkt = parseDat(dat);
   if (pkt.deviceType !== ADAFRUIT_DEVICE_TYPE && pkt.deviceType !== NRF54_DEVICE_TYPE) {
@@ -217,16 +220,17 @@ export function validate(bin, dat, maxAppSize = MAX_APP_SIZE) {
 // ---- header and image ----
 
 function putStr(buf, off, size, s, name) {
-  const raw = new TextEncoder().encode(s);
+  const raw = utf8.encode(s);
   if (raw.length >= size) throw new StageError(`${name} too long (${raw.length} bytes, max ${size - 1})`);
   buf.set(raw, off);
 }
 
 /** Truncate to at most `max` UTF-8 bytes without splitting a character. */
 export function clipUtf8(s, max) {
-  let out = '';
+  let out = '', len = 0;
   for (const ch of s) {
-    if (new TextEncoder().encode(out + ch).length > max) break;
+    len += utf8len(ch);
+    if (len > max) break;
     out += ch;
   }
   return out;
@@ -236,7 +240,7 @@ export async function buildHeader({ bin, dat, crc16: crc, board = '', version = 
   if (!(dat.length > 0 && dat.length <= MAX_DAT)) throw new StageError('dat size out of range');
   const buf = new Uint8Array(HEADER_SIZE);
   const dv = new DataView(buf.buffer);
-  buf.set(new TextEncoder().encode(MAGIC), 0x000);
+  buf.set(utf8.encode(MAGIC), 0x000);
   dv.setUint32(0x008, HEADER_VERSION, true);
   dv.setUint32(0x00C, bin.length, true);
   buf.set(await sha256(bin), 0x010);

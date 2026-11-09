@@ -31,6 +31,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fetch_esp_web_tools  # noqa: E402  (the pinned installer-page versions)
+
 ROOT = Path(__file__).resolve().parent.parent
 NOTICES_DIR = Path(__file__).resolve().parent / "notices"
 IMPROV_SDK = Path("components/improv/third_party/sdk-cpp")
@@ -149,21 +152,12 @@ def improv_sdk_version(root: Path) -> str:
     return m.group(1).rstrip(".")
 
 
-def _fetch_tool():
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    try:
-        import fetch_esp_web_tools
-    finally:
-        sys.path.pop(0)
-    return fetch_esp_web_tools
-
-
 def esp_web_tools_version() -> str:
-    return _fetch_tool().VERSION
+    return fetch_esp_web_tools.VERSION
 
 
 def esptool_js_version() -> str:
-    return _fetch_tool().ESPTOOL_JS_VERSION
+    return fetch_esp_web_tools.ESPTOOL_JS_VERSION
 
 
 def idf_copyright(idf_version: str, notices_dir: Path = NOTICES_DIR) -> tuple[str, str]:
@@ -185,7 +179,7 @@ def heading(title: str, char: str = "-") -> str:
 
 
 def render(root: Path = ROOT, locks: list[Path] | None = None, notices_dir: Path = NOTICES_DIR,
-           ewt_version: str | None = None, esptool_js_version_arg: str | None = None) -> str:
+           ewt_version: str | None = None, ejs_version: str | None = None) -> str:
     lock_paths = locks if locks is not None else find_locks(root)
     parsed = [parse_lock(p.read_text(encoding="utf-8"), p.name) for p in lock_paths]
 
@@ -206,7 +200,7 @@ def render(root: Path = ROOT, locks: list[Path] | None = None, notices_dir: Path
     copyright_name, copyright_text = idf_copyright(idf, notices_dir)
     apache = (root / IMPROV_SDK / "LICENSE").read_text(encoding="utf-8")
     ewt = ewt_version or esp_web_tools_version()
-    ejs = esptool_js_version_arg or esptool_js_version()
+    ejs = ejs_version or esptool_js_version()
 
     out: list[str] = []
     out.append(heading("DFU32 third-party notices", "="))
