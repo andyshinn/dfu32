@@ -102,7 +102,7 @@ export function md5Hex(data) {
 
 // ---- zip ----
 
-async function inflateRaw(data) {
+async function inflateRaw(data, maxEntry) {
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
   const reader = stream.getReader();
   const chunks = [];
@@ -111,7 +111,7 @@ async function inflateRaw(data) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.length;
-    if (size > MAX_ENTRY) { await reader.cancel(); throw new StageError('a file in the zip is too large'); }
+    if (size > maxEntry) { await reader.cancel(); throw new StageError('a file in the zip is too large'); }
     chunks.push(value);
   }
   const out = new Uint8Array(size);
@@ -120,9 +120,12 @@ async function inflateRaw(data) {
   return out;
 }
 
-/** List a zip's files. Returns { names, read(name) -> Promise<Uint8Array> }. No zip64, no encryption. */
-export function openZip(bytes) {
-  if (bytes.length > MAX_ZIP) throw new StageError('the file is too large for a DFU package');
+/**
+ * List a zip's files. Returns { names, read(name) -> Promise<Uint8Array> }. No zip64, no encryption.
+ * The limits default to a DFU package's; custom-build.js passes a firmware build's.
+ */
+export function openZip(bytes, { maxZip = MAX_ZIP, maxEntry = MAX_ENTRY, tooLarge = 'the file is too large for a DFU package' } = {}) {
+  if (bytes.length > maxZip) throw new StageError(tooLarge);
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let eocd = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 0xFFFF); i--) {
@@ -147,14 +150,14 @@ export function openZip(bytes) {
     const e = entries.get(name);
     if (!e) throw new StageError(`the zip has no ${name}`);
     if (e.flags & 1) throw new StageError(`${name} is encrypted`);
-    if (e.usize > MAX_ENTRY || e.csize === 0xFFFFFFFF) throw new StageError(`${name} is too large`);
+    if (e.usize > maxEntry || e.csize === 0xFFFFFFFF) throw new StageError(`${name} is too large`);
     if (e.local + 30 > bytes.length || dv.getUint32(e.local, true) !== 0x04034B50) throw new StageError('the zip is damaged');
     const start = e.local + 30 + dv.getUint16(e.local + 26, true) + dv.getUint16(e.local + 28, true);
     if (start + e.csize > bytes.length) throw new StageError('the zip is truncated');
     const raw = bytes.subarray(start, start + e.csize);
     let data;
     if (e.method === 0) data = raw.slice();
-    else if (e.method === 8) data = await inflateRaw(raw);
+    else if (e.method === 8) data = await inflateRaw(raw, maxEntry);
     else throw new StageError(`${name} uses an unsupported compression method (${e.method})`);
     if (data.length !== e.usize || crc32(data) !== e.crc) throw new StageError(`${name} is damaged (CRC mismatch)`);
     return data;
