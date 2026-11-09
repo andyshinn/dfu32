@@ -58,6 +58,9 @@ section { display: flex; flex-direction: column; gap: 14px; }
 .note strong { color: var(--text); font-weight: 600; }
 .note[hidden] { display: none; }
 .note code { font: 12.5px var(--mono); color: var(--text); }
+.linkish { all: unset; cursor: pointer; color: var(--accent-ink); text-decoration: underline; text-underline-offset: 3px; }
+.linkish:hover { color: var(--text); }
+.linkish:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 
 .picker { position: relative; }
 .trigger { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 11px 14px; border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); }
@@ -163,6 +166,7 @@ footer a { color: var(--muted); }
       </div>
     </div>
     <p class="note"><strong>PSRAM is required.</strong> Boards without it won’t run DFU32.</p>
+    <p class="note" id="remembered" hidden><span id="remembered-text"></span> <button class="linkish" id="forget" type="button">Forget it</button></p>
   </section>
 
   <section id="install">
@@ -248,6 +252,25 @@ footer a { color: var(--muted); }
   const versionEl = document.getElementById('version');
   const eraseNotice = document.getElementById('erase-notice');
   const eraseNoticeText = document.getElementById('erase-notice-text');
+  const remembered = document.getElementById('remembered');
+  const rememberedText = document.getElementById('remembered-text');
+  const hintDefault = hint.textContent;
+
+  // The chosen board is kept in a first-party cookie, so coming back to update
+  // or re-flash starts with it selected. Nothing else is stored.
+  const BOARD_COOKIE = 'dfu32_board';
+  const COOKIE_MAX_AGE = 400 * 24 * 3600;  // 400 days, the most Chrome keeps a cookie
+  function saveBoard(id) {
+    document.cookie = `${BOARD_COOKIE}=${encodeURIComponent(id)}; Max-Age=${COOKIE_MAX_AGE}; Path=/; SameSite=Lax` + (location.protocol === 'https:' ? '; Secure' : '');
+  }
+  function forgetBoard() {
+    document.cookie = `${BOARD_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax` + (location.protocol === 'https:' ? '; Secure' : '');
+  }
+  function savedBoard() {
+    const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${BOARD_COOKIE}=([^;]*)`));
+    if (!m) return null;
+    try { return decodeURIComponent(m[1]); } catch (e) { return null; }
+  }
 
   // id = the DFU32_BOARD profile name (boards/<id>/, CMakePresets.json).
   const BOARDS = [
@@ -271,15 +294,21 @@ footer a { color: var(--muted); }
   // before it shows the device's options, so the board-less manifest gets that
   // board's builds there. Part paths are made absolute: the board-less
   // manifest's own URL is a data: URL, which they can't be resolved against.
+  //
+  // The device's board also wins over a different board chosen on the page
+  // (usually one remembered from an earlier visit with another device), so a
+  // remembered board can't put the wrong profile's image on a running DFU32.
   function adoptDeviceBoard(manifest, info) {
-    if (!manifest.dfu32_boardless || manifest.builds.length || !info) return;
+    if (!info) return;
     const id = String(info.chipFamily || '').split(' / ')[1];
     const board = BOARDS.find(b => b.id === id), m = manifests[id];
     if (!board || !m) return;
+    const boardless = manifest.dfu32_boardless && !manifest.builds.length;
+    if (!boardless && (!selected || selected.id === id)) return;
     const base = new URL(manifestUrl(id), location.href);
     manifest.builds = m.builds.map(b => ({ ...b, parts: b.parts.map(p => ({ ...p, path: new URL(p.path, base).href })) }));
     if (m.version) manifest.version = m.version;
-    if (!selected) select(board, { fromDevice: true });
+    if (!selected || selected.id !== id) select(board, { fromDevice: true });
   }
   esp.overrides = {
     checkSameFirmware(manifest, info) {
@@ -363,10 +392,16 @@ footer a { color: var(--muted); }
   }
 
   // fromDevice: the board came from a connected DFU32, so leave focus in its dialog.
-  async function select(board, { fromDevice = false } = {}) {
+  // restored: the board came from the cookie on page load, so leave focus alone.
+  async function select(board, { fromDevice = false, restored = false } = {}) {
     selected = board;
-    setOpen(false);
-    if (!fromDevice) trigger.focus();
+    if (!restored) saveBoard(board.id);
+    rememberedText.textContent = restored ? 'Remembered from your last visit.'
+      : fromDevice ? 'Reported by the connected device and saved in this browser for next time.'
+      : 'Saved in this browser for next time.';
+    remembered.hidden = false;
+    if (!popover.hidden) setOpen(false);
+    if (!fromDevice && !restored) trigger.focus();
     triggerLabel.className = '';
     triggerLabel.innerHTML = `<b>${esc(board.name)}</b><small>${esc(board.spec)}</small>`;
     hint.className = 'hint mono';
@@ -386,7 +421,27 @@ footer a { color: var(--muted); }
     } catch (e) { /* keep the version shown */ }
   }
 
+  // Back to no board: the button connects with the board-less manifest again.
+  function deselect() {
+    selected = null;
+    forgetBoard();
+    remembered.hidden = true;
+    triggerLabel.className = 'placeholder';
+    triggerLabel.textContent = 'Select a board…';
+    hint.className = 'hint';
+    hint.textContent = hintDefault;
+    dlBoard.textContent = 'choose a board';
+    download.href = 'https://github.com/andyshinn/dfu32/releases/latest';
+    eraseNotice.hidden = true;
+    updateManifest();
+    trigger.focus();
+  }
+  document.getElementById('forget').addEventListener('click', deselect);
+
   updateManifest();
+  const savedId = savedBoard(), saved = BOARDS.find(b => b.id === savedId);
+  if (saved) select(saved, { restored: true });
+  else if (savedId !== null) forgetBoard();  // a board this page no longer lists
   // All boards share one version, so whichever manifest arrives first fills the pill.
   for (const b of BOARDS) {
     loadManifest(b.id).then(m => {
