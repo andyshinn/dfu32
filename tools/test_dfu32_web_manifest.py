@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_partitions as cp  # noqa: E402
+import dfu32_stage_image as si  # noqa: E402
 import dfu32_web_manifest as wm  # noqa: E402
 import fetch_esp_web_tools as fewt  # noqa: E402
 
@@ -215,6 +216,46 @@ class Page(unittest.TestCase):
     def test_esp_web_tools_path_matches_fetch_tool(self):
         self.assertIn(f'src="vendor/esp-web-tools-{fewt.VERSION}/install-button.js"', self.HTML)
         self.assertNotRegex(self.HTML, r"<script[^>]+src=\"https?://")
+
+
+class StagingPage(unittest.TestCase):
+    """web/stage-dialog.js and web/staging.js against the rest of the repo."""
+    DIALOG = (REPO / "web" / "stage-dialog.js").read_text()
+    STAGING = (REPO / "web" / "staging.js").read_text()
+
+    def const(self, name: str) -> int:
+        return int(re.search(rf"export const {name} = (0x[0-9A-Fa-f]+|\d+);", self.STAGING).group(1), 0)
+
+    def test_loaded_by_page(self):
+        self.assertIn('<script type="module" src="stage-dialog.js"></script>', Page.HTML)
+        self.assertIn("from './staging.js'", self.DIALOG)
+
+    def test_esptool_js_path_matches_fetch_tool(self):
+        self.assertIn(f"'./vendor/esptool-js-{fewt.ESPTOOL_JS_VERSION}/bundle.js'", self.DIALOG)
+        self.assertNotRegex(self.DIALOG + self.STAGING, r"https?://")
+
+    def test_constants_match_stage_image_tool(self):
+        self.assertEqual(self.const("HEADER_SIZE"), si.HEADER_SIZE)
+        self.assertEqual(self.const("DATA_OFFSET"), si.DATA_OFFSET)
+        self.assertEqual(self.const("MAX_DAT"), si.MAX_DAT)
+        self.assertEqual(self.const("MAX_APP_SIZE"), si.MAX_APP_SIZE)
+        self.assertIn(f"export const MAGIC = '{si.MAGIC.decode()}';", self.STAGING)
+
+    def test_partition_table_offset_matches_sdkconfig(self):
+        cfg = (REPO / "sdkconfig.defaults").read_text()
+        offset = int(re.search(r"^CONFIG_PARTITION_TABLE_OFFSET=(0x[0-9A-Fa-f]+)", cfg, re.M).group(1), 16)
+        self.assertEqual(self.const("PARTITION_TABLE_OFFSET"), offset)
+
+    def test_staging_subtype_matches_partition_tables(self):
+        for csv in ("4mb.csv", "8mb.csv"):
+            row = next(l for l in (REPO / "partitions" / csv).read_text().splitlines() if l.startswith("staging"))
+            self.assertEqual(int(row.split(",")[2], 0), self.const("STAGING_SUBTYPE"))
+
+    def test_hooks_named_in_fetch_tool(self):
+        # Every ESP Web Tools element the dialog draws with is checked at deploy time.
+        used = set(re.findall(r"<(ewt?-[a-z-]+)", self.DIALOG)) | {"ewt-install-dialog"}
+        self.assertLessEqual(used, set(fewt.HOOK_ELEMENTS))
+        self.assertIn(fewt.HOOK_TEXT, self.DIALOG)
 
 
 class PartitionBaseline(unittest.TestCase):

@@ -72,7 +72,8 @@ class Repo:
         (self.notices / "cJSON-LICENSE").write_text("CJSON MIT TEXT\n", encoding="utf-8")
 
     def render(self) -> str:
-        return dn.render(self.root, dn.find_locks(self.root), self.notices, ewt_version="10.4.0")
+        return dn.render(self.root, dn.find_locks(self.root), self.notices, ewt_version="10.4.0",
+                         esptool_js_version_arg="0.7.0")
 
     def close(self) -> None:
         self._tmp.cleanup()
@@ -114,6 +115,7 @@ class Render(unittest.TestCase):
         self.assertIn("espressif/cmake_utilities 1.3.0", text)
         self.assertIn("improv-wifi/sdk-cpp 1.2.7", text)
         self.assertIn("ESP Web Tools 10.4.0 (served from vendor/esp-web-tools-10.4.0/", text)
+        self.assertIn("esptool-js 0.7.0 (served from vendor/esptool-js-0.7.0/", text)
         self.assertIn("IDF COPYRIGHT LIST", text)
         self.assertIn("APACHE LICENSE TEXT", text)
         # cJSON's text appears only when espressif/cjson is a dependency.

@@ -65,6 +65,12 @@ ESP Web Tools 10.4.0 (served from vendor/esp-web-tools-10.4.0/, with its LICENSE
   Source:   https://github.com/esphome/esp-web-tools
   Used for: flashing over Web Serial and Improv Serial in the browser
 
+esptool-js 0.7.0 (served from vendor/esptool-js-0.7.0/, with its LICENSE)
+  License:  Apache-2.0; its bundle includes pako (MIT and Zlib) and
+            atob-lite (MIT)
+  Source:   https://github.com/espressif/esptool-js
+  Used for: writing an nRF52 image to the staging partition from the page
+
 ESP-IDF copyrights
 ------------------
 

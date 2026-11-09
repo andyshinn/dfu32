@@ -51,7 +51,7 @@ The scan put the repeater into OTA mode. Reboot it (or wait for it to time out) 
 On **Status**:
 
 1. **Check** fetches the manifest and shows the version, whether it suits the board, and whether it is newer than what DFU32 last flashed. It changes nothing.
-2. **Stage** (optional) downloads and verifies the image now, so a bad download shows up before the repeater is touched.
+2. **Stage** (optional) downloads and verifies the image now, so a bad download shows up before the repeater is touched. With the ESP32 on USB you can instead stage from [dfu32.app](https://dfu32.app/) with no server: **Connect device**, **Stage nRF52 image**, pick the DFU `.zip`. Then use *Flash from: staged image*.
 3. **Flash** arms DFU32: it fetches or reuses the staged image, checks it, and waits up to 10 minutes for the repeater.
 4. Run `start ota` on the repeater (§6). DFU32 sees it, switches it into its bootloader and sends the image. The progress bar fills; the NeoPixel goes from cyan blinking to magenta getting brighter.
 5. **Succeeded** means the repeater has rebooted into the new firmware. Its version shows as **Last flashed**. Run `ver` on the repeater to confirm.

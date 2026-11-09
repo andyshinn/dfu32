@@ -1,6 +1,6 @@
 # Bench guide (M1–M5)
 
-This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
+This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, from the browser over USB, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
 **You need:**
 - a Feather ESP32-S3 (or another supported board) on USB;
@@ -148,6 +148,10 @@ Worth trying on the bench:
 - **Wrong size:** append a byte to `firmware.bin`. Expect `SIZE_MISMATCH` before anything is erased, because the server's `Content-Length` disagrees with the manifest.
 - **404:** point `target url` at a missing file. Expect `HTTP_ERROR: HTTP 404`.
 - **WiFi drop:** turn the access point off and on again. `wifi` should show it reconnecting, with the backoff capped at 30 s.
+
+### From the browser over USB
+
+On [dfu32.app](https://dfu32.app/), click **Connect device**, pick DFU32's port, then choose **Stage nRF52 image** and the DFU `.zip`. Check the target board (it must match `target board`) and the version, then click **Stage**. The page validates the package like `dfu32_stage_image.py`, finds the staging partition from the partition table, writes it and restarts DFU32. Quit any serial monitor first so the port is free. When DFU32 is back, `staged` should end with `result OK`.
 
 ### From the PC with esptool
 
