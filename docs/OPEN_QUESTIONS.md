@@ -28,6 +28,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 | Retries | Configurable, default 3 full restarts with backoff |
 | Hardware | Portable, 4 MB flash floor, **2 MB PSRAM required**; bench on Feather ESP32-S3 #5477 (4 MB/2 MB) (+ Feather V2) |
 | WiFi during transfer | Option (`wifi_off_dfu` + per-request `wifi_off`); default on (WiFi kept up), from the 2026-11-07 bench A/B |
+| Live BLE signal monitor (SPEC §10.4) | One shared monitor for the console, UI and API; the target pinned on top; yields the radio to jobs and shows what the job's scan sees; NDJSON stream over `GET` (no WebSocket) plus `?once=1`; runs while watched (10 s grace, 10 min per stream); smoothed RSSI with bars, min/max, stale at 10 s; filters on by default (DFU-looking, ≥ −90 dBm), each can be turned off, `all` shows everything; 64-slot table, evicting the weakest; one-shot scan kept; console `monitor` redraws like `top` |
 | Reference bootloader | OTAFIX 2.2 (`0.9.2-OTAFIX2.2-BP1.3`) on the production repeater |
 | Logs | RAM ring + persisted run records (last 14–16) |
 | License | MIT |
@@ -110,3 +111,10 @@ Items are ranked by how much the design changes if the answer differs from the a
     - The scan picker captures the type either way. If an app ever used a resolvable private address, MAC matching would break. Not the case for MeshCore, whose BLE is only on during OTA.
 
 14. **Q (later) — Auto-trigger via wire.** You chose manual. If unattended flashing becomes interesting later, the options are UART to the repeater's `Serial1` (MeshCore doesn't use it today, so it would need firmware support) or USB host to its CDC port (needs an S3 USB-host-capable board and a cable).
+
+15. **Live BLE signal monitor (SPEC §10.4): to check once it is built.**
+    - **B: stopping an active scan.** The monitor never stops an active window early (the esp-nimble-cpp 2.6.0 crash). Confirm on the bench that a preemption during a passive window is clean, and measure what the 2 s active windows cost in job start latency. If stopping an active scan turns out to be safe after all, preemption can be immediate.
+    - **B: bar thresholds.** −60/−70/−80/−90 dBm are a guess. Calibrate them against flash success and throughput at a few distances (the M2 throughput matrix is a good place), on both the S3 and the classic ESP32.
+    - **B: scanning with WiFi up on a classic ESP32.** A continuous scan relies on software coex. Check that HTTP stays usable on the Feather V2 while the monitor runs.
+    - **A: LRU purge.** `lru_purge_enable` lets the server close the least recently used socket when it runs out, which may be a stream. The UI reconnects; if it happens in practice, lower the stream limit or raise `max_open_sockets`.
+    - **B: names.** Scan-response-only names arrive only in active windows. The spec reduces the gap with an active window at the start of every session and resume, 8 s passive windows while a visible entry is nameless, and a 128-entry name cache that outlives the table. Devices first seen during a job's passive scan are still nameless until the job ends. This is a real cost for picking a target, not an assumption; measure on the bench how long a new device stays nameless, with and without a job running.
