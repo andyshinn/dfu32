@@ -218,7 +218,7 @@ footer a { color: var(--muted); }
   <section class="web-only" id="stage">
     <div class="sh"><h2>Stage a repeater image over USB</h2></div>
     <p class="note">No artifact server needed: the page can put an nRF52 DFU package (the <code>.zip</code> from adafruit-nrfutil, such as a MeshCore release asset) straight into DFU32’s staging partition. Click <strong>Connect device</strong>, then choose <strong>Stage nRF52 image</strong> and pick the zip. The page checks it the way DFU32 does, writes it over USB and restarts DFU32; WiFi, the token and the target are kept. Then flash the repeater from DFU32’s page with <strong>Flash from: staged image</strong>.</p>
-    <p class="note">The <strong>target board</strong> you enter must match the board set on DFU32’s target, or DFU32 refuses to flash the image. Staging resets the ESP32, so don’t do it while DFU32 is flashing a repeater.</p>
+    <p class="note"><strong>Pick the right zip.</strong> An image staged this way isn’t labelled with a board, so DFU32 can’t tell if it was built for your repeater. Staging resets the ESP32, so don’t do it while DFU32 is flashing a repeater.</p>
   </section>
 
   <details>

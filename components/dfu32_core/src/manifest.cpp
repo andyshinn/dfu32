@@ -150,12 +150,20 @@ Status parse_manifest(std::string_view text, std::string_view manifest_url, Mani
     return {};
 }
 
+namespace {
+bool iequals(std::string_view a, std::string_view b) noexcept {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+}  // namespace
+
 bool board_matches(const Manifest& m, std::string_view board) noexcept {
-    return std::any_of(m.boards.begin(), m.boards.end(), [&](const std::string& b) {
-        return b.size() == board.size() && std::equal(b.begin(), b.end(), board.begin(), [](char x, char y) {
-                   return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
-               });
-    });
+    return std::any_of(m.boards.begin(), m.boards.end(), [&](const std::string& b) { return iequals(b, board); });
+}
+
+bool staged_board_ok(std::string_view image_board, std::string_view target_board) noexcept {
+    return image_board.empty() || target_board.empty() || iequals(image_board, target_board);
 }
 
 Status check_init_against_manifest(const Manifest& m, const dfu::InitPacket& init) {

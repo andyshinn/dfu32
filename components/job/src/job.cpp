@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cinttypes>
 #include <cstdio>
 #include <memory>
@@ -12,6 +11,7 @@
 
 #include "config/config.hpp"
 #include "dfu32_core/api_core.hpp"
+#include "dfu32_core/manifest.hpp"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -60,16 +60,6 @@ std::atomic<int64_t> g_watch_since_us{0};
 std::atomic<int64_t> g_job_beat_us{0};   // heartbeats from the job's own waits (restore)
 
 uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
-
-bool iequals(const std::string& a, const std::string& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
 
 bool starts_with(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
 
@@ -409,7 +399,7 @@ void run(const Request& q) {
     set_state(State::Precheck);
 
     set_phase("PRECHECK");
-    if (!q.target.board.empty() && !iequals(img.header().board, q.target.board)) {
+    if (!staged_board_ok(img.header().board, q.target.board)) {
         fail("BOARD_MISMATCH: staged image is for board \"" + img.header().board + "\", target is \"" +
              q.target.board + "\"");
         return;

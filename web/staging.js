@@ -288,25 +288,14 @@ export function findStaging(buf) {
   return parsePartitionTable(buf).find(e => e.label === 'staging' && e.type === 1 && e.subtype === STAGING_SUBTYPE) || null;
 }
 
-// ---- guesses from the file name ----
+// ---- version from the file name ----
 
 // MeshCore assets are <env>-<version>-<commit>.zip, e.g. RAK_4631_repeater-v1.18.0-81dbae5.zip.
 const MESHCORE = /^(.+?)-(v?\d[\w.]*-[0-9a-f]{6,40})$/i;
-const ROLE = /_(repeater|room_server|companion|terminal|sensor|kiss)(_.*)?$/i;
 
 /** The version string: "<version>-<commit>" for a MeshCore asset (what the repeater's `ver` prints), else the file name. */
 export function guessVersion(fileName) {
   const stem = fileName.replace(/^.*[\\/]/, '').replace(/\.zip$/i, '');
   const m = stem.match(MESHCORE);
   return clipUtf8(m ? m[2] : stem, 63);
-}
-
-/** A board id from a MeshCore env name: RAK_4631_repeater -> rak4631, Heltec_t114_repeater -> heltec_t114. '' if unsure. */
-export function guessBoard(fileName) {
-  const stem = fileName.replace(/^.*[\\/]/, '').replace(/\.zip$/i, '');
-  const m = stem.match(MESHCORE);
-  if (!m || !ROLE.test(m[1])) return '';
-  let b = m[1].replace(ROLE, '').toLowerCase().replace(/-/g, '_');
-  b = b.replace(/^([a-z]+)_(\d+)$/, '$1$2');
-  return /^[a-z0-9_]{1,31}$/.test(b) ? b : '';
 }
