@@ -182,7 +182,7 @@ Specified in [SPEC §10.4](../SPEC.md#104-live-ble-signal-monitor-specified-not-
 - `components/api`: `GET /api/v1/ble/monitor` (stream and `?once=1`) on its own task with async requests, at most 2 streams, 10 minutes each.
 - UI: the Target view's scan section becomes the live list (filters in the browser, the target pinned with a sparkline, pause when hidden).
 - Console: `monitor` (a refreshed table, `--plain`, the same filter switches).
-- `docs/OPERATOR.md` (using it to place the box) and a bench check in `docs/BENCH.md`.
+- `docs/OPERATOR.md` (using it to place the box, and a Home Assistant `rest` sensor on `?once=1` polling every 10 s) and a bench check in `docs/BENCH.md`.
 - **Done when:** with a repeater in `start ota` mode, the UI, `curl -N` and the console all show it with live RSSI; moving it shows in the smoothed value within a few seconds; starting a flash from another tab takes the radio at once, and the monitor shows the job's scan, then resumes after the run.
 
 ## Later (post-v1, in rough priority order)
