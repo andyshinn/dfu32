@@ -291,7 +291,7 @@ A failure *before* START (scan, connect, buttonless, identify) doesn't touch the
 
 ## 7. Orchestrator (job state machine)
 
-There is one job at a time, globally. While a job is active, scan, stage and flash requests get `409 Busy`, and so do target `PUT`/`DELETE` and the console's BLE and staging commands (they share one device-wide lease, `components/job`).
+There is one job at a time, globally. While a job is active, scan, stage and flash requests get `409 Busy`, and so do target `PUT`/`DELETE` and the console's BLE and staging commands (they share one device-wide lease, `components/job`). The live BLE monitor (§10.4) is the exception: it holds the lease as a preemptible holder and hands it over instead of causing a `409`.
 
 ```mermaid
 stateDiagram-v2
@@ -527,6 +527,7 @@ Conventions (M3b):
 | `GET /api/v1/targets/{id}/runs` · `GET /api/v1/runs/{seq}` | Run records (§13.2), including the log tail |
 | `GET /api/v1/staging` · `DELETE /api/v1/staging` | Staged image header / invalidate it |
 | **`POST /api/v1/ble/scan`** | Body `{"duration_s":10,"dfu_only":false}` → a list of advertisers (below). Refused during a job. |
+| **`GET /api/v1/ble/monitor`** | Live advertiser list with RSSI, one JSON line per second (NDJSON stream), or one snapshot with `?once=1`. Filters on by default; `all=1` shows everything. Not refused during a job (§10.4). |
 | `GET /api/v1/logs?since=<seq>` | Log ring entries, newest last |
 | `GET /api/v1/config` · `PUT /api/v1/config` | Device-level settings (§9.1) |
 | `POST /api/v1/system/ota` | Upload DFU32 firmware (raw body, `esp_ota_*`). Rollback-protected. |
@@ -567,7 +568,7 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget of ≤ 40 KB. It uses the same JSON API. The token is kept in `localStorage`, with a claim screen when the device is unclaimed. Views:
 
 - **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort.
-- **Target:** config form, plus the **BLE scan picker** (scan button, live list, "Use as target").
+- **Target:** config form, plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
 - **Runs:** history table, with run detail and log tail.
 - **Logs:** live tail by polling `/logs?since=`.
 - **System:** WiFi info, hostname, DFU32 firmware upload, reboot, token rotate, tuning defaults.
@@ -579,6 +580,105 @@ Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and C
 ### 10.3 Home Assistant
 
 v1 has no MQTT (the later milestone uses `espressif/mqtt`, §4.1). HA can use `rest` sensors on `/api/v1/status` and `rest_command` for check, stage and flash. A later milestone adds MQTT with HA discovery: an `update` entity, a state sensor, a progress sensor, and a Flash button.
+
+### 10.4 Live BLE signal monitor (specified, not yet implemented)
+
+A live, once-a-second view of nearby BLE advertisers and their signal strength, like the device picker in Nordic's phone DFU app, on all three interfaces: the console, the web UI and the HTTP API. The RSSI is measured by DFU32's own radio, so it shows the link that will carry the flash, which a phone can't. It has two jobs:
+
+- **Picking a target:** a live list with **Use as target**, replacing the one-shot scan table in the UI.
+- **Placing the box:** the configured target (app MAC, or MAC+1 for the bootloader) is always pinned at the top, whatever the filters say, with a smoothed value and a sparkline. You can move DFU32 or its antenna and watch the number.
+
+The one-shot scan (`POST /api/v1/ble/scan`, console `scan`) stays as it is: `tools/dfu32_bench.py` and scripts use it.
+
+#### 10.4.1 One shared monitor
+
+- There is one monitor on the device. It runs while it has at least one **viewer** (an HTTP stream, an `?once=1` poll in progress, or the console `monitor` command) and keeps running for a **10 s grace** after the last one leaves, so a page reload or a poll loop doesn't restart it.
+- Every viewer reads the same device table. Each applies its own filters (§10.4.3) when its snapshot is built.
+- At most **2 HTTP streams** at once (the server has about 7 sockets, and the UI's own polling needs some); a third gets `409 MONITOR_FULL`. The console counts as a viewer but not against this limit.
+- Each HTTP stream ends after **10 minutes** with a final line `{"state":"stopped","reason":"time_limit"}`; the client can reconnect. A forgotten tab can't keep the radio scanning forever. The console runs until Ctrl-C.
+- The table is cleared when the monitor stops (after the grace), so min/max and history describe one session.
+
+#### 10.4.2 Radio, lease and jobs (the monitor yields)
+
+- The monitor holds the device-wide BLE lease (§7) as the **preemptible** holder `monitor`. Any other acquirer (a job, a console flash/probe/scan, `POST /ble/scan`, target `PUT`/`DELETE`, `check`, firmware upload, Improv BLE, factory reset) **takes the lease from it** instead of getting `409`: the monitor stops its scan and hands over. The monitor never causes a `409` for anything else.
+- While another holder has the lease, viewers keep their connection and get snapshots with `"state":"busy"` and `"holder":"job"` (or `console`, `improv`, …). When the lease is free again and viewers remain, the monitor resumes by itself.
+- **Job feed:** while a job is searching for the target (AWAITING_TARGET, the bootloader re-scan after the buttonless jump, the 30 s retry scans), the job's own scan callbacks also update the monitor table, and snapshots say `"state":"job_scan"`. Those scans are passive (see `find_target` in `dfu_ble`), so they bring RSSI but no new names; names already learned keep showing. During DFU_RUNNING proper nothing updates, and entries age out as below.
+- **Scan cycle:** the monitor alternates a 2 s **active** window (for names from scan responses) with a 28 s **passive** window, and it never calls `stop()` during an active window, because esp-nimble-cpp 2.6.0 crashed when an active scan was stopped while the host task was handling a report (the reason `find_target` scans passively). A preemption that arrives during an active window waits for it to end (≤ 2 s). A preemption during a passive window stops at once. Duplicate filtering is off (repeat adverts carry the RSSI updates), and NimBLE keeps no result list of its own (`setMaxResults(0)`): the callbacks update DFU32's table directly.
+- No LED pattern of its own; WiFi stays up (software coex, as in AWAITING_TARGET).
+
+#### 10.4.3 Device table, smoothing and filters
+
+The table logic is pure and host-tested (`dfu32_core/ble_monitor.hpp`): updates, smoothing, eviction, filters, bars and the JSON line.
+
+- **64 slots** (in PSRAM). When the table is full, a new device takes the slot of the weakest **stale** entry. If none is stale, it replaces the weakest entry by smoothed RSSI, but only when it is itself stronger; otherwise it is ignored. The target (and MAC+1) is always accepted and never evicted. Names are capped at 31 bytes.
+- Per device: the latest RSSI; a **smoothed** RSSI, a time-weighted EMA with a 5 s time constant (`α = 1 − e^(−Δt/5 s)`), so irregular advert rates don't skew it; **min/max** since the device entered the table; advert count; time since last seen; address and type; name; connectable; the `dfu` guess and target match as in the scan result (§10.1).
+- **Stale:** not seen for 10 s, so it shows greyed out. Dropped after 30 s.
+- **Bars** (0–4, from the smoothed value; the console and the UI share them): ≥ −60 dBm 4, ≥ −70 3, ≥ −80 2, ≥ −90 1, otherwise 0. The thresholds are to be calibrated on the bench (OPEN_QUESTIONS).
+- **Filters are on by default, each can be turned off, and one switch turns them all off.** The pinned target is shown whatever the filters say.
+
+  | Filter | Default | Turn off |
+  |---|---|---|
+  | DFU-looking only (the legacy DFU UUID, the Secure DFU UUID `FE59`, a name containing `DFU`/`dfu`, or ending in `_OTA`; the same heuristic as `dfu_only`) | **on** | `dfu_only=0` · `--any` |
+  | Minimum smoothed RSSI | **−90 dBm** | `min_rssi=off` · `--min-rssi off` |
+  | Name/address substring (case-insensitive) | none (no default value makes sense) | omit it |
+  | **Show everything** | | `all=1` · `--all` (turns off every filter above) |
+
+- Order: the pinned target first, then by smoothed RSSI, strongest first. Each snapshot reports how many devices the filters hid (`hidden`), so "nothing here" can say "12 hidden by filters: show everything".
+
+#### 10.4.4 HTTP API
+
+**`GET /api/v1/ble/monitor`** (authenticated, like everything but `/status`, `/claim` and the UI). It streams one JSON object per line (NDJSON, `Content-Type: application/x-ndjson`, chunked) about once a second. Being a plain `GET` with the normal `Authorization: Bearer` header, it works from the UI's `fetch()` (reading `response.body`) and from `curl -N`, with no second auth scheme. A WebSocket was considered and dropped: browsers can't send the bearer header on one.
+
+- Query: `dfu_only=0|1`, `min_rssi=<-127..0>|off`, `match=<substring>`, `all=1`, `once=1`. Unknown parameters or bad values are a `400`, like unknown body fields elsewhere.
+- **`once=1` (the long-poll form):** counts as a viewer, starts the monitor if needed, waits until at least 1 s of scanning has accumulated (≤ 3 s, or the next tick if the monitor is already running), and returns one snapshot as a normal JSON response. Thanks to the 10 s grace, polling every few seconds keeps the monitor warm. This suits Home Assistant `rest` sensors and scripts that can't read a stream (for example the target's smoothed RSSI as a sensor). It counts against the 2-stream limit only while it waits.
+- The streams are served from their own task through httpd async requests (`httpd_req_async_handler_begin`), never on the single worker, so `/status` and `abort` stay responsive. A client that hasn't accepted a line within 2 s (the socket send timeout) is dropped.
+- Errors: `400` (parameters), `401`/`403 UNCLAIMED`/`429` as for every authenticated route, `409 MONITOR_FULL`. A running job is **not** an error: the stream opens and reports `busy`/`job_scan`.
+
+Snapshot line (pretty-printed here; on the wire it is one line):
+
+```json
+{
+  "seq": 42,                       // increments every tick
+  "uptime_ms": 8123456,
+  "state": "scanning",             // scanning | job_scan | busy | stopped
+  "holder": null,                  // lease holder while busy: "job", "console", "improv", …
+  "reason": null,                  // with state=stopped: "time_limit" | "shutdown"
+  "filters": {"dfu_only": true, "min_rssi": -90, "match": null},
+  "hidden": 12,                    // devices left out by the filters
+  "devices": [
+    {
+      "addr": "C2:4E:11:9A:03:7F", "addr_type": "random", "name": "RAK4631_OTA",
+      "rssi": -61, "avg": -63, "min": -71, "max": -55, "bars": 3,
+      "age_ms": 420, "adverts": 37, "stale": false, "connectable": true,
+      "dfu": "app_buttonless",     // as in the scan result
+      "target": {"id": "attic-repeater", "via": "app"}   // or "mac_plus_one"; null for others
+    }
+  ]
+}
+```
+
+A full line with 64 devices is about 12 KB, built in a PSRAM buffer per tick.
+
+#### 10.4.5 Web UI
+
+- The Target view's **Find the repeater** section becomes the live monitor. It starts when the view opens and pauses when you leave the view or the tab is hidden (`visibilitychange`); a **Pause/Resume** button does the same by hand, and after the 10-minute limit it shows Resume.
+- It reads the stream with `all=1` and filters **in the browser**, so changing a filter is instant and needs no reconnect. The controls and their defaults match the API: **DFU-looking only** (on), **Min signal** (−90 dBm, or Off), a text box for name or address, and **Show everything**, which clears all three. With the filters hiding devices, the list says how many, with a one-click **Show everything**.
+- Rows: bars plus dBm (smoothed; latest and min/max on hover), name, address, "looks like", last seen; stale rows are greyed. Each row has **Use as target**, as today.
+- The pinned target row has a sparkline of the last 60 s of smoothed RSSI, kept in the browser. With no target configured, there's no pinned row.
+- Rows are keyed by address. The sort order is frozen while the pointer is over the table, so **Use as target** doesn't move under the cursor.
+- `busy`/`job_scan` shows as a banner ("Radio busy: flashing" / "Showing what the job's scan sees"), with the last values greyed.
+- Everything a BLE advertiser supplies (names) is inserted as text, as today. Budget: a few KB gzipped, well inside the 40 KB.
+
+#### 10.4.6 Console
+
+```
+monitor [--any] [--min-rssi <dBm>|off] [--match <text>] [--all] [--plain]
+```
+
+- Prints a refreshed table every second until Ctrl-C, like `top`: clear-and-home ANSI escapes, then the table, with the pinned target first and marked. Columns: bars, smoothed dBm, latest, min/max, last seen, type, DFU guess, address, name. A footer shows the active filters, how many devices they hid, and the state (`scanning`, or `radio busy: job DFU_RUNNING`).
+- The filter defaults and switches are the same as the API's (§10.4.3).
+- `--plain` drops the escapes and prints a timestamped block each second, one line per device, for logging or parsing.
+- While it runs, the REPL is busy, as with any long command, so Improv Serial frames aren't answered. A terminal and the installer page can't share the port anyway.
 
 ---
 
