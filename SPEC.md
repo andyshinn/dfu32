@@ -586,7 +586,7 @@ v1 has no MQTT (the later milestone uses `espressif/mqtt`, §4.1). HA can use `r
 A live, once-a-second view of nearby BLE advertisers and their signal strength, like the device picker in Nordic's phone DFU app, on all three interfaces: the console, the web UI and the HTTP API. The RSSI is measured by DFU32's own radio, so it shows the link that will carry the flash, which a phone can't. It has two jobs:
 
 - **Picking a target:** a live list with **Use as target**, replacing the one-shot scan table in the UI.
-- **Placing the box:** the configured target (app MAC, or MAC+1 for the bootloader) is always pinned at the top, whatever the filters say, with a smoothed value and a sparkline. You can move DFU32 or its antenna and watch the number.
+- **Placing the box:** the configured target is always pinned at the top, whatever the filters say, with a smoothed value and a sparkline. You can move DFU32 or its antenna and watch the number. It is **one row that follows the device** across the buttonless jump: samples from the app MAC and from MAC+1 (the bootloader) both feed it, `addr` and `target.via` (`app` / `mac_plus_one`) show whichever was heard last, and the smoothing, min/max and sparkline carry on across the switch (the UI marks the switch on the sparkline). Neither address appears again as an ordinary row.
 
 The one-shot scan (`POST /api/v1/ble/scan`, console `scan`) stays as it is: `tools/dfu32_bench.py` and scripts use it.
 
@@ -600,16 +600,19 @@ The one-shot scan (`POST /api/v1/ble/scan`, console `scan`) stays as it is: `too
 
 #### 10.4.2 Radio, lease and jobs (the monitor yields)
 
-- The monitor holds the device-wide BLE lease (§7) as the **preemptible** holder `monitor`. Any other acquirer (a job, a console flash/probe/scan, `POST /ble/scan`, target `PUT`/`DELETE`, `check`, firmware upload, Improv BLE, factory reset) **takes the lease from it** instead of getting `409`: the monitor stops its scan and hands over. The monitor never causes a `409` for anything else.
+- The monitor holds the device-wide BLE lease (§7) as the **preemptible** holder `monitor`. Any other acquirer that needs the radio or the staging partition (a job, a console flash/probe/scan, `POST /ble/scan`, `check`, firmware upload, Improv BLE, factory reset) **takes the lease from it** instead of getting `409`: the monitor stops its scan and hands over. The monitor never causes a `409` for anything else.
+- **Config writes don't preempt it.** Target `PUT`/`DELETE` (lease holder `config` today) don't use the radio, so when the monitor is the only holder they go ahead without stopping it. They are still refused while a job or another real holder has the lease, as now. So **Use as target**, the UI's most common action here, adds no latency and doesn't flip viewers to `busy`.
+- **The monitor follows target changes.** A target `PUT`/`DELETE` (API or console) tells the monitor, which re-pins at once: entries already in the table for the new app MAC or MAC+1 merge into the pinned row with their history, and the old target's entries become ordinary rows.
 - While another holder has the lease, viewers keep their connection and get snapshots with `"state":"busy"` and `"holder":"job"` (or `console`, `improv`, …). When the lease is free again and viewers remain, the monitor resumes by itself.
-- **Job feed:** while a job is searching for the target (AWAITING_TARGET, the bootloader re-scan after the buttonless jump, the 30 s retry scans), the job's own scan callbacks also update the monitor table, and snapshots say `"state":"job_scan"`. Those scans are passive (see `find_target` in `dfu_ble`), so they bring RSSI but no new names; names already learned keep showing. During DFU_RUNNING proper nothing updates, and entries age out as below.
-- **Scan cycle:** the monitor alternates a 2 s **active** window (for names from scan responses) with a 28 s **passive** window, and it never calls `stop()` during an active window, because esp-nimble-cpp 2.6.0 crashed when an active scan was stopped while the host task was handling a report (the reason `find_target` scans passively). A preemption that arrives during an active window waits for it to end (≤ 2 s). A preemption during a passive window stops at once. Duplicate filtering is off (repeat adverts carry the RSSI updates), and NimBLE keeps no result list of its own (`setMaxResults(0)`): the callbacks update DFU32's table directly.
+- **Job feed:** while a job is searching for the target (AWAITING_TARGET, the bootloader re-scan after the buttonless jump, the 30 s retry scans), the job's own scan callbacks also update the monitor table, and snapshots say `"state":"job_scan"`. Those scans are passive (see `find_target` in `dfu_ble`), so they bring RSSI but no names; names come from the name cache below. A device first seen during a job scan stays nameless until the monitor's next active window. That is a real cost for picking a target, so the UI says "names appear after the job" rather than showing a bare blank. During DFU_RUNNING proper nothing updates, and entries age out as below.
+- **Scan cycle:** the monitor alternates 2 s **active** windows (for names from scan responses) with **passive** windows. Every session, and every resume after a preemption, **starts** with an active window, so the first snapshots already have names. After that the passive window lasts 28 s, or 8 s while any visible entry still has no name (so a new scan-response-only device gets its name within about 10 s). It never calls `stop()` during an active window, because esp-nimble-cpp 2.6.0 crashed when an active scan was stopped while the host task was handling a report (the reason `find_target` scans passively). A preemption that arrives during an active window waits for it to end (≤ 2 s). A preemption during a passive window stops at once. Duplicate filtering is off (repeat adverts carry the RSSI updates), and NimBLE keeps no result list of its own (`setMaxResults(0)`): the callbacks update DFU32's table directly.
 - No LED pattern of its own; WiFi stays up (software coex, as in AWAITING_TARGET).
 
 #### 10.4.3 Device table, smoothing and filters
 
 The table logic is pure and host-tested (`dfu32_core/ble_monitor.hpp`): updates, smoothing, eviction, filters, bars and the JSON line.
 
+- **Name cache:** names live in a separate address → name cache of 128 entries (least recently heard evicted first), kept for the life of the boot and not cleared with the table. An entry that ages out and comes back, or is seen only by a passive job scan, shows its name at once.
 - **64 slots** (in PSRAM). When the table is full, a new device takes the slot of the weakest **stale** entry. If none is stale, it replaces the weakest entry by smoothed RSSI, but only when it is itself stronger; otherwise it is ignored. The target (and MAC+1) is always accepted and never evicted. Names are capped at 31 bytes.
 - Per device: the latest RSSI; a **smoothed** RSSI, a time-weighted EMA with a 5 s time constant (`α = 1 − e^(−Δt/5 s)`), so irregular advert rates don't skew it; **min/max** since the device entered the table; advert count; time since last seen; address and type; name; connectable; the `dfu` guess and target match as in the scan result (§10.1).
 - **Stale:** not seen for 10 s, so it shows greyed out. Dropped after 30 s.
@@ -618,7 +621,7 @@ The table logic is pure and host-tested (`dfu32_core/ble_monitor.hpp`): updates,
 
   | Filter | Default | Turn off |
   |---|---|---|
-  | DFU-looking only (the legacy DFU UUID, the Secure DFU UUID `FE59`, a name containing `DFU`/`dfu`, or ending in `_OTA`; the same heuristic as `dfu_only`) | **on** | `dfu_only=0` · `--any` |
+  | DFU-looking only: the legacy DFU UUID, a name containing `dfu` in any case (Nordic's default `DfuTarg` too), or ending in `_OTA` in any case. This is the same `classify_dfu` (`dfu32_core/api_core`) that the scan's `dfu_only` and `dfu` field already use, so the two agree | **on** | `dfu_only=0` · `--any` |
   | Minimum smoothed RSSI | **−90 dBm** | `min_rssi=off` · `--min-rssi off` |
   | Name/address substring (case-insensitive) | none (no default value makes sense) | omit it |
   | **Show everything** | | `all=1` · `--all` (turns off every filter above) |
@@ -634,6 +637,7 @@ The table logic is pure and host-tested (`dfu32_core/ble_monitor.hpp`): updates,
   - It does **not** count against the 2-stream limit: it holds its socket for 3 s at most. Polls have their own limit of 2 waiting at once, so with 2 streams at most 4 of the server's sockets are busy with the monitor. Polls that arrive together all answer from the same tick, so extra pollers cost no extra scanning; a third gets `409 MONITOR_FULL` with `Retry-After: 1`.
   - Auth works as on every other route, with no special case. A wrong token gets `401` and counts toward the rate limiter (§10.1). A client that gets `429` must wait for its `Retry-After`. While the limiter is active DFU32 checks one token per second, so a misconfigured sensor polling every 5 s or more slows a correct client down but doesn't lock it out. The documented poll interval is ≥ 5 s, and the HA example in `docs/OPERATOR.md` uses 10 s.
 - The streams are served from their own task through httpd async requests (`httpd_req_async_handler_begin`), never on the single worker, so `/status` and `abort` stay responsive. A client that hasn't accepted a line within 2 s (the socket send timeout) is dropped.
+- **Auth lifetime:** a stream is authenticated when it opens. When the token stops being valid (token rotate, unclaim by the button, token clear on the console), every open stream ends at once with `{"state":"stopped","reason":"auth"}` and a waiting `?once=1` gets `401`, so an old token can't keep reading. A reboot or factory reset ends streams with `reason: "shutdown"` where it can send one. The UI treats `auth` like a `401` and returns to sign-in.
 - Errors: `400` (parameters), `401`/`403 UNCLAIMED`/`429` as for every authenticated route, `409 MONITOR_FULL`. A running job is **not** an error: the stream opens and reports `busy`/`job_scan`.
 
 Snapshot line (pretty-printed here; on the wire it is one line):
@@ -644,7 +648,7 @@ Snapshot line (pretty-printed here; on the wire it is one line):
   "uptime_ms": 8123456,
   "state": "scanning",             // scanning | job_scan | busy | stopped
   "holder": null,                  // lease holder while busy: "job", "console", "improv", …
-  "reason": null,                  // with state=stopped: "time_limit" | "shutdown"
+  "reason": null,                  // with state=stopped: "time_limit" | "auth" | "shutdown"
   "filters": {"dfu_only": true, "min_rssi": -90, "match": null},
   "hidden": 12,                    // devices left out by the filters
   "devices": [

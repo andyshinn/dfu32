@@ -176,8 +176,9 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 
 Specified in [SPEC §10.4](../SPEC.md#104-live-ble-signal-monitor-specified-not-yet-implemented). It can land before or after M6.
 
-- `dfu32_core/ble_monitor.hpp`, pure and host-tested: the 64-slot table (eviction, the target pinned and never evicted), the time-weighted EMA, min/max, stale and drop ages, bars, the filters with their defaults and `all`, and the NDJSON line.
-- `components/job`: a preemptible lease holder (`monitor`) that hands over to any other acquirer instead of causing a `409`.
+- `dfu32_core/ble_monitor.hpp`, pure and host-tested: the 64-slot table (eviction, the target pinned and never evicted, one pinned row fed by the app MAC and MAC+1), the 128-entry name cache, the time-weighted EMA, min/max, stale and drop ages, bars, the filters with their defaults and `all`, and the NDJSON line.
+- `components/job`: a preemptible lease holder (`monitor`) that hands over to any other acquirer instead of causing a `409`, except target `PUT`/`DELETE`, which coexist with it; target changes re-pin the monitor; token rotate, unclaim and token clear end open streams.
+- `dfu_ble`: make the "DFU-looking advertisers" log hint in `note()` case-insensitive too, so it agrees with `classify_dfu`.
 - `components/dfu_ble`: the monitor scan (2 s active / 28 s passive cycle, duplicate filter off, no NimBLE result list), viewer counting with the 10 s grace, and the job feed from `find_target`.
 - `components/api`: `GET /api/v1/ble/monitor` (stream and `?once=1`) on its own task with async requests, at most 2 streams, 10 minutes each.
 - UI: the Target view's scan section becomes the live list (filters in the browser, the target pinned with a sparkline, pause when hidden).
