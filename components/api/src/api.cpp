@@ -849,11 +849,20 @@ esp_err_t h_stage_upload(httpd_req_t* req) {
         return send_error(req, "409 Conflict", "BUSY", busy_detail());
     }
 
-    // The flash re-checks the size against the target's limit, so use the
-    // same one here when it is set.
+    // The image isn't bound to the target (any target may flash it), but the
+    // flash will re-check its size against the target's limit and its board
+    // against the target's board (when both are set), so check both now,
+    // before anything is erased, rather than fail later at the repeater.
     TargetConfig t;
     StageMeta meta;
-    if (config::load_target(t) && target_exists(t)) meta.max_app_size = t.max_app_size;
+    if (config::load_target(t) && target_exists(t)) {
+        meta.max_app_size = t.max_app_size;
+        if (!staged_board_ok(q.board, t.board)) {
+            drain(req, remaining);
+            return send_error(req, "422 Unprocessable Content", "BOARD_MISMATCH",
+                              "the image is for board \"" + q.board + "\", the target is \"" + t.board + "\"");
+        }
+    }
     meta.board = q.board;
     meta.manifest_url = q.source;
     meta.staged_at = net::unix_time();
@@ -894,7 +903,7 @@ esp_err_t h_stage_upload(httpd_req_t* req) {
         }
         remaining -= want;
         if (Status st = w.write({buf.data(), want}); !st.ok()) return fail(st);
-        const unsigned decile = static_cast<unsigned>((req->content_len - remaining) * 10 / req->content_len);
+        const auto decile = static_cast<unsigned>(uint64_t{req->content_len - remaining} * 10 / req->content_len);
         if (decile > last_decile && decile < 10) {
             last_decile = decile;
             ESP_LOGI(TAG, "image upload %u%%", decile * 10);

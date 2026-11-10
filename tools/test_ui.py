@@ -23,7 +23,7 @@ class TestBuild(unittest.TestCase):
             dfu32_ui.build(UI, a)
             dfu32_ui.build(UI, b)
             self.assertEqual(a.read_bytes(), b.read_bytes())  # same bytes every build
-            self.assertEqual(gzip.decompress(a.read_bytes()), UI.read_bytes())
+            self.assertEqual(gzip.decompress(a.read_bytes()), dfu32_ui.render(UI))
             mtime = a.stat().st_mtime_ns
             dfu32_ui.build(UI, a)  # unchanged input: file left alone (no needless relink)
             self.assertEqual(a.stat().st_mtime_ns, mtime)
@@ -36,6 +36,40 @@ class TestBuild(unittest.TestCase):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertFalse(dfu32_ui.check(UI, 100))
             self.assertEqual(dfu32_ui.main(["check", str(UI), "--budget", "100"]), 1)
+
+
+class TestInclude(unittest.TestCase):
+    """/* @dfu32-include */ inlines the installer page's DFU package reader."""
+
+    def test_staging_js_is_inlined(self):
+        page = dfu32_ui.render(UI)
+        staging = (ROOT / "web" / "staging.js").read_bytes()
+        self.assertIn(staging.rstrip(b"\n"), page)
+        self.assertNotIn(b"/* @dfu32-include", page)
+        self.assertEqual(dfu32_ui.includes(UI), [ROOT / "web" / "staging.js"])
+
+    def test_exposes_only_what_staging_js_exports(self):
+        html = UI.read_text()
+        names = re.search(r"window\.dfu32Staging = \{([^}]*)\}", html).group(1)
+        exported = set(re.findall(r"^export (?:const|function|class|async function) (\w+)",
+                                  (ROOT / "web" / "staging.js").read_text(), re.M))
+        for name in (n.strip() for n in names.split(",")):
+            self.assertIn(name, exported)
+
+    def test_cmake_rebuilds_when_an_include_changes(self):
+        cmake = (ROOT / "components" / "api" / "CMakeLists.txt").read_text()
+        for inc in dfu32_ui.includes(UI):
+            self.assertIn(inc.relative_to(ROOT).as_posix(), cmake)
+
+    def test_missing_include_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "page.html"
+            src.write_text("<script>\n/* @dfu32-include web/nope.js */\n</script>\n")
+            with self.assertRaises(FileNotFoundError):
+                dfu32_ui.render(src)
+            src.write_text("/* @dfu32-include ../../etc/passwd */\n")
+            with self.assertRaises(FileNotFoundError):
+                dfu32_ui.render(src)
 
 
 class TestPage(unittest.TestCase):

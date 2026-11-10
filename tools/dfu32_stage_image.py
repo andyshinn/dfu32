@@ -206,9 +206,12 @@ def guess_version(file_name: str) -> str:
 def upload_url(device: str, *, dat: bytes, version: str, board: str, sha256: bytes, name: str) -> str:
     """POST /api/v1/staging on `device` (a host name, or a URL)."""
     base = device if "://" in device else "http://" + device
-    # The name is only a label in the header; clipped, so the query stays well
-    # inside DFU32's 1 KB URI limit.
-    query = {"dat": dat.hex(), "version": version, "sha256": sha256.hex(), "name": name[:64]}
+    # The name is only a label in the header: clipped so the query stays well
+    # inside DFU32's 1 KB URI limit, whatever characters it has.
+    name = name[:64]
+    while len(urllib.parse.quote_plus(name)) > 192:
+        name = name[:-1]
+    query = {"dat": dat.hex(), "version": version, "sha256": sha256.hex(), "name": name}
     if board:
         query["board"] = board
     return base.rstrip("/") + "/api/v1/staging?" + urllib.parse.urlencode(query)

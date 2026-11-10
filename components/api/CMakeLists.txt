@@ -11,10 +11,12 @@ idf_build_get_property(python PYTHON)
 set(ui_src "${CMAKE_CURRENT_SOURCE_DIR}/ui/index.html")
 set(ui_tool "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/dfu32_ui.py")
 set(ui_gz "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz")
+# Inlined by the build (/* @dfu32-include ... */): the installer page's DFU package reader.
+set(ui_includes "${CMAKE_CURRENT_SOURCE_DIR}/../../web/staging.js")
 add_custom_command(
     OUTPUT "${ui_gz}"
     COMMAND "${python}" "${ui_tool}" build "${ui_src}" "${ui_gz}"
-    DEPENDS "${ui_src}" "${ui_tool}"
+    DEPENDS "${ui_src}" "${ui_tool}" ${ui_includes}
     COMMENT "Compressing the web UI"
     VERBATIM)
 add_custom_target(dfu32_ui_gz DEPENDS "${ui_gz}")

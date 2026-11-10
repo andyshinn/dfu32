@@ -1,8 +1,9 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: MIT
-     DFU32 web UI (SPEC.md §10.2). One file, no framework, no build step beyond
-     gzip (tools/dfu32_ui.py). Everything goes through the JSON API, and every
-     value from the device or a BLE advertiser is put in the page as text. -->
+     DFU32 web UI (SPEC.md §10.2). One file, no framework. The build
+     (tools/dfu32_ui.py) inlines web/staging.js where it says @dfu32-include,
+     then gzips. Everything goes through the JSON API, and every value from
+     the device or a BLE advertiser is put in the page as text. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -269,78 +270,26 @@ function actionControls(tid, fetches) {
 }
 
 // ---- image (what is staged for the repeater) --------------------------------------------
-// A DFU package is unpacked here, in the browser, as the installer page does over
-// USB. DFU32 gets the .bin as the body and the .dat in the query (POST /staging),
-// and repeats the checks. The image isn't tied to the target.
-const MAX_ZIP = 16 << 20, MAX_ENTRY = 4 << 20;
-let crcT = null;
-function crc32(d) {
-  if (!crcT) { crcT = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c >>> 0; } }
-  let c = ~0; for (const b of d) c = crcT[(c ^ b) & 255] ^ (c >>> 8); return ~c >>> 0;
-}
-// CRC-16/CCITT-FALSE, as the bootloader computes it.
-function crc16(d) { let c = 0xFFFF; for (const b of d) { c = ((c >> 8) | (c << 8)) & 0xFFFF; c ^= b; c ^= (c & 0xFF) >> 4; c ^= (c << 12) & 0xFFFF; c ^= ((c & 0xFF) << 5) & 0xFFFF; } return c; }
-const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-const h4 = (v) => "0x" + v.toString(16).toUpperCase().padStart(4, "0");
-const utf8len = (s) => new TextEncoder().encode(s).length;
-// Reads a zip's directory; read(name) inflates one file (no zip64, no encryption).
-function unzip(bytes) {
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), files = {}, len = bytes.length;
-  let e = -1;
-  for (let i = len - 22; i >= Math.max(0, len - 65557); i--) if (dv.getUint32(i, true) === 0x06054B50) { e = i; break; }
-  if (e < 0) throw new Error("it is not a zip file");
-  let p = dv.getUint32(e + 16, true);
-  for (let n = dv.getUint16(e + 10, true); n > 0; n--) {
-    if (p + 46 > len || dv.getUint32(p, true) !== 0x02014B50) throw new Error("the zip directory is damaged");
-    const nl = dv.getUint16(p + 28, true);
-    files[new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nl))] = { flags: dv.getUint16(p + 8, true), method: dv.getUint16(p + 10, true), crc: dv.getUint32(p + 16, true), csize: dv.getUint32(p + 20, true), usize: dv.getUint32(p + 24, true), local: dv.getUint32(p + 42, true) };
-    p += 46 + nl + dv.getUint16(p + 30, true) + dv.getUint16(p + 32, true);
-  }
-  async function read(name) {
-    const f = files[name];
-    if (!f) throw new Error("the zip has no " + name);
-    if (f.flags & 1) throw new Error(name + " is encrypted");
-    if (f.usize > MAX_ENTRY || f.csize === 0xFFFFFFFF) throw new Error(name + " is too large");
-    if (f.local + 30 > len || dv.getUint32(f.local, true) !== 0x04034B50) throw new Error("the zip is damaged");
-    const start = f.local + 30 + dv.getUint16(f.local + 26, true) + dv.getUint16(f.local + 28, true);
-    if (start + f.csize > len) throw new Error("the zip is truncated");
-    const raw = bytes.subarray(start, start + f.csize);
-    let out;
-    if (f.method === 0) out = raw.slice();
-    else if (f.method === 8) out = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
-    else throw new Error(name + " uses an unsupported compression method (" + f.method + ")");
-    if (out.length !== f.usize || crc32(out) !== f.crc) throw new Error(name + " is damaged (CRC mismatch)");
-    return out;
-  }
-  return { names: Object.keys(files), read };
-}
-// The application .bin and .dat of an adafruit-nrfutil package, checked as DFU32 will.
+// A DFU package is unpacked here, in the browser, by web/staging.js: the installer
+// page's reader (inlined below at build time, tools/dfu32_ui.py). DFU32 gets the
+// .bin as the body and the .dat in the query (POST /staging), and repeats the
+// checks. The image isn't tied to the target.
+// The checks DFU32 repeats, done first so a wrong file is caught before uploading.
 async function loadPackage(file) {
-  if (file.size > MAX_ZIP) throw new Error("it is far too large for a DFU package");
-  const z = unzip(new Uint8Array(await file.arrayBuffer()));
-  let bin, dat;
-  if (z.names.includes("manifest.json")) {
-    let app = null;
-    try { app = JSON.parse(new TextDecoder().decode(await z.read("manifest.json"))).manifest.application; } catch (e) { throw new Error("its manifest.json is not valid"); }
-    if (!app || typeof app.bin_file !== "string" || typeof app.dat_file !== "string") throw new Error("its manifest.json names no application (SoftDevice and bootloader packages are not supported)");
-    bin = app.bin_file; dat = app.dat_file;
-  } else {
-    const b = z.names.filter((n) => n.endsWith(".bin")), d = z.names.filter((n) => n.endsWith(".dat"));
-    if (b.length !== 1 || d.length !== 1) throw new Error("it has no manifest.json and not exactly one .bin and one .dat");
-    bin = b[0]; dat = d[0];
+  const S = window.dfu32Staging;
+  if (!S) throw new Error("this page's package reader didn't load");
+  if (file.size > S.MAX_ZIP) throw new Error("it is far too large for a DFU package");
+  try {
+    const { bin, dat } = await S.loadPackage(new Uint8Array(await file.arrayBuffer()));
+    const pkt = S.validate(bin, dat);
+    return { bin, dat, type: pkt.deviceType, sd: pkt.sdReq.map(S.h4) };
+  } catch (e) {
+    throw new Error(e instanceof S.StageError ? e.message : "it is not a readable zip (" + e.message + ")");
   }
-  const pkg = { bin: await z.read(bin), dat: await z.read(dat) }, d = pkg.dat;
-  const v = new DataView(d.buffer, d.byteOffset, d.byteLength), n = d.length >= 10 ? v.getUint16(8, true) : 0;
-  if (d.length > 64 || !n || d.length !== 12 + 2 * n) throw new Error("its .dat isn't a dfu-version 0.5 init packet (extended and signed ones are not supported)");
-  pkg.type = v.getUint16(0, true);
-  pkg.sd = Array.from({ length: n }, (_, i) => h4(v.getUint16(10 + 2 * i, true)));
-  if (pkg.type !== 0x52 && pkg.type !== 0x54) throw new Error("its .dat is for device type " + h4(pkg.type) + ", not 0x0052 (nRF52) or 0x0054 (nRF54)");
-  if (!pkg.bin.length || pkg.bin.length % 4) throw new Error("its .bin is " + pkg.bin.length + " B, not a multiple of 4");
-  if (crc16(pkg.bin) !== v.getUint16(10 + 2 * n, true)) throw new Error("the CRC16 of its .bin doesn't match its .dat");
-  return pkg;
 }
-// MeshCore assets are <env>-<version>-<commit>.zip; the repeater's `ver` prints <version>-<commit>.
-function guessVersion(name) { const s = name.replace(/^.*[\\/]/, "").replace(/\.zip$/i, ""), m = s.match(/^(.+?)-(v?\d[\w.]*-[0-9a-f]{6,40})$/i); return (m ? m[2] : s).slice(0, 63); }
+// The file name rides in the query as a label: clip it so the request stays well
+// inside DFU32's 1 KB URI limit, whatever characters it has.
+function clipName(n) { n = n.slice(0, 64); while (encodeURIComponent(n).length > 192) n = n.slice(0, -1); return n; }
 function stagedFrom(u) { return /^(upload|usb)(:|$)/.test(u) ? (u.startsWith("usb") ? "USB (installer page)" : "upload") + (u.includes(":") ? ": " + u.slice(u.indexOf(":") + 1) : "") : u; }
 function stagedInfo(s) {
   return dl([["Version", s.version], ["Board", s.board || "not set (any target's)"], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["For target", s.target || "any"], ["From", stagedFrom(s.manifest_url)]]);
@@ -364,19 +313,19 @@ function viewImage() {
     form.replaceChildren(h("p.mute", "Checking " + f.name + "…"));
     let pkg;
     try { pkg = await loadPackage(f); } catch (e) { return form.replaceChildren(note("bad", f.name + " can't be staged: " + e.message + ".")); }
-    const ver = h("input", { value: guessVersion(f.name) });
+    const ver = h("input", { value: window.dfu32Staging.guessVersion(f.name) });
     const board = h("input", { placeholder: (t && t.board) || "rak4631" });
     const prog = h("div");
     const go = h("button.pri", { onclick: () => {
       const v = ver.value.trim(), b = board.value.trim();
-      if (!v || utf8len(v) > 63) return toast("The version must be 1-63 bytes");
+      if (!v || new TextEncoder().encode(v).length > 63) return toast("The version must be 1-63 bytes");
       if (active(status.job)) return toast("Wait for the job to finish");
       if (status.staged && !confirm("Replace the staged image (" + status.staged.version + ")?")) return;
       go.disabled = true;
       const bar = h("i", { style: "width:0" });
       prog.replaceChildren(h("div.bar", bar), h("div.small.mute", "Uploading…"));
       const x = new XMLHttpRequest();
-      x.open("POST", "/api/v1/staging?dat=" + hex(pkg.dat) + "&version=" + encodeURIComponent(v) + (b ? "&board=" + encodeURIComponent(b) : "") + "&name=" + encodeURIComponent(f.name.slice(0, 64)));
+      x.open("POST", "/api/v1/staging?dat=" + window.dfu32Staging.hex(pkg.dat) + "&version=" + encodeURIComponent(v) + (b ? "&board=" + encodeURIComponent(b) : "") + "&name=" + encodeURIComponent(clipName(f.name)));
       x.setRequestHeader("Authorization", "Bearer " + token);
       x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(100 * e.loaded / e.total) + "%"; };
       x.onload = async () => {
@@ -390,7 +339,7 @@ function viewImage() {
       x.onerror = () => { go.disabled = false; prog.replaceChildren(note("bad", "Upload failed (connection lost)")); };
       x.send(new Blob([pkg.bin]));
     } }, "Stage");
-    form.replaceChildren(dl([["File", f.name], ["Image", kB(pkg.bin.length) + " · " + (pkg.type === 0x52 ? "nRF52" : "nRF54") + " (" + h4(pkg.type) + ") · SoftDevice " + pkg.sd.join(", ") + " · CRC OK"]]),
+    form.replaceChildren(dl([["File", f.name], ["Image", kB(pkg.bin.length) + " · " + (pkg.type === 0x52 ? "nRF52" : "nRF54") + " (" + window.dfu32Staging.h4(pkg.type) + ") · SoftDevice " + pkg.sd.join(", ") + " · CRC OK"]]),
       h("div.form", { style: "margin-top:.7rem" }, h("label", "Version (as the repeater's ver prints it)", ver), h("label", "Board (optional: checked against the target's)", board)),
       h("p.mute.small", "Check that it's built for the repeater's board: without a board here, DFU32 can't tell."),
       h("div.row", go), prog);
@@ -580,6 +529,12 @@ async function waitBack(version, prog) {
 }
 
 route();
+</script>
+<script type="module">
+// web/staging.js, inlined by tools/dfu32_ui.py: the reader the installer page uses
+// (tested against tools/dfu32_stage_image.py). Only what the Image view needs is exposed.
+/* @dfu32-include web/staging.js */
+window.dfu32Staging = { MAX_ZIP, StageError, loadPackage, validate, guessVersion, hex, h4 };
 </script>
 </body>
 </html>

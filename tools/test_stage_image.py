@@ -272,6 +272,12 @@ class Upload(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib_redirect():
             si.main(["pkg.zip"])
 
+    def test_query_stays_inside_the_uri_limit(self):
+        # The worst case: the longest .dat, a 63-byte version and a board, a long non-ASCII name.
+        url = si.upload_url("dfu32-ab12.local", dat=b"\xff" * 64, version="é" * 31, board="b" * 31,
+                            sha256=b"\0" * 32, name="ü" * 200 + ".zip")
+        self.assertLess(len(url.split("dfu32-ab12.local", 1)[1]), 1024 - len("POST  HTTP/1.1"))
+
     def test_guess_version(self):
         self.assertEqual(si.guess_version("RAK_4631_repeater-v1.18.0-81dbae5.zip"), "v1.18.0-81dbae5")
         self.assertEqual(si.guess_version("/tmp/firmware.zip"), "firmware")
