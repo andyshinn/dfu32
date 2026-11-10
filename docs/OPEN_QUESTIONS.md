@@ -16,7 +16,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 | Board safety rail | Configured `target.board` must be in `manifest.boards` |
 | Target identity | Configured **app** MAC; DFU32 accepts MAC or MAC+1 that advertises the DFU UUID |
 | BLE picker | `POST /api/v1/ble/scan` plus "Use as target" in the UI |
-| API auth | Bearer token, claim on first use; hash stored in NVS |
+| API auth | Optional bearer token, off until turned on (LAN device); hash stored in NVS |
 | Provisioning | Improv Serial + Improv BLE (BLE only while unprovisioned) |
 | Home Assistant | REST in v1; MQTT discovery in a later milestone |
 | Remote access | LAN/subnet router only; MicroLink dropped |

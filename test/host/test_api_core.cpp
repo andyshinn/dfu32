@@ -27,6 +27,7 @@ TEST_CASE("API: route matching", "[api]") {
     CHECK(match_route("/api/v1/ble/scan").route == Route::BleScan);
     CHECK(match_route("/api/v1/system/reboot").route == Route::Reboot);
     CHECK(match_route("/api/v1/system/token/rotate").route == Route::TokenRotate);
+    CHECK(match_route("/api/v1/system/token/clear").route == Route::TokenClear);
     CHECK(match_route("/api/v1/system/ota").route == Route::SystemOta);
     CHECK(match_route("/api/v1/jobs/current/abort").route == Route::JobAbort);
     CHECK(match_route("/api/v1/debug/fault").route == Route::DebugFault);
@@ -73,6 +74,9 @@ TEST_CASE("API: methods and public routes", "[api]") {
     CHECK(is_public(Route::Claim));
     CHECK_FALSE(is_public(Route::Targets));
     CHECK_FALSE(is_public(Route::TokenRotate));
+    CHECK_FALSE(is_public(Route::TokenClear));
+    CHECK(method_allowed(Route::TokenClear, Method::Post));
+    CHECK_FALSE(method_allowed(Route::TokenClear, Method::Get));
     CHECK_FALSE(is_public(Route::SystemOta));
     CHECK(method_allowed(Route::SystemOta, Method::Post));
     CHECK_FALSE(method_allowed(Route::SystemOta, Method::Get));

@@ -78,7 +78,7 @@ Output decide(const Inputs& in) {
 
 ButtonAction classify_hold(uint32_t held_ms) noexcept {
     if (held_ms >= 15000) return ButtonAction::FactoryReset;
-    if (held_ms >= 5000) return ButtonAction::Unclaim;
+    if (held_ms >= 5000) return ButtonAction::ClearToken;
     if (held_ms >= 2000) return ButtonAction::ImprovWindow;
     return ButtonAction::None;
 }

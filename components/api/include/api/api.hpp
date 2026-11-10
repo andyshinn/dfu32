@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
 // HTTP API (SPEC.md §10.1) on esp_http_server, port 80. JSON everywhere;
-// bearer-token auth with claim-on-first-use (§9.3). Route matching, request
-// parsing and auth helpers are pure (dfu32_core/api_core.hpp).
+// optional bearer-token auth (§9.3): open until a token is set. Route
+// matching, request parsing and auth helpers are pure (dfu32_core/api_core.hpp).
 #pragma once
 
 #include <string>
@@ -13,11 +13,12 @@ namespace dfu32::api {
 /// job::init(). Returns false if the server can't start.
 bool start();
 
-/// Issues a new API token (replacing any old one) and returns it; "" on
-/// failure. For the console's `token` command while there is no button flow.
+/// Issues a new API token (replacing any old one, and turning token auth on)
+/// and returns it; "" on failure. For the console's `token` command.
 std::string rotate_token();
 
-/// Back to unclaimed: the next POST /api/v1/claim issues a token.
-bool unclaim();
+/// Turns token auth off (back to an open API); POST /api/v1/claim turns it
+/// on again with a new token.
+bool clear_token();
 
 }  // namespace dfu32::api

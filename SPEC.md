@@ -108,7 +108,7 @@ Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top
 
 The Feather pins are verified against Adafruit's board definitions: arduino-esp32 `variants/adafruit_feather_esp32s3/pins_arduino.h` and `variants/adafruit_feather_esp32_v2/pins_arduino.h`, plus CircuitPython `ports/espressif/boards/adafruit_feather_esp32s3_4mbflash_2mbpsram/`. The NeoPixel power pin must be driven HIGH before the LED is used.
 
-The RAK11200 pins come from RAK's `WisCore_RAK11200_Board` variant (as carried in meshtastic/firmware `variants/esp32/rak11200/pins_arduino.h`): LED1 green on GPIO12, LED2 blue on GPIO2. The attention LED is LED2: GPIO2 is a strapping pin only in combination with GPIO0 low (download mode), so driving it high can't affect a normal boot. GPIO12 is the MTDI strapping pin that selects the flash voltage; if it were still driven high when the chip samples it across a reset, the WROVER-B's 3.3 V flash could get 1.8 V, so the firmware never drives it. The board has no auto-reset circuit, so flashing needs BOOT0 held low at reset. It has no NeoPixel, so its only indicator is the attention LED (§13.4). With no button, a lost token can only be recovered by reflashing with an NVS erase; `token/rotate` needs the current token (§9.3).
+The RAK11200 pins come from RAK's `WisCore_RAK11200_Board` variant (as carried in meshtastic/firmware `variants/esp32/rak11200/pins_arduino.h`): LED1 green on GPIO12, LED2 blue on GPIO2. The attention LED is LED2: GPIO2 is a strapping pin only in combination with GPIO0 low (download mode), so driving it high can't affect a normal boot. GPIO12 is the MTDI strapping pin that selects the flash voltage; if it were still driven high when the chip samples it across a reset, the WROVER-B's 3.3 V flash could get 1.8 V, so the firmware never drives it. The board has no auto-reset circuit, so flashing needs BOOT0 held low at reset. It has no NeoPixel, so its only indicator is the attention LED (§13.4). With no button, a lost token is cleared with `token clear` on the USB console or by reflashing with an NVS erase; `token/clear` and `token/rotate` over HTTP need the current token (§9.3).
 
 Both button pins have quirks:
 - Feather S3 BOOT (GPIO0) is a strapping pin. A long-press is only interpreted once the app is running; holding it at reset enters the ROM download mode, as normal.
@@ -408,7 +408,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | Key | Type | Notes |
 |---|---|---|
 | `hostname` | str | Default `dfu32-XXXX` (last 2 bytes of MAC). Also the mDNS name. |
-| `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means unclaimed. |
+| `token_sha256` | blob[32] | Only the **hash** of the API token is stored. Empty means no token is set, so the API is open (§9.3). |
 | `ntp_server` | str | Default `pool.ntp.org` |
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Default 0 (WiFi stays on; bench comparison in §7.1). Per-request override: `wifi_off`. |
 | `dfu_deadline` | u32 | Cap on the §7.3 run deadline (`dfu_deadline_max_s`), default 1200, 120–7200. |
@@ -444,16 +444,20 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 - DFU32 joins WPA2-Personal and open networks; WPA2/WPA3 transition-mode networks connect over WPA2. WPA3-only and Enterprise networks aren't supported (left out to fit the 4 MB layout, §12.1).
 - Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
 
-### 9.3 Token bootstrap (decided: claim on first use)
+### 9.3 API token (decided: optional, off until turned on)
 
-- While unclaimed, `POST /api/v1/claim` returns a newly generated token **once**: 32 bytes from `esp_fill_random` with the radio on, encoded base64url. DFU32 stores its SHA-256.
-- While unclaimed, the mutating endpoints are disabled; only `GET /status`, `GET /`, and `/claim` work.
+DFU32 is a LAN device, so token auth is opt-in. Whether it is on is whether a token is set; `/status` reports it as `claimed`.
+
+- **No token set** (the default, and after a factory reset): every endpoint works without an `Authorization` header. Anyone who can reach DFU32 on the network can use it.
+- **Turning it on:** `POST /api/v1/claim` (or **Require a token** in the UI) returns a newly generated token **once**: 32 bytes from `esp_fill_random` with the radio on, encoded base64url. DFU32 stores its SHA-256. From then on everything but `GET /status`, `GET /` and `/claim` needs `Authorization: Bearer <token>`; `/claim` answers `409 ALREADY_CLAIMED`.
+- **Turning it off:** `POST /api/v1/system/token/clear` (authenticated, or **Turn off token** in the UI), `token clear` on the console, or the button's 5–15 s hold. Any of them erases `token_sha256` and nothing else.
+- Since a token set by someone else locks the owner out, the console and the button can always turn it off without knowing it.
 - Button handling uses `espressif/button` (§4.1). What happens depends on how long the button was held when it is **released**, and the NeoPixel shows which action a release would trigger (both read the same press timestamp, so they always agree):
   - **2–5 s** (amber slow blink): open Improv BLE for 5 minutes (§9.2).
-  - **Unclaim, 5–15 s** (amber fast blink): clears `token_sha256` without touching anything else.
+  - **Clear the token, 5–15 s** (amber fast blink): clears `token_sha256` without touching anything else, so the API is open again.
   - **Factory reset, 15 s or more** (solid amber): erases the `dfu32` namespace and WiFi credentials, then reboots. The staging partition and run log are kept. It is refused while a job, a console flash/probe or a scan holds the BLE lease (a reset mid-flash would leave the target erased), and it doesn't reboot unless both erasures succeeded.
 - The button is `CONFIG_DFU32_BUTTON_GPIO` (BOOT on the Feather S3 and N16R8, the user button on GPIO38 on the Feather V2).
-- On boards with no button, use `POST /api/v1/system/token/rotate` while authenticated, or reflash with an NVS erase.
+- On boards with no button, use `token clear` on the console, `POST /api/v1/system/token/clear` or `/rotate` while authenticated, or reflash with an NVS erase.
 
 ---
 
@@ -469,7 +473,7 @@ A static page on GitHub Pages flashes DFU32 and sets its WiFi in one session. It
 - **Partition layout is part of the update contract.** Settings survive an update only if `nvs`, `runlog` and `staging` keep their offsets and sizes. A release that moves or resizes any of them is breaking and needs an erase: its release notes and the page must say so. `tools/check_partitions.py --baseline partitions/baseline.json` checks those three partitions per table against the committed baseline, so CI fails on an accidental change. A deliberate change updates the baseline in the same PR (`--write-baseline`) and sets that table's `erase_notice`, which reaches the page through the manifest. Clear it again once devices on the old layout are no longer expected to update from the page.
 - **Versions:** the site's own build is the default, and **Choose a version** also offers the newest 20 published releases (pre-releases included, labelled). The pages job downloads each release's `dfu32-<board>-merged.bin` assets (server side: the page can't, for want of CORS) and `tools/dfu32_web_versions.py` splits each back into the four parts, found the way the ROM and ESP-IDF find them: the bootloader at the chip's offset (`0x1000` on ESP32 and S2, `0x0` otherwise, checked against the image header's chip id), the partition table at `0x8000`, and otadata and the first app partition (factory, else `ota_0`) from that table; the bootloader and app are cut to the lengths their image headers give. They go to `fw/<version>/<board>/` with a `manifest.json` beside them, and `versions.json` lists every version (the site's build first, then releases newest first) with its channel (`main`, `release`, `pre-release`), tag and manifest per board. The version is the app's own (`esp_app_desc_t`), as `/api/v1/status` reports it. An image that isn't DFU32 or carries another board's tag is left out with a warning, never failing the deploy. A release whose `nvs`, `runlog` or `staging` sits elsewhere than in the site's build for the same board gets a `dfu32_erase_notice`. With no board chosen, the board-less manifest carries the chosen version, and `checkSameFirmware` fills it from that version's manifest for the reported board, which the page fetches when the version is chosen. A version with no build for the chosen board is greyed out. Nothing about the version is stored.
 - **Custom build:** to try an unreleased build (a pull request's) from the page, **Custom build from a .zip…** takes the `dfu32-<board>` artifact of a CI run, or any zip of an IDF build directory. `web/custom-build.js` (loaded only then) does what `dfu32_web_manifest.py` does, in the browser: it finds the single `flasher_args.json`, reads the board from `sdkconfig` (`CONFIG_DFU32_BOARD_NAME`) and the version from `project_description.json` (else the app), checks the app's project and board tag, and lists the same four parts. The button gets a `data:` manifest whose part paths are `blob:` URLs of the parts, marked `dfu32_custom` and `dfu32_board`. It is never swapped for a published build: if the device reports another board, the override empties its builds, so ESP Web Tools refuses to install it, and the page says why. A debug build (`CONFIG_DFU32_DEBUG_ENDPOINTS`) is allowed with a warning. The page compares the build's `nvs`, `runlog` and `staging` with the site's build for that board and shows an erase notice if they moved. `tools/test_custom_build_js.py` runs it under Node against the Python tool.
-- **Provisioning:** after flashing, ESP Web Tools resets the board and talks Improv Serial (§9.2). The user enters the SSID and passphrase, and "Visit device" opens `http://<ip>/` on the claim screen (§9.3).
+- **Provisioning:** after flashing, ESP Web Tools resets the board and talks Improv Serial (§9.2). The user enters the SSID and passphrase, and "Visit device" opens `http://<ip>/`, ready to use: no token is set until the operator turns one on (§9.3).
 - **Staging over USB:** the page can also stage an nRF52 image with no artifact server. When Improv reports `DFU32`, `web/stage-dialog.js` adds **Stage nRF52 image** to ESP Web Tools' device dialog, before "Logs & Console". ESP Web Tools has no API for extra items, so the page inserts one into the dialog's open shadow root, and draws its own dialog with the same `ew-*` elements, which ESP Web Tools has registered by then. Both are internals of the pinned version, so `fetch_esp_web_tools.py` refuses a bundle that no longer defines those elements or has no "Logs & Console" item spelled the way the page finds it, and the page logs a console warning if it still can't place the item. The item closes ESP Web Tools' dialog and reuses the serial port it was granted. The operator picks an adafruit-nrfutil DFU `.zip`. `web/staging.js` unzips it (the browser's `DecompressionStream`), runs the checks `dfu32_stage_image.py` runs (`.dat` layout, device type, word alignment, size, CRC16) and builds the §8 image. `tools/test_staging_js.py` runs it under Node and compares its output byte for byte with the Python tool's. The header's `board` is left empty, so DFU32 doesn't check it against the target's (§8): as with flashing a repeater any other way, choosing the right package is the operator's job. `version` defaults to `<version>-<commit>` from a MeshCore asset name, `manifest_url` records `usb:<zip name>`, and `manifest_sha256` stays zero. esptool-js (pinned and vendored by the same tool, to `vendor/esptool-js-<version>/`) resets the ESP32 into its ROM bootloader at 115200 like ESP Web Tools, reads the partition table at `0x8000` to find the `staging` partition (data, subtype `0x40`) instead of assuming a layout, writes the image there with no erase-all, checks the stub's MD5 of the written region and resets the ESP32. Nothing else on flash changes. Resetting the ESP32 ends any running job, so the page says not to stage during a flash; a reset mid-transfer is recorded as `ABORTED_BY_REBOOT` (§7.3). Then **Flash** with `source=staged` re-verifies the image as usual (§8).
 - **Publishing:** a `pages` job in `ci.yml`:
   - **Triggers:** `push` to `main`, `release: published` and `workflow_dispatch`. Each run builds the firmware matrix (a release run from the tag), and `pages` (which `needs` the host and firmware jobs) downloads that run's artifacts. Nothing is reused from an earlier run.
@@ -485,19 +489,19 @@ A static page on GitHub Pages flashes DFU32 and sets its WiFi in one session. It
 
 ### 10.1 HTTP API
 
-The API is served by `esp_http_server` on port 80, with an mDNS name of `dfu32-XXXX.local`. JSON everywhere. Auth is `Authorization: Bearer <token>`, compared in constant time.
+The API is served by `esp_http_server` on port 80, with an mDNS name of `dfu32-XXXX.local`. JSON everywhere. Auth is optional (§9.3). With no token set, every endpoint is open. Once one is set, auth is `Authorization: Bearer <token>`, compared in constant time.
 
-**Unauthenticated:**
+**Never needs a token:**
 - `GET /api/v1/status` (non-sensitive fields only)
 - `GET /` and the static UI assets
-- `POST /api/v1/claim`, only while unclaimed
+- `POST /api/v1/claim`, which sets a token (`409` once one is set)
 
-**Authenticated:** everything else.
+**Needs the token while one is set:** everything else.
 
 After 5 failed auth attempts within a minute, for the next 60 s DFU32 checks at most one token per second; other authenticated requests get `429` with `Retry-After: 1` at once. Nothing sleeps on the server's single worker thread, so `/status` stays responsive.
 
 Conventions (M3b):
-- Errors are `{"error":"<CODE>","detail":"…"}` with `400` (bad body: unknown fields are refused), `401` (missing or wrong token), `403 UNCLAIMED`, `404`, `405`, `408` (body stalled for more than about 10 s), `409` (`BUSY`, `TARGET_LIMIT`, `ALREADY_CLAIMED`, `NO_JOB`), `411` (chunked bodies aren't supported: send `Content-Length`), `413` (bodies are capped at 4 KB), `429 RATE_LIMITED`, `422` / `502` (a `check` that fails: §13.3 code, `502` for `HTTP_ERROR`), `503` (`check` without WiFi).
+- Errors are `{"error":"<CODE>","detail":"…"}` with `400` (bad body: unknown fields are refused), `401` (missing or wrong token, only while a token is set), `404`, `405`, `408` (body stalled for more than about 10 s), `409` (`BUSY`, `TARGET_LIMIT`, `ALREADY_CLAIMED`, `NO_JOB`), `411` (chunked bodies aren't supported: send `Content-Length`), `413` (bodies are capped at 4 KB), `429 RATE_LIMITED`, `422` / `502` (a `check` that fails: §13.3 code, `502` for `HTTP_ERROR`), `503` (`check` without WiFi).
 - Bodies are optional: no body means all defaults.
 - `check` and `ble/scan` can take seconds, so they run on a separate task (httpd async requests), one at a time (`409` while one is running); the server keeps answering `/status` and `abort`. Both hold the device-wide lease while they work, so `check` never compares against a staging header a stage job is rewriting.
 - Target `PUT`/`DELETE` hold the lease too: `409` while a job, a console flash/probe or a scan is running.
@@ -506,7 +510,7 @@ Conventions (M3b):
 - `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.
 - `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
 - `POST /system/reboot` is refused during a job unless `?force=1`.
-- `GET /` serves the web UI (§10.2), also while unclaimed.
+- `GET /` serves the web UI (§10.2), token or not.
 - `GET /status` is public, so it leaves out the WiFi SSID and the running OTA partition; `GET /config` (authenticated) reports them as `wifi_ssid` and `partition`.
 - `POST /system/ota` (M4b) takes `dfu32.bin` as the raw body with `Content-Length` (not the merged image). It runs on the slow-request task, holds the BLE lease (`409` during a job), and:
   - checks the first 328 bytes before writing anything (`dfu32_core/ota_image.hpp`, host-tested): the ESP image magic, the chip ID, the project name (`dfu32`), and DFU32's **board tag**, a 40-byte custom app descriptor (`.rodata_custom_desc`, right after `esp_app_desc_t`) naming the board profile. Another board's build (same chip, different flash layout or pins) or an untagged image is refused with `422 IMAGE_REJECTED` unless `?force=1`;
@@ -518,7 +522,7 @@ Conventions (M3b):
 | Method & path | Purpose |
 |---|---|
 | `GET /api/v1/status` | Device state, job state, phase, progress, target summaries, staged image summary, WiFi RSSI, uptime, DFU32 version |
-| `POST /api/v1/claim` | → `{"token":"…"}` (once) |
+| `POST /api/v1/claim` | Turn token auth on → `{"token":"…"}` (once) |
 | `GET /api/v1/targets` · `GET /api/v1/targets/{id}` | Target config and the last result |
 | `PUT /api/v1/targets/{id}` | Create or update a target. `409` if creating a 2nd target in v1. |
 | `DELETE /api/v1/targets/{id}` | |
@@ -534,6 +538,7 @@ Conventions (M3b):
 | `GET /api/v1/config` · `PUT /api/v1/config` | Device-level settings (§9.1) |
 | `POST /api/v1/system/ota` | Upload DFU32 firmware (raw body, `esp_ota_*`). Rollback-protected. |
 | `POST /api/v1/system/reboot` · `POST /api/v1/system/token/rotate` | |
+| `POST /api/v1/system/token/clear` | Turn token auth off → `{"claimed":false}` |
 
 Scan result entry (this backs the UI's "pick a target" tool):
 
@@ -567,17 +572,17 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 
 ### 10.2 Web UI (decided: full config UI)
 
-A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget of ≤ 40 KB. It uses the same JSON API. The token is kept in `localStorage`, with a claim screen when the device is unclaimed. Views:
+A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget of ≤ 40 KB. It uses the same JSON API. When a token is set, the browser keeps it in `localStorage` and signs in once; with none set, the UI opens straight to Status. Views:
 
 - **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort.
 - **Target:** config form, plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
 - **Runs:** history table, with run detail and log tail.
 - **Logs:** live tail by polling `/logs?since=`.
-- **System:** WiFi info, hostname, DFU32 firmware upload, reboot, token rotate, tuning defaults.
+- **System:** WiFi info, hostname, DFU32 firmware upload, reboot, tuning defaults, and Access: require a token, or rotate it and turn it off.
 
 The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
 
-Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a claim screen (shows the new token once) and a sign-in screen for a claimed device; a `401` returns to sign-in. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
+Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a sign-in screen, used only while the device requires a token; a `401` returns to sign-in. A new token (from **Require a token** or **Rotate token**) is shown once under Access. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
 
 ### 10.3 Home Assistant
 
@@ -639,8 +644,8 @@ The table logic is pure and host-tested (`dfu32_core/ble_monitor.hpp`): updates,
   - It does **not** count against the 2-stream limit: it holds its socket for 3 s at most. Polls have their own limit of 2 waiting at once, so with 2 streams at most 4 of the server's sockets are busy with the monitor. Polls that arrive together all answer from the same tick, so extra pollers cost no extra scanning; a third gets `409 MONITOR_FULL` with `Retry-After: 1`.
   - Auth works as on every other route, with no special case. A wrong token gets `401` and counts toward the rate limiter (§10.1). A client that gets `429` must wait for its `Retry-After`. While the limiter is active DFU32 checks one token per second, so a misconfigured sensor polling every 5 s or more slows a correct client down but doesn't lock it out. The documented poll interval is ≥ 5 s, and the HA example in `docs/OPERATOR.md` uses 10 s.
 - The streams are served from their own task through httpd async requests (`httpd_req_async_handler_begin`), never on the single worker, so `/status` and `abort` stay responsive. A client that hasn't accepted a line within 2 s (the socket send timeout) is dropped.
-- **Auth lifetime:** a stream is authenticated when it opens. When the token stops being valid (token rotate, unclaim by the button, token clear on the console), every open stream ends at once with `{"state":"stopped","reason":"auth"}` and a waiting `?once=1` gets `401`, so an old token can't keep reading. A reboot or factory reset ends streams with `reason: "shutdown"` where it can send one. The UI treats `auth` like a `401` and returns to sign-in.
-- Errors: `400` (parameters), `401`/`403 UNCLAIMED`/`429` as for every authenticated route, `409 MONITOR_FULL`. A running job is **not** an error: the stream opens and reports `busy`/`job_scan`.
+- **Auth lifetime:** a stream is authenticated when it opens. When the credential changes (a token set with `POST /claim`, rotated, or cleared over HTTP, on the console or with the button), every open stream ends at once with `{"state":"stopped","reason":"auth"}` and a waiting `?once=1` gets `401`, so an old token can't keep reading. A reboot or factory reset ends streams with `reason: "shutdown"` where it can send one. The UI treats `auth` like a `401` and returns to sign-in.
+- Errors: `400` (parameters), `401`/`429` as for every authenticated route, `409 MONITOR_FULL`. A running job is **not** an error: the stream opens and reports `busy`/`job_scan`.
 
 Snapshot line (pretty-printed here; on the wire it is one line):
 

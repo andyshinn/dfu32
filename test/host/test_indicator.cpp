@@ -126,8 +126,8 @@ TEST_CASE("Indicator: button holds", "[indicator]") {
     CHECK(classify_hold(1999) == ButtonAction::None);
     CHECK(classify_hold(2000) == ButtonAction::ImprovWindow);
     CHECK(classify_hold(4999) == ButtonAction::ImprovWindow);
-    CHECK(classify_hold(5000) == ButtonAction::Unclaim);
-    CHECK(classify_hold(14999) == ButtonAction::Unclaim);
+    CHECK(classify_hold(5000) == ButtonAction::ClearToken);
+    CHECK(classify_hold(14999) == ButtonAction::ClearToken);
     CHECK(classify_hold(15000) == ButtonAction::FactoryReset);
     CHECK(hold_level(1500) == 0);
     CHECK(hold_level(2500) == 2);

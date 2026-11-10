@@ -35,7 +35,7 @@ menu "DFU32"
             range -1 48
             default -1
             help
-                Long-press 5 s unclaims the API token, 15 s factory-resets (SPEC.md §9.3).
+                Long-press 5 s clears the API token (open API), 15 s factory-resets (SPEC.md §9.3).
 
     endmenu
 
