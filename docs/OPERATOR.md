@@ -22,7 +22,9 @@ The first visit to the web UI shows **Claim this device**. Claiming creates the 
 
 Lost the token? Hold the button 5–15 seconds (amber fast blink) to unclaim, or run `token rotate` on the console.
 
-## 3. Serve the firmware
+## 3. Serve the firmware (optional)
+
+You can skip this section: **Image** in the web UI takes a DFU `.zip` (such as a MeshCore release asset) straight from your browser (§5). A server is for when DFU32 should fetch images itself, so a release can be staged without anyone uploading it.
 
 On the computer that will host the firmware, package a MeshCore release:
 
@@ -42,19 +44,24 @@ In the web UI, open **Target**:
 
 1. On the repeater, run `start ota` (over USB, or remotely: see §6). Its reply includes its MAC, and it starts advertising for a few minutes.
 2. In **Find the repeater**, press **Scan**. Your repeater shows as *app buttonless*. Press **Use as target**.
-3. Fill in an id (for example `attic-repeater`), the board name from step 3 and the manifest URL (`http://<computer>:8000/rak4631/manifest.json`), then **Save**.
+3. Optionally fill in an id (for example `attic-repeater`; blank means `target`), a name, and the board name. With a server (§3), add the manifest URL (`http://<computer>:8000/rak4631/manifest.json`) and the board name from §3. Then **Save**. Only the MAC is needed to flash an uploaded image.
 
 The scan put the repeater into OTA mode. Reboot it (or wait for it to time out) before you flash, so the flash below starts from a repeater in normal operation.
 
 ## 5. Update a repeater
 
-On **Status**:
+First get the image onto DFU32 (it is **staged**: kept in DFU32's flash until replaced):
 
-1. **Check** fetches the manifest and shows the version, whether it suits the board, and whether it is newer than what DFU32 last flashed. It changes nothing.
-2. **Stage** (optional) downloads and verifies the image now, so a bad download shows up before the repeater is touched. With the ESP32 on USB you can instead stage from [dfu32.app](https://dfu32.app/) with no server: **Connect device**, **Stage nRF52 image**, pick the DFU `.zip`. Then use *Flash from: staged image*.
-3. **Flash** arms DFU32: it fetches or reuses the staged image, checks it, and waits up to 10 minutes for the repeater.
-4. Run `start ota` on the repeater (§6). DFU32 sees it, switches it into its bootloader and sends the image. The progress bar fills; the NeoPixel goes from cyan blinking to magenta getting brighter.
-5. **Succeeded** means the repeater has rebooted into the new firmware. Its version shows as **Last flashed**. Run `ver` on the repeater to confirm.
+- **Upload it:** on **Image**, choose (or drop) the DFU `.zip`. Your browser unpacks it and checks it, you confirm the version (taken from a MeshCore file name), and **Stage** sends it to DFU32, which checks it again and writes it. The image isn't tied to the target. Without a board on it, DFU32 can't tell if it suits the repeater, so pick the right zip (or fill in **Board**, which DFU32 then compares with the target's). From a script: `python3 tools/dfu32_stage_image.py <zip> --upload dfu32-xxxx.local --token <token>`.
+- **Or over USB**, with no network: on [dfu32.app](https://dfu32.app/), **Connect device**, **Stage nRF52 image**, pick the zip.
+- **Or from your server** (§3), on **Status**: **Check** fetches the manifest and shows the version, whether it suits the board, and whether it is newer than what DFU32 last flashed (it changes nothing). **Stage** downloads and verifies the image. Flashing with *Flash from: manifest* does both itself.
+
+**Image** shows what is staged, re-checks it (**Verify**) and clears it. Then, on **Status**:
+
+1. *Flash from: staged image* (the only choice when the target has no manifest URL), or *manifest* to fetch first.
+2. **Flash** arms DFU32: it checks the image and waits up to 10 minutes for the repeater.
+3. Run `start ota` on the repeater (§6). DFU32 sees it, switches it into its bootloader and sends the image. The progress bar fills; the NeoPixel goes from cyan blinking to magenta getting brighter.
+4. **Succeeded** means the repeater has rebooted into the new firmware. Its version shows as **Last flashed**. Run `ver` on the repeater to confirm.
 
 Things to know:
 

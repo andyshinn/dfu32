@@ -407,7 +407,8 @@ int cmd_staged(int, char**) {
         return 1;
     }
     if (img.header_status() != dfu::StagingHeaderError::Ok) {
-        std::printf("Nothing staged (%s). Use `stage`, or write one with tools/dfu32_stage_image.py.\n",
+        std::printf("Nothing staged (%s). Use `stage`, upload one from the web UI's Image page, or write one with "
+                    "tools/dfu32_stage_image.py.\n",
                     dfu::to_string(img.header_status()));
         return 1;
     }
@@ -417,6 +418,8 @@ int cmd_staged(int, char**) {
     std::printf("  bin        %" PRIu32 " B  sha256 %s\n", h.bin_size, sha);
     std::printf("  board      \"%s\"  version \"%s\"  target \"%s\"\n", h.board.c_str(), h.version.c_str(),
                 h.target_id.c_str());
+    // A manifest URL, or where the image came from: "upload:<file>" (web UI / API), "usb:<file>" (installer page).
+    if (!h.manifest_url.empty()) std::printf("  from       %s\n", h.manifest_url.c_str());
     std::printf("Verifying...\n");
     const auto v = img.verify();
     if (v.init.sd_req_count) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
-// Writes a manifest's image into the raw staging partition (SPEC.md §8):
+// Writes an image into the raw staging partition (SPEC.md §8), from a
+// manifest (fetched over HTTP) or uploaded to DFU32 (POST /api/v1/staging):
 //
 //   1. prechecks on the manifest and the already-downloaded .dat (§7.2);
 //      nothing is erased if these fail, so the previous image survives
@@ -9,6 +10,10 @@
 //      hashing as it arrives
 //   4. read back and re-hash; CRC16 against the .dat
 //   5. write the header last, so a valid header always means a valid image
+//
+// An upload has no manifest, so nothing vouches for the .bin's SHA-256 up
+// front (unless the uploader gives one): the .dat's CRC16 over the .bin is the
+// end-to-end check, and the header records the SHA-256 of what arrived.
 //
 // Pure C++ over two small interfaces so it runs in host tests; the firmware
 // supplies an esp_partition region and a PSA SHA-256.
@@ -62,6 +67,20 @@ struct StageMeta {
 Status precheck_image(const Manifest& m, std::span<const uint8_t> dat, const StageMeta& meta, uint32_t region_size,
                       ISha256& sha, dfu::InitPacket& init);
 
+/// An image uploaded without a manifest (POST /api/v1/staging).
+struct UploadInfo {
+    uint32_t bin_size = 0;      // the request's Content-Length
+    std::string version;        // 1..63 bytes, as the repeater's `ver` prints it
+    bool has_sha256 = false;    // the uploader gave the .bin's SHA-256: it must match
+    Sha256 bin_sha256{};
+};
+
+/// The §7.2 checks an upload allows before anything is erased: version, the
+/// .dat's size, layout and device type, and the .bin's size and alignment
+/// against the target limit and the staging capacity. Fills `init`.
+Status precheck_upload(std::span<const uint8_t> dat, const UploadInfo& up, const StageMeta& meta,
+                       uint32_t region_size, dfu::InitPacket& init);
+
 /// The staged header describes exactly this manifest's .bin and .dat.
 bool same_image(const Manifest& m, const dfu::StagingHeader& staged) noexcept;
 
@@ -79,6 +98,8 @@ public:
 
     /// Prechecks, then erases the header sector.
     Status begin(const Manifest& m, std::span<const uint8_t> dat, const StageMeta& meta);
+    /// The same for an upload: precheck_upload(), then erases the header sector.
+    Status begin_upload(std::span<const uint8_t> dat, const UploadInfo& up, const StageMeta& meta);
     /// Appends .bin bytes. SIZE_MISMATCH if the body runs past manifest.bin.size.
     Status write(std::span<const uint8_t> chunk);
     /// Size and hash of what arrived, read-back verification, CRC16, header.
@@ -94,6 +115,7 @@ public:
 private:
     enum class State : uint8_t { Idle, Writing, Done, Failed };
     Status fail(Status s);
+    Status start(std::span<const uint8_t> dat);  // fills the shared header fields, erases the header
 
     IFlashRegion& region_;
     ISha256& sha_;
@@ -101,6 +123,7 @@ private:
     uint32_t written_ = 0;
     uint32_t erased_to_ = 0;  // data bytes erased so far (sector multiple)
     bool invalidated_ = false;
+    bool sha_known_ = true;   // header_.bin_sha256 was given up front (manifest, or the uploader)
     dfu::InitPacket init_{};
     dfu::StagingHeader header_{};
 };

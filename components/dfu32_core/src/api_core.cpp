@@ -5,6 +5,7 @@
 #include <initializer_list>
 
 #include "dfu32_core/json.hpp"
+#include "dfu32_core/manifest.hpp"
 #include "dfu32_core/target_config.hpp"
 
 namespace dfu32::api {
@@ -87,7 +88,7 @@ bool method_allowed(Route r, Method m) noexcept {
         case Route::Run:
         case Route::Logs: return m == Method::Get;
         case Route::Target: return m == Method::Get || m == Method::Put || m == Method::Delete;
-        case Route::Staging: return m == Method::Get || m == Method::Delete;
+        case Route::Staging: return m == Method::Get || m == Method::Post || m == Method::Delete;
         case Route::Config: return m == Method::Get || m == Method::Put;
         case Route::Claim:
         case Route::TargetCheck:
@@ -117,6 +118,87 @@ std::string_view query_param(std::string_view uri, std::string_view key) {
         if (amp == std::string_view::npos) break;
         rest.remove_prefix(amp + 1);
     }
+    return {};
+}
+
+namespace {
+
+int hex_digit(char c) noexcept {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+bool has_control(std::string_view s) noexcept {
+    for (const char c : s) {
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) return true;
+    }
+    return false;
+}
+
+/// At most `max` bytes, never splitting a UTF-8 sequence.
+std::string clip_utf8(std::string s, size_t max) {
+    if (s.size() <= max) return s;
+    size_t n = max;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+    s.resize(n);
+    return s;
+}
+
+}  // namespace
+
+bool query_text(std::string_view uri, std::string_view key, std::string& out) {
+    out.clear();
+    const std::string_view raw = query_param(uri, key);
+    out.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == '+') {
+            out += ' ';
+        } else if (raw[i] == '%') {
+            if (i + 2 >= raw.size()) return false;  // needs two hex digits after it
+            const int hi = hex_digit(raw[i + 1]), lo = hex_digit(raw[i + 2]);
+            if (hi < 0 || lo < 0) return false;
+            out += static_cast<char>(hi << 4 | lo);
+            i += 2;
+        } else {
+            out += raw[i];
+        }
+    }
+    return true;
+}
+
+std::string parse_staging_upload(std::string_view uri, StagingUpload& out) {
+    out = StagingUpload{};
+    std::string text;
+    if (!query_text(uri, "dat", text)) return "dat: malformed %-escape";
+    if (text.empty()) return "dat is required: the init packet (.dat) as hex";
+    if (text.size() % 2 != 0 || text.size() > 2 * 64) return "dat must be 1-64 bytes as hex";
+    for (size_t i = 0; i < text.size(); i += 2) {
+        const int hi = hex_digit(text[i]), lo = hex_digit(text[i + 1]);
+        if (hi < 0 || lo < 0) return "dat must be hex";
+        out.dat.push_back(static_cast<uint8_t>(hi << 4 | lo));
+    }
+
+    if (!query_text(uri, "version", out.version)) return "version: malformed %-escape";
+    if (out.version.empty() || out.version.size() > kMaxVersionLen) {
+        return "version is required: 1-" + std::to_string(kMaxVersionLen) + " bytes, as the repeater's ver prints it";
+    }
+    if (has_control(out.version)) return "version has control characters";
+
+    if (!query_text(uri, "board", out.board)) return "board: malformed %-escape";
+    if (auto e = validate_board(out.board); !e.empty()) return e;
+
+    if (!query_text(uri, "sha256", text)) return "sha256: malformed %-escape";
+    if (!text.empty()) {
+        if (!parse_sha256_hex(text, out.sha256)) return "sha256 must be 64 hex digits";
+        out.has_sha256 = true;
+    }
+
+    std::string name;
+    if (!query_text(uri, "name", name)) return "name: malformed %-escape";
+    if (has_control(name)) return "name has control characters";
+    out.source = clip_utf8(name.empty() ? std::string("upload") : "upload:" + name, kMaxUrlLen);
     return {};
 }
 

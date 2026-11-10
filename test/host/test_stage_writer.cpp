@@ -301,3 +301,118 @@ TEST_CASE("same_image compares hashes and sizes", "[stage]") {
     other.dat.sha256[0] ^= 1;
     CHECK_FALSE(dfu32::same_image(other, h));
 }
+
+// ---- uploads (POST /api/v1/staging): no manifest ----------------------------------
+
+namespace {
+
+struct Upload : Fixture {
+    dfu32::UploadInfo up;
+    Upload() {
+        up.bin_size = static_cast<uint32_t>(bin.size());
+        up.version = "v1.18.0-81dbae5";
+        meta = {};
+        meta.manifest_url = "upload:RAK_4631_repeater-v1.18.0-81dbae5.zip";
+        meta.staged_at = 1762300000;
+    }
+    dfu32::Status upload(size_t chunk = 1460) {
+        dfu32::StagingWriter w(region, sha);
+        if (auto s = w.begin_upload(dat, up, meta); !s.ok()) return s;
+        for (size_t off = 0; off < bin.size(); off += chunk) {
+            const size_t n = std::min(chunk, bin.size() - off);
+            if (auto s = w.write({bin.data() + off, n}); !s.ok()) return s;
+        }
+        return w.finish();
+    }
+    dfu::StagingHeader header() {
+        dfu::StagingHeader h;
+        REQUIRE(dfu::decode_staging_header({region.mem.data(), dfu::kStagingHeaderSize}, h) ==
+                dfu::StagingHeaderError::Ok);
+        return h;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Stage writer: an upload records the SHA-256 of what arrived", "[stage][upload]") {
+    Upload u;
+    const auto s = u.upload();
+    INFO(s.str());
+    REQUIRE(s.ok());
+    CHECK_FALSE(u.region.unerased_write);
+    CHECK(std::equal(u.bin.begin(), u.bin.end(), u.region.mem.begin() + dfu::kStagingDataOffset));
+    const auto h = u.header();
+    CHECK(h.bin_size == u.bin.size());
+    CHECK(h.bin_sha256 == RefSha256::of(u.bin));
+    CHECK(h.dat_sha256 == RefSha256::of(u.dat));
+    CHECK(std::vector<uint8_t>(h.dat_bytes().begin(), h.dat_bytes().end()) == u.dat);
+    CHECK(h.crc16 == dfu::crc16_ccitt(u.bin));
+    CHECK(h.version == "v1.18.0-81dbae5");
+    CHECK(h.target_id.empty());  // not tied to a target
+    CHECK(h.board.empty());      // no board: DFU32 doesn't compare it with the target's
+    CHECK(h.manifest_url == "upload:RAK_4631_repeater-v1.18.0-81dbae5.zip");
+    CHECK(h.manifest_sha256 == dfu32::Sha256{});
+    CHECK(h.staged_at == 1762300000);
+}
+
+TEST_CASE("Stage writer: an upload may name a board and the .bin's SHA-256", "[stage][upload]") {
+    Upload u;
+    u.meta.board = "rak4631";
+    u.up.has_sha256 = true;
+    u.up.bin_sha256 = RefSha256::of(u.bin);
+    REQUIRE(u.upload().ok());
+    CHECK(u.header().board == "rak4631");
+
+    Upload bad;
+    bad.up.has_sha256 = true;
+    bad.up.bin_sha256 = RefSha256::of(bad.bin);
+    bad.up.bin_sha256[0] ^= 1;
+    CHECK(bad.upload().code == Err::HashMismatch);
+    dfu::StagingHeader h;
+    CHECK(dfu::decode_staging_header({bad.region.mem.data(), dfu::kStagingHeaderSize}, h) !=
+          dfu::StagingHeaderError::Ok);  // nothing vouches for it
+}
+
+TEST_CASE("Stage writer: the .dat's CRC16 vouches for an uploaded .bin", "[stage][upload]") {
+    Upload u;
+    u.dat = make_dat(make_bin(16));  // valid layout, another image's CRC
+    CHECK(u.upload().code == Err::DatCrcMismatch);
+    dfu::StagingHeader h;
+    CHECK(dfu::decode_staging_header({u.region.mem.data(), dfu::kStagingHeaderSize}, h) !=
+          dfu::StagingHeaderError::Ok);
+}
+
+TEST_CASE("Stage writer: upload prechecks leave the old image alone", "[stage][upload]") {
+    const auto refused = [](auto tweak, Err want) {
+        Upload u;
+        tweak(u);
+        dfu32::StagingWriter w(u.region, u.sha);
+        const auto s = w.begin_upload(u.dat, u.up, u.meta);
+        INFO(s.str());
+        CHECK(s.code == want);
+        CHECK(u.region.erases == 0);
+        CHECK_FALSE(w.invalidated_previous());
+    };
+    refused([](Upload& u) { u.up.version.clear(); }, Err::ManifestInvalid);
+    refused([](Upload& u) { u.up.version = std::string(64, 'v'); }, Err::ManifestInvalid);
+    refused([](Upload& u) { u.meta.board = std::string(32, 'b'); }, Err::ManifestInvalid);
+    refused([](Upload& u) { u.dat.clear(); }, Err::DatInvalid);
+    refused([](Upload& u) { u.dat.resize(65, 0); }, Err::DatTooLong);
+    refused([](Upload& u) { u.dat.pop_back(); }, Err::DatInvalid);
+    refused([](Upload& u) { u.dat = make_dat(u.bin, 0x0099); }, Err::DatInvalid);
+    refused([](Upload& u) { u.up.bin_size = 0; }, Err::SizeMismatch);
+    refused([](Upload& u) { u.up.bin_size = 1002; }, Err::ImageNotWordAligned);
+    refused([](Upload& u) { u.up.bin_size = dfu::default_max_app_size(0x0052) + 4; }, Err::ImageTooLarge);
+    refused([](Upload& u) { u.meta.max_app_size = 4096; }, Err::ImageTooLarge);
+    refused([](Upload& u) { u.dat = make_dat(u.bin, 0x0054); u.up.bin_size = 0xD0000; }, Err::ImageTooLarge);  // staging capacity
+}
+
+TEST_CASE("Stage writer: an upload must be exactly its announced size", "[stage][upload]") {
+    Upload shorter;
+    shorter.up.bin_size += 4;
+    CHECK(shorter.upload().code == Err::SizeMismatch);  // finish(): fewer bytes arrived
+
+    Upload longer;
+    longer.up.bin_size -= 4;
+    CHECK(longer.upload().code == Err::SizeMismatch);  // write(): runs past it
+}

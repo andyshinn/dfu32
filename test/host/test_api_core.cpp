@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,7 @@ TEST_CASE("API: methods and public routes", "[api]") {
     CHECK_FALSE(method_allowed(Route::TargetFlash, Method::Get));
     CHECK(method_allowed(Route::Staging, Method::Delete));
     CHECK_FALSE(method_allowed(Route::Staging, Method::Put));
+    CHECK(method_allowed(Route::Staging, Method::Post));  // upload
     CHECK(method_allowed(Route::Config, Method::Put));
     CHECK_FALSE(method_allowed(Route::NotFound, Method::Get));
     CHECK_FALSE(method_allowed(Route::Logs, Method::Other));
@@ -84,6 +86,68 @@ TEST_CASE("API: query parameters", "[api]") {
     CHECK(query_param("/api/v1/logs?a=1&b", "b").empty());
     CHECK(query_param("/api/v1/logs?sinceX=1", "since").empty());
     CHECK(query_param("/api/v1/logs", "since").empty());
+}
+
+TEST_CASE("API: %-decoded query text", "[api]") {
+    std::string v = "stale";
+    CHECK(query_text("/x?version=v1.18.0%2B2%20rc&b=1", "version", v));
+    CHECK(v == "v1.18.0+2 rc");
+    CHECK(query_text("/x?name=My+Repeater%2fzip", "name", v));
+    CHECK(v == "My Repeater/zip");
+    CHECK(query_text("/x?name=%C3%A9", "name", v));
+    CHECK(v == "\xC3\xA9");
+    CHECK(query_text("/x", "name", v));
+    CHECK(v.empty());
+    CHECK_FALSE(query_text("/x?name=a%2", "name", v));
+    CHECK_FALSE(query_text("/x?name=a%", "name", v));
+    CHECK_FALSE(query_text("/x?name=a%zz", "name", v));
+}
+
+TEST_CASE("API: staging upload query", "[api][upload]") {
+    StagingUpload u;
+    REQUIRE(parse_staging_upload("/api/v1/staging?dat=5200ffffffffffff0100b6003412&version=v1.18.0-81dbae5", u).empty());
+    CHECK(u.dat == std::vector<uint8_t>{0x52, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0xB6, 0x00, 0x34, 0x12});
+    CHECK(u.version == "v1.18.0-81dbae5");
+    CHECK(u.board.empty());
+    CHECK_FALSE(u.has_sha256);
+    CHECK(u.source == "upload");
+
+    const std::string sha(64, 'a');
+    REQUIRE(parse_staging_upload("/api/v1/staging?version=v1&dat=00AA&board=rak4631&sha256=" + sha +
+                                     "&name=RAK_4631_repeater-v1.18.0.zip",
+                                 u)
+                .empty());
+    CHECK(u.dat == std::vector<uint8_t>{0x00, 0xAA});
+    CHECK(u.board == "rak4631");
+    CHECK(u.has_sha256);
+    CHECK(u.sha256[0] == 0xAA);
+    CHECK(u.source == "upload:RAK_4631_repeater-v1.18.0.zip");
+
+    // A long name is clipped to the header's 255 bytes, never mid-character.
+    std::string name;
+    for (int i = 0; i < 200; ++i) name += "%C3%A9";
+    REQUIRE(parse_staging_upload("/s?dat=00&version=v&name=" + name, u).empty());
+    CHECK(u.source.size() <= 255);
+    CHECK(u.source.size() % 2 == 1);  // "upload:" (7) + whole 2-byte characters
+
+    const auto refused = [&](const std::string& q, const char* why) {
+        INFO(q);
+        const std::string e = parse_staging_upload("/api/v1/staging" + q, u);
+        CHECK_THAT(e, Catch::Matchers::ContainsSubstring(why));
+    };
+    refused("", "dat is required");
+    refused("?version=v1", "dat is required");
+    refused("?dat=abc&version=v1", "1-64 bytes");
+    refused("?dat=" + std::string(130, 'a') + "&version=v1", "1-64 bytes");
+    refused("?dat=zz&version=v1", "hex");
+    refused("?dat=00", "version is required");
+    refused("?dat=00&version=" + std::string(64, 'v'), "version is required");
+    refused("?dat=00&version=a%0Ab", "control");
+    refused("?dat=00&version=v1&board=" + std::string(32, 'b'), "board");
+    refused("?dat=00&version=v1&board=a+b", "board");
+    refused("?dat=00&version=v1&sha256=abc", "sha256");
+    refused("?dat=00&version=v1&name=a%00b", "control");
+    refused("?dat=00&version=v%zz", "%-escape");
 }
 
 TEST_CASE("API: base64url (RFC 4648 test vectors, url alphabet, no padding)", "[api]") {

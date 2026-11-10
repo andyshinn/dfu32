@@ -56,6 +56,10 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 
 # ---- HTTP ----------------------------------------------------------------------
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+# POST /api/v1/staging carries the .dat, version, board, SHA-256 and file name
+# in its query (SPEC.md §10.1). httpd's scratch buffer is already the header
+# length, so a URI limit up to it costs no extra RAM there.
+CONFIG_HTTPD_MAX_URI_LEN=1024
 # v1 is HTTP-only (SPEC.md §2, §11).
 # CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS is not set
 

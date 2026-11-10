@@ -36,6 +36,7 @@
 #include "runlog/runlog_idf.hpp"
 #include "sdkconfig.h"
 #include "staging/staging.hpp"
+#include "staging/staging_io.hpp"
 
 // DFU32's custom app descriptor (SPEC.md §10.1, firmware upload): the board
 // profile this image was built for, right after esp_app_desc_t in the image.
@@ -806,6 +807,108 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
     return sent;
 }
 
+// ---- image upload into staging (POST /api/v1/staging) ------------------------------
+
+/// The staged header as GET /staging reports it (without verify).
+void write_staged_header(json::ObjectWriter& w, const dfu::StagingHeader& h) {
+    w.add("target", h.target_id)
+        .add("board", h.board)
+        .add("version", h.version)
+        .add("bin_size", int64_t{h.bin_size})
+        .add("sha256", sha256_hex(h.bin_sha256))
+        .add("dat_size", int64_t{h.dat_size})
+        .add("staged_at", static_cast<int64_t>(h.staged_at))
+        .add("manifest_url", h.manifest_url)
+        .add("manifest_sha256", sha256_hex(h.manifest_sha256));
+}
+
+/// Streams the body (the application .bin) into the staging partition, with
+/// the .dat, version and optional board from the query (SPEC.md §8, §10.1).
+/// Nothing is erased until the query, the .dat and the size pass their
+/// checks; from then on a failure leaves nothing staged. The .dat's CRC16
+/// over what arrived is the end-to-end check, as when staging over USB.
+esp_err_t h_stage_upload(httpd_req_t* req) {
+    size_t remaining = req->content_len;
+    StagingUpload q;
+    if (auto e = parse_staging_upload(req->uri, q); !e.empty()) {
+        drain(req, remaining);
+        return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
+    }
+    if (req->content_len == 0) {
+        return send_error(req, "411 Length Required", "BAD_REQUEST",
+                          "send the application .bin as the raw body, with Content-Length");
+    }
+    const esp_partition_t* part = PartitionRegion::find_staging();
+    if (part == nullptr) {
+        drain(req, remaining);
+        return send_error(req, "500 Internal Server Error", "STAGING_IO", "no staging partition");
+    }
+    job::Lease lease("upload");
+    if (!lease.ok()) {
+        drain(req, remaining);
+        return send_error(req, "409 Conflict", "BUSY", busy_detail());
+    }
+
+    // The flash re-checks the size against the target's limit, so use the
+    // same one here when it is set.
+    TargetConfig t;
+    StageMeta meta;
+    if (config::load_target(t) && target_exists(t)) meta.max_app_size = t.max_app_size;
+    meta.board = q.board;
+    meta.manifest_url = q.source;
+    meta.staged_at = net::unix_time();
+    UploadInfo up;
+    up.bin_size = static_cast<uint32_t>(req->content_len);
+    up.version = q.version;
+    up.has_sha256 = q.has_sha256;
+    up.bin_sha256 = q.sha256;
+
+    PartitionRegion region(part);
+    PsaSha256 sha;
+    StagingWriter w(region, sha);
+    bool client_gone = false;
+    const auto fail = [&](const Status& st) {
+        ESP_LOGE(TAG, "image upload refused: %s", st.str().c_str());
+        if (!client_gone) drain(req, remaining);
+        std::string detail = st.detail;
+        if (w.invalidated_previous()) detail += " (the previously staged image was invalidated)";
+        const char* http = st.code == Err::StagingIo ? "500 Internal Server Error" : "422 Unprocessable Content";
+        return send_error(req, http, to_string(st.code), detail);
+    };
+    if (Status st = w.begin_upload(q.dat, up, meta); !st.ok()) return fail(st);
+    ESP_LOGI(TAG, "image upload: \"%s\" (%s), %u B", q.version.c_str(), q.source.c_str(),
+             static_cast<unsigned>(req->content_len));
+
+    std::vector<uint8_t> buf(kOtaChunk);
+    std::string err;
+    const int64_t t0 = esp_timer_get_time();
+    unsigned last_decile = 0;
+    while (remaining > 0) {
+        const size_t want = remaining < buf.size() ? remaining : buf.size();
+        if (!recv_exact(req, buf.data(), want, err)) {
+            client_gone = true;
+            ESP_LOGE(TAG, "image upload: %s", err.c_str());
+            std::string detail = err;
+            if (w.invalidated_previous()) detail += " (the previously staged image was invalidated)";
+            return send_error(req, "408 Request Timeout", "BAD_REQUEST", detail);
+        }
+        remaining -= want;
+        if (Status st = w.write({buf.data(), want}); !st.ok()) return fail(st);
+        const unsigned decile = static_cast<unsigned>((req->content_len - remaining) * 10 / req->content_len);
+        if (decile > last_decile && decile < 10) {
+            last_decile = decile;
+            ESP_LOGI(TAG, "image upload %u%%", decile * 10);
+        }
+    }
+    if (Status st = w.finish(); !st.ok()) return fail(st);
+    ESP_LOGI(TAG, "staged \"%s\" from %s: %u B in %u ms", q.version.c_str(), q.source.c_str(),
+             static_cast<unsigned>(req->content_len), static_cast<unsigned>((esp_timer_get_time() - t0) / 1000));
+    json::ObjectWriter o;
+    o.add_bool("valid", true);
+    write_staged_header(o, w.header());
+    return send_obj(req, "200 OK", o);
+}
+
 // ---- slow requests (check, scan, firmware upload) on their own task ---------------
 // esp_http_server has one worker thread. A manifest fetch or a BLE scan can
 // take many seconds, so those requests are handed to this task through
@@ -832,6 +935,8 @@ void slow_task(void*) {
             h_check(r->req, r->match);
         } else if (r->route == Route::SystemOta) {
             h_ota(r->req, r->force);
+        } else if (r->route == Route::Staging) {
+            h_stage_upload(r->req);
         } else {
             h_scan(r->req, r->scan);
         }
@@ -843,7 +948,7 @@ void slow_task(void*) {
 esp_err_t start_slow(httpd_req_t* req, std::unique_ptr<SlowRequest> r) {
     if (g_slow_q == nullptr) return send_error(req, "500 Internal Server Error", "INTERNAL", "worker not running");
     if (g_slow_busy.exchange(true)) {
-        return send_error(req, "409 Conflict", "BUSY", "another check, scan or firmware upload is still running");
+        return send_error(req, "409 Conflict", "BUSY", "another check, scan or upload is still running");
     }
     if (httpd_req_async_handler_begin(req, &r->req) != ESP_OK) {
         g_slow_busy = false;
@@ -874,6 +979,15 @@ esp_err_t queue_ota(httpd_req_t* req) {
     auto r = std::make_unique<SlowRequest>();
     r->route = Route::SystemOta;
     r->force = query_param(req->uri, "force") == "1";
+    return start_slow(req, std::move(r));  // the body is read on the worker
+}
+
+esp_err_t queue_stage_upload(httpd_req_t* req) {
+    if (httpd_req_get_hdr_value_len(req, "Transfer-Encoding") != 0) {
+        return send_error(req, "411 Length Required", "BAD_REQUEST", "send the .bin with Content-Length, not chunked");
+    }
+    auto r = std::make_unique<SlowRequest>();
+    r->route = Route::Staging;
     return start_slow(req, std::move(r));  // the body is read on the worker
 }
 
@@ -920,7 +1034,7 @@ esp_err_t dispatch(httpd_req_t* req) {
         case Route::TargetRuns: return h_target_runs(req, m);
         case Route::JobAbort: return h_abort(req);
         case Route::Run: return h_run(req, m);
-        case Route::Staging: return h_staging(req);
+        case Route::Staging: return req->method == HTTP_POST ? queue_stage_upload(req) : h_staging(req);
         case Route::BleScan: return queue_scan(req);
         case Route::SystemOta: return queue_ota(req);
         case Route::Logs: return h_logs(req);

@@ -149,6 +149,27 @@ Worth trying on the bench:
 - **404:** point `target url` at a missing file. Expect `HTTP_ERROR: HTTP 404`.
 - **WiFi drop:** turn the access point off and on again. `wifi` should show it reconnecting, with the backoff capped at 30 s.
 
+### Uploaded to DFU32 over WiFi
+
+No server needed: DFU32 takes the image from its web UI or the API. In the web UI, open **Image** and pick the DFU `.zip`; the browser unpacks and checks it, and **Stage** uploads it. Or from your computer:
+
+```bash
+DFU32_TOKEN=<token> python3 tools/dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --upload dfu32-xxxx.local
+```
+
+Both send `POST /api/v1/staging` with the `.bin` as the body and the `.dat`, version (from a MeshCore file name unless you give `--version`), optional `--board` and the `.bin`'s SHA-256 in the query. Afterwards `staged` should end with `result OK`, with `from upload:<zip name>` and an empty `target`. The image isn't tied to the target, and without `--board` DFU32 doesn't compare it with `target board`.
+
+Worth trying on the bench:
+- **Wrong .dat:** zip a `.dat` from another build with the `.bin`. The UI and the tool refuse it before uploading; with `curl` (below), DFU32 answers `422 DAT_CRC_MISMATCH` and nothing is staged.
+- **Board check:** upload with `--board heltec_t114` while `target board` is `rak4631`, then flash from the staged image: expect `BOARD_MISMATCH` before the repeater is touched.
+- **During a job:** start a flash, then upload. Expect `409 BUSY`, and the staged image is unchanged.
+- **By hand**, from an unpacked zip:
+
+  ```bash
+  curl -X POST -H "Authorization: Bearer $DFU32_TOKEN" --data-binary @app.bin \
+    "http://dfu32-xxxx.local/api/v1/staging?version=v1.18.0-81dbae5&dat=$(xxd -p app.dat | tr -d '\n')"
+  ```
+
 ### From the browser over USB
 
 On [dfu32.app](https://dfu32.app/), click **Connect device**, pick DFU32's port, then choose **Stage nRF52 image** and the DFU `.zip`. Check the version, then click **Stage**. The image carries no board, so DFU32 doesn't compare it with `target board`: picking the right zip is up to you. The page validates the package like `dfu32_stage_image.py`, finds the staging partition from the partition table, writes it and restarts DFU32. Quit any serial monitor first so the port is free. When DFU32 is back, `staged` should end with `result OK`.
