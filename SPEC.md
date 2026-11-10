@@ -393,6 +393,8 @@ If the manifest's `.bin` and `.dat` hashes equal the staged header's, the downlo
 
 Implemented as `dfu32::StagingWriter` (`components/dfu32_core`, host-tested against a NOR-flash model) over the partition and PSA SHA-256 adapters in `components/staging`.
 
+**Uploaded images.** The image can also be uploaded to DFU32 rather than fetched: `POST /api/v1/staging` (§10.1), which the web UI's **Image** view and `tools/dfu32_stage_image.py --upload` use. There is no manifest, so `StagingWriter::begin_upload` runs the checks that need only the `.dat` and the announced size (version 1–63 bytes, `.dat` layout and device type, word alignment, the size against the nRF52 limit — the target's `max_app_size` when set — and the staging capacity) before it erases anything. Steps 1–4 are the same. The `.bin`'s SHA-256 is optional (when the uploader gives one, a mismatch is `HASH_MISMATCH`); the `.dat`'s CRC16 over the `.bin` is the end-to-end check, and the header records the SHA-256 of what arrived. The header names no target, the board only if the uploader gave one, `manifest_url` = `upload:<file name>`, and `manifest_sha256` stays zero. Like an image staged over USB (§9.4), it isn't tied to the target, so any target can flash it with `source=staged`.
+
 Before use (flash with `source=staged`), DFU32 re-verifies `header_crc32` and the bin SHA-256, and checks the header's `board` against the target's (ASCII case-insensitive, `BOARD_MISMATCH`). That check applies only when both are set: an image staged over USB from the installer page (§9.4) carries no board, and a target with no board accepts any image (`dfu32::staged_board_ok`).
 
 Sizes: **832 KB** on the 4 MB layout (header + 802 816 B max app + slack); **1 MB** on 8 MB+.
@@ -507,6 +509,7 @@ Conventions (M3b):
 - Target `PUT`/`DELETE` hold the lease too: `409` while a job, a console flash/probe or a scan is running.
 - `PUT /targets/{id}` merges the fields present into the stored record (a new target starts from defaults), so a `GET` result can be sent back: `last_ok_*` are read-only and ignored. A target created on the console has no id and adopts the first id it is `PUT` under.
 - `POST /stage` takes `{"force":bool,"url":"…"}`; `url` overrides the manifest URL for that job only.
+- `POST /staging` uploads an image into the staging partition (§8) with no manifest and no target: the application `.bin` as the raw body with `Content-Length`, and in the query `dat=<hex>` (the init packet, 1–64 bytes), `version=` (1–63 bytes), and optionally `board=` (compared with the target's board at flash time, as for any staged image), `sha256=<hex>` (checked against what arrives) and `name=` (recorded as `upload:<name>`). Text values are %-decoded (`+` is a space); the URI limit is raised to 1 KB (`CONFIG_HTTPD_MAX_URI_LEN`; esp_http_server reads the request line against it and the headers separately against `CONFIG_HTTPD_MAX_REQ_HDR_LEN`), and the UI and the tool clip the file name so the query stays well inside it. Like the firmware upload it runs on the slow-request task and holds the BLE lease (`409` during a job, a scan or a console flash). The image isn't bound to the target, but when the uploader gives a board and the target has one, they must match (`staged_board_ok`): `422 BOARD_MISMATCH` before anything is erased, rather than at flash time. It answers `400` for a bad query (before anything is erased), `422` with the §13.3 code for an image that fails its checks, `500 STAGING_IO`, or `200` with the new header (the `GET /staging` fields); on an early error it reads and discards the rest of the body, as the firmware upload does. A failure once writing has begun leaves nothing staged, and the detail says so.
 - `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.
 - `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
 - `POST /system/reboot` is refused during a job unless `?force=1`.
@@ -532,6 +535,7 @@ Conventions (M3b):
 | `POST /api/v1/jobs/current/abort` | Abort the job. If the transfer has started, this leaves the target erased; the response warns about that. |
 | `GET /api/v1/targets/{id}/runs` · `GET /api/v1/runs/{seq}` | Run records (§13.2), including the log tail |
 | `GET /api/v1/staging` · `DELETE /api/v1/staging` | Staged image header / invalidate it |
+| `POST /api/v1/staging` | Upload an image (raw `.bin` body; `.dat`, version, optional board in the query). No manifest or target needed. |
 | **`POST /api/v1/ble/scan`** | Body `{"duration_s":10,"dfu_only":false}` → a list of advertisers (below). Refused during a job. |
 | **`GET /api/v1/ble/monitor`** | Live advertiser list with RSSI, one JSON line per second (NDJSON stream), or one snapshot with `?once=1`. Filters on by default; `all=1` shows everything. Not refused during a job (§10.4). |
 | `GET /api/v1/logs?since=<seq>` | Log ring entries, newest last |
@@ -574,15 +578,16 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 
 A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget of ≤ 40 KB. It uses the same JSON API. When a token is set, the browser keeps it in `localStorage` and signs in once; with none set, the UI opens straight to Status. Views:
 
-- **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort.
-- **Target:** config form, plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
+- **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort. Check and Stage (and *Flash from: manifest*) appear only when the target has a manifest URL; otherwise the target flashes the staged image.
+- **Image:** the staged image (version, board, size, where it came from) with Verify and Clear, and **Stage a DFU package**: the operator picks (or drops) an adafruit-nrfutil `.zip`; the page reads it with `web/staging.js`, the installer page's reader (unzip with `DecompressionStream`, then the checks `dfu32_stage_image.py` runs: `.dat` layout and device type, word alignment, size, CRC16 against the `.dat`), suggests the version from a MeshCore file name, and uploads it with `POST /staging` (optional board). This is the installer page's USB staging (§9.4) over WiFi; the staged image is independent of the target.
+- **Target:** config form (only the MAC is needed to flash; the id defaults to `target`, and the manifest URL is only for fetching images from a server), plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
 - **Runs:** history table, with run detail and log tail.
 - **Logs:** live tail by polling `/logs?since=`.
 - **System:** WiFi info, hostname, DFU32 firmware upload, reboot, tuning defaults, and Access: require a token, or rotate it and turn it off.
 
 The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
 
-Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a sign-in screen, used only while the device requires a token; a `401` returns to sign-in. A new token (from **Require a token** or **Rotate token**) is shown once under Access. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
+Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` inlines `web/staging.js` (a `/* @dfu32-include */` line, so the device's Image view and the installer page share one DFU package reader, tested against the Python tool) and gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a sign-in screen, used only while the device requires a token; a `401` returns to sign-in. A new token (from **Require a token** or **Rotate token**) is shown once under Access. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
 
 ### 10.3 Home Assistant
 
@@ -797,6 +802,7 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 
 # HTTP
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=1024                   # POST /api/v1/staging's query (.dat, version, board, sha256, name)
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n           # v1 is HTTP-only; Kconfig DFU32_HTTPS later
 
 # Logging

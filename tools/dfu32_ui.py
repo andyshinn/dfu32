@@ -8,13 +8,36 @@
 `build` gzips the page deterministically (no timestamp or file name in the
 header), so the firmware image doesn't change unless the UI does. `check`
 prints the compressed size and fails above the budget (40 KB by default).
+
+Before gzipping, a line that is only `/* @dfu32-include <path> */` (path from
+the repository root) is replaced by that file. The UI uses it to share
+web/staging.js, the installer page's DFU package reader, instead of keeping a
+copy (the device can't load it from dfu32.app: it may have no internet).
 """
 import argparse
 import gzip
+import re
 import sys
 from pathlib import Path
 
 DEFAULT_BUDGET = 40 * 1024
+ROOT = Path(__file__).resolve().parent.parent
+INCLUDE = re.compile(rb"^[ \t]*/\* @dfu32-include ([\w./-]+) \*/[ \t]*$", re.M)
+
+
+def includes(src: Path) -> list[Path]:
+    """The files `render` inlines into `src`."""
+    return [ROOT / m.group(1).decode() for m in INCLUDE.finditer(src.read_bytes())]
+
+
+def render(src: Path) -> bytes:
+    """The page as served: `src` with its includes inlined."""
+    def inline(m: re.Match) -> bytes:
+        path = ROOT / m.group(1).decode()
+        if not path.resolve().is_relative_to(ROOT) or not path.is_file():
+            raise FileNotFoundError(f"{src}: cannot include {m.group(1).decode()}")
+        return path.read_bytes().rstrip(b"\n")
+    return INCLUDE.sub(inline, src.read_bytes())
 
 
 def compress(data: bytes) -> bytes:
@@ -23,7 +46,7 @@ def compress(data: bytes) -> bytes:
 
 
 def build(src: Path, out: Path) -> int:
-    gz = compress(src.read_bytes())
+    gz = compress(render(src))
     out.parent.mkdir(parents=True, exist_ok=True)
     if not out.exists() or out.read_bytes() != gz:
         out.write_bytes(gz)
@@ -31,7 +54,7 @@ def build(src: Path, out: Path) -> int:
 
 
 def check(src: Path, budget: int) -> bool:
-    raw = src.read_bytes()
+    raw = render(src)
     gz = compress(raw)
     pct = 100 * len(gz) / budget
     print(f"web UI: {len(raw)} B, {len(gz)} B gzipped ({pct:.0f}% of the {budget} B budget)")

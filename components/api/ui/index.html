@@ -1,8 +1,9 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: MIT
-     DFU32 web UI (SPEC.md §10.2). One file, no framework, no build step beyond
-     gzip (tools/dfu32_ui.py). Everything goes through the JSON API, and every
-     value from the device or a BLE advertiser is put in the page as text. -->
+     DFU32 web UI (SPEC.md §10.2). One file, no framework. The build
+     (tools/dfu32_ui.py) inlines web/staging.js where it says @dfu32-include,
+     then gzips. Everything goes through the JSON API, and every value from
+     the device or a BLE advertiser is put in the page as text. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -53,13 +54,15 @@ code{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--chip);padd
 details summary{cursor:pointer;color:var(--mute);margin:.5rem 0}
 #toast{position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.6rem 1rem;border-radius:8px;max-width:90vw;display:none}
 .center{max-width:28rem;margin:3rem auto}
+.drop{outline:2px dashed transparent;outline-offset:-2px}
+.drop.over{outline-color:var(--acc)}
 @media (max-width:40rem){.grid{grid-template-columns:1fr}.grid dt{margin-top:.3rem}}
 </style>
 </head>
 <body>
 <header><b>DFU32</b><span id="hdr" class="mute small"></span><span class="sp"></span><span id="hjob"></span></header>
 <nav id="nav" hidden>
-<a href="#status">Status</a><a href="#target">Target</a><a href="#runs">Runs</a><a href="#logs">Logs</a><a href="#system">System</a>
+<a href="#status">Status</a><a href="#image">Image</a><a href="#target">Target</a><a href="#runs">Runs</a><a href="#logs">Logs</a><a href="#system">System</a>
 </nav>
 <main id="main"></main>
 <div id="toast"></div>
@@ -144,7 +147,7 @@ function header() {
 }
 
 // ---- router -----------------------------------------------------------------------------
-const VIEWS = { status: viewStatus, target: viewTarget, runs: viewRuns, logs: viewLogs, system: viewSystem };
+const VIEWS = { status: viewStatus, image: viewImage, target: viewTarget, runs: viewRuns, logs: viewLogs, system: viewSystem };
 async function route() {
   stopLogs();
   if (!status) await refresh();
@@ -177,8 +180,13 @@ function viewToken() {
 }
 
 // ---- status -----------------------------------------------------------------------------
-let checkResult = null;
-function viewStatus() { renderStatus(); }
+let checkResult = null, tcfg = null;
+// The target's own settings (authenticated): whether it has a manifest URL to fetch from.
+async function viewStatus() {
+  const tid = targetId();
+  tcfg = tid ? await api("GET", "/targets/" + tid).catch(() => null) : null;
+  renderStatus();
+}
 function renderStatus() {
   const j = status.job || {}, tid = targetId(), busy = active(j);
   const out = [];
@@ -201,10 +209,11 @@ function renderStatus() {
   const a = h("section", h("h2", "Actions"));
   if (!tid) a.append(h("p", "No target yet. ", h("a", { href: "#target" }, "Set one up"), " first."));
   else {
-    const c = actionControls(tid);
+    const c = actionControls(tid, !!(tcfg && tcfg.manifest_url));
     c.bCheck.disabled = c.bStage.disabled = c.bFlash.disabled = busy;
     c.bAbort.disabled = !busy;
     a.append(c.row1, c.row2);
+    if (!c.fetches) a.append(h("p.mute.small", "The target has no manifest URL, so it flashes the staged image. ", status.staged ? "Add a manifest URL to fetch images from a server." : [h("a", { href: "#image" }, "Upload one"), " first, or add a manifest URL to fetch images from a server."]));
     if (checkResult) {
       const r = checkResult;
       a.append(h("h3", "Manifest"), dl([["Version", r.version + (r.update_available ? " (new)" : " (already flashed)")], ["Boards", (r.boards || []).join(", ") + (r.board_ok ? "" : " — does not include " + r.target_board)], ["Image", r.bin ? kB(r.bin.size) + " · sha256 " + short(r.bin.sha256) : ""], ["Staged", r.staged_same ? "same image" : r.staged_version || "nothing"], ["Created", r.created], ["Notes", r.notes]]));
@@ -214,7 +223,7 @@ function renderStatus() {
   out.push(a);
 
   const s = status.staged, t = status.targets && status.targets[0];
-  out.push(h("section", h("h2", "Staged image"), s ? dl([["Version", s.version], ["Board", s.board], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["From", s.manifest_url]]) : h("p.mute", "Nothing staged.")));
+  out.push(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Staged image"), h("a", { href: "#image" }, s ? "Manage" : "Upload one")), h("div", { style: "margin-top:.75rem" }, s ? stagedInfo(s) : h("p.mute", "Nothing staged."))));
   if (t) out.push(h("section", h("h2", "Target"), dl([["Id", t.id], ["Name", t.name], ["Board", t.board], ["Last flashed", t.last_ok_version ? t.last_ok_version + (t.last_ok_at ? " · " + when(t.last_ok_at) : "") : "never (by this DFU32)"]])));
   $("#main").replaceChildren(...out);
 }
@@ -222,11 +231,11 @@ function renderStatus() {
 // The action controls are built once per target and reused, so the 1 s status
 // refresh never resets what someone is in the middle of choosing.
 let actCtl = null;
-function actionControls(tid) {
-  if (actCtl && actCtl.tid === tid) return actCtl;
-  const c = { tid };
+function actionControls(tid, fetches) {
+  if (actCtl && actCtl.tid === tid && actCtl.fetches === fetches) return actCtl;
+  const c = { tid, fetches };
   c.force = h("input", { type: "checkbox" });
-  c.source = h("select", h("option", { value: "manifest" }, "manifest (fetch)"), h("option", { value: "staged" }, "staged image"));
+  c.source = h("select", fetches ? h("option", { value: "manifest" }, "manifest (fetch)") : null, h("option", { value: "staged" }, "staged image"));
   c.wifiOff = h("input", { type: "checkbox", checked: cfg && cfg.wifi_off_dfu });
   c.arm = h("input", { type: "number", min: 10, max: 3600, placeholder: "default", style: "width:7rem" });
   c.bCheck = h("button", { onclick: () => act(c.bCheck, async () => { checkResult = await api("POST", "/targets/" + tid + "/check"); renderStatus(); }) }, "Check");
@@ -245,9 +254,96 @@ function actionControls(tid) {
     }
     act(c.bAbort, async () => { const r = await api("POST", "/jobs/current/abort"); if (r.warning) toast(r.warning, 8000); refresh(); });
   } }, "Abort");
-  c.row1 = h("div.row", c.bCheck, c.bStage, h("label.chk", c.force, "re-download"), c.bFlash, c.bAbort);
+  c.row1 = h("div.row", fetches ? [c.bCheck, c.bStage, h("label.chk", c.force, "re-download")] : null, c.bFlash, c.bAbort);
   c.row2 = h("div.row", { style: "margin-top:.7rem" }, h("label", "Flash from", c.source), h("label", "Arm timeout (s)", c.arm), h("label.chk", c.wifiOff, "WiFi off during the transfer"));
   return (actCtl = c);
+}
+
+// ---- image (what is staged for the repeater) --------------------------------------------
+// A DFU package is unpacked here, in the browser, by web/staging.js: the installer
+// page's reader (inlined below at build time, tools/dfu32_ui.py). DFU32 gets the
+// .bin as the body and the .dat in the query (POST /staging), and repeats the
+// checks. The image isn't tied to the target.
+// The checks DFU32 repeats, done first so a wrong file is caught before uploading.
+async function loadPackage(file) {
+  const S = window.dfu32Staging;
+  if (!S) throw new Error("this page's package reader didn't load");
+  if (file.size > S.MAX_ZIP) throw new Error("it is far too large for a DFU package");
+  try {
+    const { bin, dat } = await S.loadPackage(new Uint8Array(await file.arrayBuffer()));
+    const pkt = S.validate(bin, dat);
+    return { bin, dat, type: pkt.deviceType, sd: pkt.sdReq.map(S.h4) };
+  } catch (e) {
+    throw new Error(e instanceof S.StageError ? e.message : "it is not a readable zip (" + e.message + ")");
+  }
+}
+// The file name rides in the query as a label: clip it so the request stays well
+// inside DFU32's 1 KB URI limit, whatever characters it has.
+function clipName(n) { n = n.slice(0, 64); while (encodeURIComponent(n).length > 192) n = n.slice(0, -1); return n; }
+function stagedFrom(u) { return /^(upload|usb)(:|$)/.test(u) ? (u.startsWith("usb") ? "USB (installer page)" : "upload") + (u.includes(":") ? ": " + u.slice(u.indexOf(":") + 1) : "") : u; }
+function stagedInfo(s) {
+  return dl([["Version", s.version], ["Board", s.board || "not set (any target's)"], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["For target", s.target || "any"], ["From", stagedFrom(s.manifest_url)]]);
+}
+
+function viewImage() {
+  const t = status.targets && status.targets[0];
+  const out = h("div");
+  function staged() {
+    const s = status.staged, msg = h("div");
+    const verify = h("button", { onclick: () => act(verify, async () => {
+      const r = await api("GET", "/staging?verify=1");
+      msg.replaceChildren(r.verified ? note("info", "Verified: the .bin matches its SHA-256 and the .dat's CRC16.") : note("bad", "Verification failed: " + (r.verify_error || r.header)));
+    }) }, "Verify");
+    const clear = h("button.dng", { onclick: () => { if (confirm("Clear the staged image? Flashing from the staged image fails until another is staged.")) act(clear, async () => { await api("DELETE", "/staging"); toast("Cleared"); await refresh(); out.firstChild.replaceWith(staged()); }); } }, "Clear");
+    return h("section", h("h2", "Staged image"), s ? [stagedInfo(s), h("div.row", { style: "margin-top:.7rem" }, verify, clear), msg] : h("p.mute", "Nothing staged."));
+  }
+  const file = h("input", { type: "file", accept: ".zip,application/zip" });
+  const form = h("div");
+  async function pick(f) {
+    form.replaceChildren(h("p.mute", "Checking " + f.name + "…"));
+    let pkg;
+    try { pkg = await loadPackage(f); } catch (e) { return form.replaceChildren(note("bad", f.name + " can't be staged: " + e.message + ".")); }
+    const ver = h("input", { value: window.dfu32Staging.guessVersion(f.name) });
+    const board = h("input", { placeholder: (t && t.board) || "rak4631" });
+    const prog = h("div");
+    const go = h("button.pri", { onclick: () => {
+      const v = ver.value.trim(), b = board.value.trim();
+      if (!v || new TextEncoder().encode(v).length > 63) return toast("The version must be 1-63 bytes");
+      if (active(status.job)) return toast("Wait for the job to finish");
+      if (status.staged && !confirm("Replace the staged image (" + status.staged.version + ")?")) return;
+      go.disabled = true;
+      const bar = h("i", { style: "width:0" });
+      prog.replaceChildren(h("div.bar", bar), h("div.small.mute", "Uploading…"));
+      const x = new XMLHttpRequest();
+      x.open("POST", "/api/v1/staging?dat=" + window.dfu32Staging.hex(pkg.dat) + "&version=" + encodeURIComponent(v) + (b ? "&board=" + encodeURIComponent(b) : "") + "&name=" + encodeURIComponent(clipName(f.name)));
+      if (token) x.setRequestHeader("Authorization", "Bearer " + token);
+      x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(100 * e.loaded / e.total) + "%"; };
+      x.onload = async () => {
+        let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
+        if (x.status === 401) return onUnauthorized();
+        if (x.status !== 200) { go.disabled = false; return prog.replaceChildren(note("bad", j.detail || j.error || "Upload failed (HTTP " + x.status + ")")); }
+        prog.replaceChildren(note("info", "Staged " + j.version + ". Flash it from ", h("a", { href: "#status" }, "Status"), " with Flash from: staged image."));
+        await refresh();
+        out.firstChild.replaceWith(staged());
+      };
+      x.onerror = () => { go.disabled = false; prog.replaceChildren(note("bad", "Upload failed (connection lost)")); };
+      x.send(new Blob([pkg.bin]));
+    } }, "Stage");
+    form.replaceChildren(dl([["File", f.name], ["Image", kB(pkg.bin.length) + " · " + (pkg.type === 0x52 ? "nRF52" : "nRF54") + " (" + window.dfu32Staging.h4(pkg.type) + ") · SoftDevice " + pkg.sd.join(", ") + " · CRC OK"]]),
+      h("div.form", { style: "margin-top:.7rem" }, h("label", "Version (as the repeater's ver prints it)", ver), h("label", "Board (optional: checked against the target's)", board)),
+      h("p.mute.small", "Check that it's built for the repeater's board: without a board here, DFU32 can't tell."),
+      h("div.row", go), prog);
+  }
+  file.addEventListener("change", () => { if (file.files[0]) pick(file.files[0]); file.value = ""; });
+  const up = h("section.drop", h("h2", "Stage a DFU package"),
+    h("p.mute.small", "Pick the .zip from adafruit-nrfutil, such as a MeshCore release asset, or drop it here. This browser unpacks it, and DFU32 checks it and writes it to its staging partition, replacing what is staged. Then flash it from Status."),
+    h("div.row", file), form,
+    h("p.mute.small", "With a manifest URL on the target, Stage on the Status page fetches an image from your server instead."));
+  up.addEventListener("dragover", (e) => { e.preventDefault(); up.classList.add("over"); });
+  up.addEventListener("dragleave", () => up.classList.remove("over"));
+  up.addEventListener("drop", (e) => { e.preventDefault(); up.classList.remove("over"); if (e.dataTransfer.files[0]) pick(e.dataTransfer.files[0]); });
+  out.append(staged(), up);
+  $("#main").replaceChildren(out);
 }
 
 // ---- target -----------------------------------------------------------------------------
@@ -261,8 +357,7 @@ async function viewTarget() {
   f.addr_type = h("select", h("option", { value: 1 }, "random"), h("option", { value: 0 }, "public"));
   f.addr_type.value = String(t.addr_type ?? 1);
   const save = h("button.pri", { onclick: () => act(save, async () => {
-    const id = f.id.value.trim();
-    if (!id) throw new Error("Give the target an id (a-z, 0-9, -)");
+    const id = f.id.value.trim() || "target";
     const body = {};
     for (const [k, el] of Object.entries(f)) { if (k === "id") continue; const v = el.value.trim(); if (v === "" && NUM.includes(k)) continue; body[k] = NUM.includes(k) ? Number(v) : v; }
     await api("PUT", "/targets/" + encodeURIComponent(id), body);
@@ -270,14 +365,14 @@ async function viewTarget() {
   }) }, "Save");
   const del = h("button.dng", { hidden: !tid, onclick: () => { if (confirm("Delete target \"" + tid + "\"?")) act(del, async () => { await api("DELETE", "/targets/" + tid); toast("Deleted"); await refresh(); viewTarget(); }); } }, "Delete");
   const form = h("section", h("h2", tid ? "Target " + tid : "New target"),
-    h("div.form", field("id", "Id", { readonly: !!tid, placeholder: "attic-repeater" }), field("name", "Name"), field("board", "Board (matches the manifest)", { placeholder: "rak4631" }),
+    h("div.form", field("id", "Id (optional)", { readonly: !!tid, placeholder: "target" }), field("name", "Name (optional)"), field("board", "Board (optional: checked against the image's)", { placeholder: "rak4631" }),
       field("mac", "App MAC (from start ota)", { placeholder: "AA:BB:CC:DD:EE:FF" }), h("label", "Address type", f.addr_type),
-      field("manifest_url", "Manifest URL", { placeholder: "http://server/rak4631/manifest.json" })),
+      field("manifest_url", "Manifest URL (optional: to fetch images from a server)", { placeholder: "http://server/rak4631/manifest.json" })),
     h("details", h("summary", "Tuning"), h("div.form", field("prn", "PRN (1-8)", { type: "number" }), field("max_attempts", "Attempts (1-10)", { type: "number" }),
       field("arm_timeout_s", "Arm timeout (s)", { type: "number" }), field("start_settle_ms", "START settle (ms)", { type: "number" }),
       field("prn_timeout_ms", "Receipt timeout (ms)", { type: "number" }), field("max_app_size", "Max app size (B, 0 = default)", { type: "number" }))),
     h("div.row", { style: "margin-top:.8rem" }, save, del),
-    tid ? null : h("p.mute.small", "DFU32 v1 handles one target. Saving creates it."));
+    tid ? null : h("p.mute.small", "DFU32 v1 handles one target. Saving creates it. Only the MAC is needed to flash an image you upload on the Image page; a manifest URL lets DFU32 fetch images itself."));
   $("#main").replaceChildren(form, scanSection((mac, type) => { f.mac.value = mac; f.addr_type.value = type === "public" ? "0" : "1"; toast("Filled in the MAC: save to keep it"); }));
 }
 function scanSection(use) {
@@ -439,6 +534,12 @@ async function waitBack(version, prog) {
 }
 
 route();
+</script>
+<script type="module">
+// web/staging.js, inlined by tools/dfu32_ui.py: the reader the installer page uses
+// (tested against tools/dfu32_stage_image.py). Only what the Image view needs is exposed.
+/* @dfu32-include web/staging.js */
+window.dfu32Staging = { MAX_ZIP, StageError, loadPackage, validate, guessVersion, hex, h4 };
 </script>
 </body>
 </html>

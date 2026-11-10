@@ -22,6 +22,8 @@ To try a build that isn't released, such as a pull request's, choose **Custom bu
 
 To stage a repeater image without an artifact server, connect a DFU32 from the page and choose **Stage nRF52 image**, then pick the DFU `.zip` (a MeshCore release asset, for example). The page checks the package, writes it to DFU32's staging partition over USB and restarts DFU32, keeping its settings; then flash the repeater from DFU32's page with **Flash from: staged image**.
 
+Once DFU32 is on your network, the same works without USB: on DFU32's page, **Image** takes the DFU `.zip` (the browser unpacks and checks it, DFU32 checks it again and stages it), and `python3 tools/dfu32_stage_image.py <zip> --upload dfu32-xxxx.local` does it from a script (`POST /api/v1/staging`). A target then needs only its MAC; a manifest URL is only for having DFU32 fetch images from your own server.
+
 After installing, the page asks for your WiFi network (Improv Serial) and then offers a link to the device's web UI. Coming back later, it recognises an installed DFU32 and can change its WiFi or open its page. WiFi can also be set over Improv BLE (Home Assistant or [improv-wifi.com](https://www.improv-wifi.com/)) or with the `wifi <ssid> <password>` console command.
 
 To flash without the page, each release carries a merged image per board, `dfu32-<board>-merged.bin`. It's a full image for a fresh install: it **resets saved settings** (WiFi, token, target and run log). Flash it at offset 0:

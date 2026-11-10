@@ -6,6 +6,13 @@ The output is the raw content of the `staging` partition (SPEC.md §8): a 4 KiB
 header sector followed by the application .bin. Flash it to the ESP32 with
 parttool.py or esptool (the command is printed at the end).
 
+With --upload, the package goes to a running DFU32 over WiFi instead
+(POST /api/v1/staging): the .bin as the body, the .dat, version, optional
+board and the .bin's SHA-256 in the query. DFU32 runs the same checks and
+writes the staging partition itself; nothing else is touched. If the DFU32
+requires an API token, give it with --token or the DFU32_TOKEN environment
+variable.
+
 Inputs are either an adafruit-nrfutil DFU .zip (the MeshCore release format)
 or a separate firmware.bin + firmware.dat. The image is validated the same way
 DFU32 validates it before touching a target: .dat layout, device type (0x0052
@@ -15,15 +22,21 @@ against the .dat.
 Examples:
   dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --board rak4631 -o staging.img
   dfu32_stage_image.py --bin firmware.bin --dat firmware.dat --board xiao -o staging.img
+  dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --upload dfu32-ab12.local
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
+import re
 import struct
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 import zlib
 from dataclasses import dataclass, field
@@ -177,12 +190,68 @@ def build_image(bin_data: bytes, dat: bytes, *, target_id: str, board: str, vers
     return header + b"\xFF" * (DATA_OFFSET - HEADER_SIZE) + bin_data
 
 
+# MeshCore assets are <env>-<version>-<commit>.zip, e.g. RAK_4631_repeater-v1.18.0-81dbae5.zip.
+MESHCORE_NAME = re.compile(r"^(.+?)-(v?\d[\w.]*-[0-9a-f]{6,40})$", re.I)
+
+
+def guess_version(file_name: str) -> str:
+    """"<version>-<commit>" for a MeshCore asset (what the repeater's `ver` prints), else the file name."""
+    stem = Path(file_name).name
+    if stem.lower().endswith(".zip"):
+        stem = stem[:-4]
+    m = MESHCORE_NAME.match(stem)
+    out = (m.group(2) if m else stem).encode()[:63]
+    return out.decode("utf-8", "ignore")
+
+
+def upload_url(device: str, *, dat: bytes, version: str, board: str, sha256: bytes, name: str) -> str:
+    """POST /api/v1/staging on `device` (a host name, or a URL)."""
+    base = device if "://" in device else "http://" + device
+    # The name is only a label in the header: clipped so the query stays well
+    # inside DFU32's 1 KB URI limit, whatever characters it has.
+    name = name[:64]
+    while len(urllib.parse.quote_plus(name)) > 192:
+        name = name[:-1]
+    query = {"dat": dat.hex(), "version": version, "sha256": sha256.hex(), "name": name}
+    if board:
+        query["board"] = board
+    return base.rstrip("/") + "/api/v1/staging?" + urllib.parse.urlencode(query)
+
+
+def upload(device: str, token: str, bin_data: bytes, dat: bytes, *, version: str, board: str, name: str,
+           timeout: float = 120) -> dict:
+    """Stages the image on a running DFU32. Returns its staged header; raises ValueError with DFU32's reason."""
+    url = upload_url(device, dat=dat, version=version, board=board, sha256=hashlib.sha256(bin_data).digest(),
+                     name=name)
+    headers = {"Content-Type": "application/octet-stream"}
+    if token:  # only when the DFU32 requires one
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=bin_data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read() or b"{}")
+        except ValueError:
+            body = {}
+        hint = " (this DFU32 requires an API token: --token or DFU32_TOKEN)" if e.code == 401 and not token else ""
+        raise ValueError(f"DFU32 refused it (HTTP {e.code}): {body.get('error', '')} {body.get('detail', '')}".rstrip()
+                         + hint)
+    except (urllib.error.URLError, OSError) as e:
+        raise ValueError(f"cannot reach {device}: {getattr(e, 'reason', e)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("zip", nargs="?", type=Path, help="adafruit-nrfutil DFU .zip")
     ap.add_argument("--bin", type=Path, help="application .bin (instead of a zip)")
     ap.add_argument("--dat", type=Path, help="init packet .dat (instead of a zip)")
-    ap.add_argument("-o", "--output", type=Path, required=True, help="staging image to write")
+    out = ap.add_mutually_exclusive_group(required=True)
+    out.add_argument("-o", "--output", type=Path, help="staging image to write")
+    out.add_argument("--upload", metavar="DFU32", help="stage it on a running DFU32 over WiFi (host name or URL)")
+    ap.add_argument("--token", default=os.environ.get("DFU32_TOKEN", ""),
+                    help="API token for --upload, if the DFU32 requires one (default: $DFU32_TOKEN)")
     ap.add_argument("--board", default="", help="board id recorded in the header (e.g. rak4631)")
     ap.add_argument("--version", default="", help="version string recorded in the header")
     ap.add_argument("--target-id", default="", help="DFU32 target id recorded in the header")
@@ -190,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="DFU32 partition layout, for size check and printed offsets (default 4mb)")
     ap.add_argument("--max-app-size", type=lambda s: int(s, 0), default=MAX_APP_SIZE)
     args = ap.parse_args(argv)
+    if args.upload:
+        return main_upload(args)
 
     try:
         bin_data, dat = load_package(args.zip, args.bin, args.dat)
@@ -216,6 +287,27 @@ def main(argv: list[str] | None = None) -> int:
     print("or by partition name:")
     print(f"  python $IDF_PATH/components/partition_table/parttool.py --port PORT "
           f"write_partition --partition-name staging --input {args.output}")
+    return 0
+
+
+def main_upload(args: argparse.Namespace) -> int:
+    if args.target_id:
+        print("note: --target-id is ignored with --upload: an uploaded image isn't tied to a target", file=sys.stderr)
+    try:
+        bin_data, dat = load_package(args.zip, args.bin, args.dat)
+        pkt = validate(bin_data, dat, args.max_app_size)
+        version = args.version or guess_version(args.zip.name if args.zip else args.bin.name)
+        name = (args.zip or args.bin).name
+        print(f"bin      {len(bin_data)} B  sha256 {hashlib.sha256(bin_data).hexdigest()}")
+        print(f"dat      {len(dat)} B  device_type 0x{pkt.device_type:04X}  crc16 0x{pkt.crc16:04X} (matches)")
+        print(f"uploading {version!r} to {args.upload}...")
+        staged = upload(args.upload, args.token, bin_data, dat, version=version, board=args.board, name=name)
+    except (ValueError, KeyError, OSError, zipfile.BadZipFile) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"staged   {staged.get('version')} ({staged.get('bin_size')} B, board {staged.get('board') or 'not set'})")
+    print("Flash it from DFU32's page (Flash from: staged image), or:")
+    print('  POST /api/v1/targets/<id>/flash {"source":"staged"}')
     return 0
 
 

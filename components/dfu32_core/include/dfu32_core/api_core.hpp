@@ -5,10 +5,12 @@
 // the BLE scan result view. The esp_http_server glue lives in components/api.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace dfu32::json {
 class ObjectWriter;
@@ -32,7 +34,7 @@ enum class Route : uint8_t {
     TargetRuns,    // GET  /api/v1/targets/{id}/runs
     JobAbort,      // POST /api/v1/jobs/current/abort
     Run,           // GET  /api/v1/runs/{seq}
-    Staging,       // GET/DELETE /api/v1/staging
+    Staging,       // GET/POST/DELETE /api/v1/staging (POST: upload an image)
     BleScan,       // POST /api/v1/ble/scan
     Logs,          // GET  /api/v1/logs?since=
     Config,        // GET/PUT /api/v1/config
@@ -56,8 +58,26 @@ bool method_allowed(Route r, Method m) noexcept;
 /// is set, every route does: token auth is opt-in, SPEC.md §9.3.)
 bool is_public(Route r) noexcept;
 /// The value of `key` in the URI's query string, or "" (no %-decoding:
-/// the API's query values are numbers).
+/// for values that are numbers or flags).
 std::string_view query_param(std::string_view uri, std::string_view key);
+/// The same, %-decoded ('+' is a space, as in a form). False on a malformed
+/// escape; a missing key is "" and true.
+bool query_text(std::string_view uri, std::string_view key, std::string& out);
+
+/// POST /api/v1/staging?dat=<hex>&version=<text>[&board=<text>][&sha256=<hex>][&name=<text>]
+/// with the application .bin as the raw body (SPEC.md §8, §10.1). The .dat
+/// (at most 64 bytes) rides in the query, so the body streams straight into
+/// the staging partition.
+struct StagingUpload {
+    std::vector<uint8_t> dat;
+    std::string version;       // 1..63 bytes, no control characters
+    std::string board;         // optional; checked against the target's when both are set
+    bool has_sha256 = false;   // optional end-to-end check of the .bin
+    std::array<uint8_t, 32> sha256{};
+    std::string source;        // "upload:<name>" for the header's manifest_url
+};
+/// "" or the reason the query was refused (400).
+std::string parse_staging_upload(std::string_view uri, StagingUpload& out);
 
 // ---- auth --------------------------------------------------------------------------
 
