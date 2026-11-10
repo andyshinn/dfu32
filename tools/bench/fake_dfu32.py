@@ -274,9 +274,9 @@ class FakeDfu32:
         elif len(argv) > 1 and argv[1] == "clear":
             self.claimed = False
             self.token_hash = ""
-            self.emit("Unclaimed: the next POST /api/v1/claim issues a token.\n")
+            self.emit("Token cleared: the API is open (no token needed). `token rotate` sets one again.\n")
         else:
-            self.emit("API claimed.\n" if self.claimed else "API unclaimed.\n")
+            self.emit("API token required.\n" if self.claimed else "API open: no token set.\n")
 
     def c_runs(self, argv) -> None:
         if not self.runs:
@@ -495,7 +495,7 @@ class FakeDfu32:
 
     def auth(self, header: str):
         if not self.claimed:
-            return 403, {"error": "UNCLAIMED"}, {}
+            return None  # token auth is opt-in: open until a token is set
         now = time.monotonic()
         if now < self.penalty_until:
             if now < self.next_slot:
@@ -612,6 +612,10 @@ class FakeDfu32:
         if parts == ["system", "reboot"]:
             threading.Thread(target=self.reboot, args=("api",), daemon=True).start()
             return 202, {"rebooting": True}, {}
+        if parts == ["system", "token", "clear"] and method == "POST":
+            self.claimed = False
+            self.token_hash = ""
+            return 200, {"claimed": False}, {}
         if parts == ["debug", "fault"]:
             self.faults = data
             return 200, data, {}

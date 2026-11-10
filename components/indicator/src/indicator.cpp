@@ -175,7 +175,7 @@ void run_action(ButtonAction a) {
             if (g_hooks.on_improv_window) g_hooks.on_improv_window();
             break;
         case ButtonAction::Unclaim:
-            ESP_LOGW(TAG, "button: unclaiming the API token");
+            ESP_LOGW(TAG, "button: clearing the API token (API open)");
             if (g_hooks.on_unclaim) g_hooks.on_unclaim();
             break;
         case ButtonAction::FactoryReset:

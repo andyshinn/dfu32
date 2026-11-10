@@ -51,7 +51,7 @@ Connect it over USB and look at the console (`idf.py -p <port> monitor`). Then:
 
 ### Lost the API token
 
-Hold the button 5–15 seconds (unclaims; claim again from the web UI), or run `token rotate` on the console (prints a new one). Boards without a button: the console.
+Hold the button 5–15 seconds or run `token clear` on the console: either turns the token off, so the web UI and API are open again (**System → Access → Require a token** sets a new one). `token rotate` on the console prints a new token instead. Boards without a button: the console.
 
 ### WiFi details wrong or the network changed
 

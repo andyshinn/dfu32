@@ -227,7 +227,7 @@ extern "C" void app_main(void) {
         }
     };
     hooks.on_unclaim = [] {
-        ESP_LOGW(TAG, "%s", dfu32::api::unclaim() ? "API token cleared: POST /api/v1/claim issues a new one"
+        ESP_LOGW(TAG, "%s", dfu32::api::unclaim() ? "API token cleared: the API is open until a token is set again"
                                                     : "clearing the API token failed");
     };
     hooks.on_factory_reset = [] {

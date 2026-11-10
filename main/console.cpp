@@ -717,12 +717,13 @@ int cmd_token(int argc, char** argv) {
     }
     if (argc >= 2 && std::strcmp(argv[1], "clear") == 0) {
         const bool ok = api::unclaim();
-        std::printf("%s\n", ok ? "Unclaimed: the next POST /api/v1/claim issues a token." : "Failed to clear the token.");
+        std::printf("%s\n", ok ? "Token cleared: the API is open (no token needed). `token rotate` sets one again."
+                              : "Failed to clear the token.");
         return ok ? 0 : 1;
     }
     std::array<uint8_t, 32> h{};
-    std::printf("API %s. `token rotate` prints a new token; `token clear` unclaims.\n",
-                config::load_token_hash(h) ? "claimed" : "unclaimed (POST /api/v1/claim)");
+    std::printf("API %s. `token rotate` sets a new token; `token clear` turns the token off.\n",
+                config::load_token_hash(h) ? "token required" : "open: no token set");
     return 0;
 }
 
@@ -884,7 +885,7 @@ void start_console() {
     reg("blreset", "Send SYS_RESET to the target's bootloader (recover a stuck session).", "[--wait S]",
         &cmd_blreset);
     reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
-    reg("token", "API token: show claim state, issue a new token, or unclaim.", "[rotate | clear]", &cmd_token);
+    reg("token", "API token: show whether one is required, set one, or turn it off.", "[rotate | clear]", &cmd_token);
     reg("improv", "Improv WiFi provisioning: show state, open or close Improv BLE.", "[start | stop]", &cmd_improv);
 
     // HTTP client and manifest parsing run on this task.
