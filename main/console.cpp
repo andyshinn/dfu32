@@ -716,7 +716,7 @@ int cmd_token(int argc, char** argv) {
         return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "clear") == 0) {
-        const bool ok = api::unclaim();
+        const bool ok = api::clear_token();
         std::printf("%s\n", ok ? "Token cleared: the API is open (no token needed). `token rotate` sets one again."
                               : "Failed to clear the token.");
         return ok ? 0 : 1;

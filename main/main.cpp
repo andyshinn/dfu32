@@ -226,8 +226,8 @@ extern "C" void app_main(void) {
             ESP_LOGW(TAG, "Improv BLE not opened (disabled, or BLE busy with a job)");
         }
     };
-    hooks.on_unclaim = [] {
-        ESP_LOGW(TAG, "%s", dfu32::api::unclaim() ? "API token cleared: the API is open until a token is set again"
+    hooks.on_clear_token = [] {
+        ESP_LOGW(TAG, "%s", dfu32::api::clear_token() ? "API token cleared: the API is open until a token is set again"
                                                     : "clearing the API token failed");
     };
     hooks.on_factory_reset = [] {

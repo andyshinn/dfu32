@@ -31,7 +31,7 @@ bool erase_target();
 bool load_device(api::DeviceConfig& out);
 bool save_device(const api::DeviceConfig& c);
 
-/// SHA-256 of the API token (SPEC.md §9.3). False when unclaimed.
+/// SHA-256 of the API token (SPEC.md §9.3). False when none is set (the API is open).
 bool load_token_hash(std::array<uint8_t, 32>& out);
 bool save_token_hash(const std::array<uint8_t, 32>& hash);
 bool clear_token();

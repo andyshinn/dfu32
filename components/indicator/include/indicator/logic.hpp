@@ -26,7 +26,7 @@ enum class Pattern : uint8_t {
     Erased,     // red fast blink: the target's app is erased and not reflashed
     Identify,   // white fast blink: Improv "identify"
     Hold2,      // amber slow blink: release now opens the Improv window
-    Hold5,      // amber fast blink: release now unclaims the API token
+    Hold5,      // amber fast blink: release now clears the API token
     Hold15,     // solid amber: release now factory-resets
     Count,
 };
@@ -78,10 +78,10 @@ struct Output {
 /// WiFi down, idle.
 Output decide(const Inputs& in);
 
-enum class ButtonAction : uint8_t { None, ImprovWindow, Unclaim, FactoryReset };
+enum class ButtonAction : uint8_t { None, ImprovWindow, ClearToken, FactoryReset };
 
 /// What releasing the button after `held_ms` does: 2-5 s opens Improv BLE for
-/// 5 minutes, 5-15 s unclaims the API token, 15 s or more factory-resets.
+/// 5 minutes, 5-15 s clears the API token, 15 s or more factory-resets.
 ButtonAction classify_hold(uint32_t held_ms) noexcept;
 /// The feedback level while still held (0, 2, 5, 15).
 uint8_t hold_level(uint32_t held_ms) noexcept;

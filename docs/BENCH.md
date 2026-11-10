@@ -436,7 +436,7 @@ Improv Serial shares the console port with the REPL (SPEC §9.2). Before the ins
 
 Once `main` has it, the installer page itself (MILESTONES M5 bench):
 
-10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens the claim screen.
+10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens DFU32's web UI on Status (no token is set yet).
 11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.

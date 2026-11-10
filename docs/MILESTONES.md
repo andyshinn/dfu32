@@ -95,7 +95,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
     - `components/job`: one job at a time on its own task (stage, or flash = arm then wait); a device-wide lease so the console and the API's scan can't collide with a job (`409 Busy`);
     - radio handover: WiFi stays up while fetching and waiting, and stops only once the target is seen (per request `wifi_off`, default config `wifi_off_dfu`);
     - SPEC §7.3 layers: the run deadline (`esp_timer`, `DEADLINE_EXCEEDED`), a stall watchdog fed by heartbeats from every blocking BLE wait (reboots after 30 s of silence), restore verification (retry once, then reboot), the `job_active` marker;
-    - `components/api`: the §10.1 endpoints on `esp_http_server`, claim-on-first-use token (only its SHA-256 in NVS), constant-time compare, the 5-failure throttle, mDNS `_http._tcp`; fault injection behind `CONFIG_DFU32_DEBUG_ENDPOINTS`;
+    - `components/api`: the §10.1 endpoints on `esp_http_server`, bearer token, set by `POST /claim` (only its SHA-256 in NVS; optional since the token became opt-in, SPEC §9.3), constant-time compare, the 5-failure throttle, mDNS `_http._tcp`; fault injection behind `CONFIG_DFU32_DEBUG_ENDPOINTS`;
     - pure, host-tested parts in `dfu32_core`: the job state machine and request parsing, route matching, base64url, the auth throttle, device settings, per-target tuning knobs, scan hints;
     - run records gain `target_id`, `trigger`, `source` and `started_unix`;
     - console: `job [abort]`, `token [rotate|clear]`.
@@ -104,11 +104,11 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 
 ## M4: UI, provisioning & polish (4–5 days)
 
-- Web UI: status, target form with the **scan picker**, runs, logs, system. `GET /` works while unclaimed and opens on the claim screen, because that's where an Improv redirect lands.
+- Web UI: status, target form with the **scan picker**, runs, logs, system. `GET /` always works, because that's where an Improv redirect lands; with no token set it opens straight to Status.
 - Improv core plus Improv BLE (only while unprovisioned), built on `improv-wifi/sdk-cpp` (SPEC §4.1, §9.2). Keep the core separate from the transport so M5 can add Improv Serial without changing it:
   - takes the WiFi settings, saves them with `net::set_credentials`, waits for the connection (with a timeout), then reports provisioned with the redirect URL `http://<ip>/`, or reports an error;
   - answers device info with `DFU32`, the firmware version, the chip (since M5 with the board profile: `ESP32-S3 / feather_esp32s3`) and the hostname.
-- The button (unclaim / factory reset) and the LED states, built on `espressif/button` and `espressif/led_indicator` + `led_strip` (SPEC §4.1) rather than local code.
+- The button (clear the API token / factory reset) and the LED states, built on `espressif/button` and `espressif/led_indicator` + `led_strip` (SPEC §4.1) rather than local code.
 - DFU32 self-OTA upload with rollback (`esp_ota_mark_app_valid_cancel_rollback` once WiFi and HTTP are up).
 - Firmware version from the git tag: CI checks out full history (`fetch-depth: 0`) so `git describe` gives `v0.4.0` rather than a bare hash. The same string shows in `/api/v1/status`, the UI, Improv device info and, in M5, the installer manifests.
 - `docs/RECOVERY.md` and `docs/OPERATOR.md` (MeshCore walkthrough, including remote `start ota`).
@@ -116,11 +116,11 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
 - **Split into two PRs:**
   - **M4a, provisioning and device (implemented, awaiting bench):**
     - `components/improv`: a transport-agnostic Improv core (WiFi settings, identify, device info; pure and host-tested) over the vendored `improv-wifi/sdk-cpp` 1.2.7, plus the Improv BLE transport (NimBLE GATT server, advertising with Improv service data). Open while no network is stored, for 5 minutes after a 2 s button press, or with `improv start`; it holds the BLE lease while open. A failed attempt puts the previous network back;
-    - `components/indicator`: NeoPixel and red-LED patterns with `espressif/led_indicator` on `led_strip`, and the button with `espressif/button` (release after 2 s = Improv, 5 s = unclaim, 15 s = factory reset, with amber feedback while held). Pattern choice and hold timing are pure and host-tested;
+    - `components/indicator`: NeoPixel and red-LED patterns with `espressif/led_indicator` on `led_strip`, and the button with `espressif/button` (release after 2 s = Improv, 5 s = clear the API token, 15 s = factory reset, with amber feedback while held). Pattern choice and hold timing are pure and host-tested;
     - firmware version from `git describe` (CI checks out full history);
     - console: `improv [start|stop]`.
   - **M4b, web UI and self-OTA (implemented, awaiting bench):**
-    - the web UI in one vanilla HTML file (`components/api/ui/index.html`): claim and sign-in screens, Status (job, progress, Check / Stage / Flash / Abort, staged image), Target (form, tuning, BLE scan picker), Runs (history and detail with the log), Logs (live tail), System (settings, firmware upload, token rotate, reboot). Gzipped at build time by `tools/dfu32_ui.py`, about 10 KB of the 40 KB budget, checked in CI;
+    - the web UI in one vanilla HTML file (`components/api/ui/index.html`): a sign-in screen (only while a token is set; the claim screen was dropped when the token became optional), Status (job, progress, Check / Stage / Flash / Abort, staged image), Target (form, tuning, BLE scan picker), Runs (history and detail with the log), Logs (live tail), System (settings, firmware upload, token on / rotate / off, reboot). Gzipped at build time by `tools/dfu32_ui.py`, about 10 KB of the 40 KB budget, checked in CI;
     - `POST /api/v1/system/ota`: checks chip, project and a new board tag in the image before writing (pure, host-tested), streams into the other slot, reboots; the new image confirms itself once WiFi and the API are up within 90 s, otherwise it rolls back;
     - `docs/OPERATOR.md` (MeshCore walkthrough, remote `start ota`) and `docs/RECOVERY.md`.
 
@@ -158,7 +158,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 - `THIRD_PARTY_NOTICES`, generated from `dependencies.lock`, ships on the page and with each release (moved here from M6, because this is the first milestone that publishes binaries). **Implemented:** `tools/dfu32_notices.py` (with tests) writes it from the lock files, the vendored Improv SDK and the pinned ESP Web Tools version, plus ESP-IDF's copyright list for the locked release. It is committed; CI fails when it is stale or a dependency has no license entry. The page links `THIRD_PARTY_NOTICES.txt`, and releases carry it.
 - README: an "Install from your browser" link, and a note that the merged `.bin` is for fresh installs and resets settings.
 - **Bench:**
-  - from a manual `pages` deployment of `main`: Feather S3 (erased) and Feather V2: install, enter the SSID and passphrase, then "Visit device" opens the claim screen;
+  - from a manual `pages` deployment of `main`: Feather S3 (erased) and Feather V2: install, enter the SSID and passphrase, then "Visit device" opens the web UI;
   - a wrong passphrase shows the Improv error, and the retry works;
   - coming back with DFU32 installed: the page recognises it, and updating keeps WiFi, the token, the target and the staged image;
   - the console REPL still works in a terminal afterwards, including after a cut-off Improv frame;
@@ -177,7 +177,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 Specified in [SPEC §10.4](../SPEC.md#104-live-ble-signal-monitor-specified-not-yet-implemented). It can land before or after M6.
 
 - `dfu32_core/ble_monitor.hpp`, pure and host-tested: the 64-slot table (eviction, the target pinned and never evicted, one pinned row fed by the app MAC and MAC+1), the 128-entry name cache, the time-weighted EMA, min/max, stale and drop ages, bars, the filters with their defaults and `all`, and the NDJSON line.
-- `components/job`: a preemptible lease holder (`monitor`) that hands over to any other acquirer instead of causing a `409`, except target `PUT`/`DELETE`, which coexist with it; target changes re-pin the monitor; token rotate, unclaim and token clear end open streams.
+- `components/job`: a preemptible lease holder (`monitor`) that hands over to any other acquirer instead of causing a `409`, except target `PUT`/`DELETE`, which coexist with it; target changes re-pin the monitor; any credential change ends open streams: a token set (`POST /claim`), rotated, or cleared (over HTTP, on the console or with the button).
 - `dfu_ble`: make the "DFU-looking advertisers" log hint in `note()` case-insensitive too, so it agrees with `classify_dfu`.
 - `components/dfu_ble`: the monitor scan (2 s active / 28 s passive cycle, duplicate filter off, no NimBLE result list), viewer counting with the 10 s grace, and the job feed from `find_target`.
 - `components/api`: `GET /api/v1/ble/monitor` (stream and `?once=1`) on its own task with async requests, at most 2 streams, 10 minutes each.

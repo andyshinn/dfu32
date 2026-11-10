@@ -19,6 +19,6 @@ std::string rotate_token();
 
 /// Turns token auth off (back to an open API); POST /api/v1/claim turns it
 /// on again with a new token.
-bool unclaim();
+bool clear_token();
 
 }  // namespace dfu32::api
