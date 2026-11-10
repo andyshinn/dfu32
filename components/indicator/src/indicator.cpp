@@ -162,7 +162,7 @@ bool setup_button() {
         ESP_LOGW(TAG, "button on GPIO %d unavailable: %s", CONFIG_DFU32_BUTTON_GPIO, esp_err_to_name(err));
         return false;
     }
-    ESP_LOGI(TAG, "button on GPIO %d: hold 2 s = Improv BLE, 5 s = unclaim, 15 s = factory reset",
+    ESP_LOGI(TAG, "button on GPIO %d: hold 2 s = Improv BLE, 5 s = clear the API token, 15 s = factory reset",
              CONFIG_DFU32_BUTTON_GPIO);
 #endif
     return true;
@@ -174,9 +174,9 @@ void run_action(ButtonAction a) {
             ESP_LOGI(TAG, "button: opening Improv BLE for 5 minutes");
             if (g_hooks.on_improv_window) g_hooks.on_improv_window();
             break;
-        case ButtonAction::Unclaim:
-            ESP_LOGW(TAG, "button: unclaiming the API token");
-            if (g_hooks.on_unclaim) g_hooks.on_unclaim();
+        case ButtonAction::ClearToken:
+            ESP_LOGW(TAG, "button: clearing the API token (API open)");
+            if (g_hooks.on_clear_token) g_hooks.on_clear_token();
             break;
         case ButtonAction::FactoryReset:
             ESP_LOGW(TAG, "button: factory reset");

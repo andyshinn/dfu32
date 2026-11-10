@@ -272,11 +272,10 @@ class FakeDfu32:
             tok = self.issue_token()
             self.emit(f"New API token (the old one stops working):\n{tok}\n")
         elif len(argv) > 1 and argv[1] == "clear":
-            self.claimed = False
-            self.token_hash = ""
-            self.emit("Unclaimed: the next POST /api/v1/claim issues a token.\n")
+            self.clear_token()
+            self.emit("Token cleared: the API is open (no token needed). `token rotate` sets one again.\n")
         else:
-            self.emit("API claimed.\n" if self.claimed else "API unclaimed.\n")
+            self.emit("API token required.\n" if self.claimed else "API open: no token set.\n")
 
     def c_runs(self, argv) -> None:
         if not self.runs:
@@ -443,7 +442,18 @@ class FakeDfu32:
         tok = secrets.token_urlsafe(32)
         self.token_hash = hashlib.sha256(tok.encode()).hexdigest()
         self.claimed = True
+        self.reset_throttle()
         return tok
+
+    def clear_token(self) -> None:
+        self.claimed = False
+        self.token_hash = ""
+        self.reset_throttle()
+
+    def reset_throttle(self) -> None:  # a new credential starts with a clean slate, as on the device
+        self.fail_count = 0
+        self.penalty_until = 0.0
+        self.next_slot = 0.0
 
     def start_http(self) -> int:
         dev = self
@@ -495,7 +505,7 @@ class FakeDfu32:
 
     def auth(self, header: str):
         if not self.claimed:
-            return 403, {"error": "UNCLAIMED"}, {}
+            return None  # token auth is opt-in: open until a token is set
         now = time.monotonic()
         if now < self.penalty_until:
             if now < self.next_slot:
@@ -612,6 +622,9 @@ class FakeDfu32:
         if parts == ["system", "reboot"]:
             threading.Thread(target=self.reboot, args=("api",), daemon=True).start()
             return 202, {"rebooting": True}, {}
+        if parts == ["system", "token", "clear"] and method == "POST":
+            self.clear_token()
+            return 200, {"claimed": False}, {}
         if parts == ["debug", "fault"]:
             self.faults = data
             return 200, data, {}

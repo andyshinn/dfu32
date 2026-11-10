@@ -154,10 +154,10 @@ Worth trying on the bench:
 No server needed: DFU32 takes the image from its web UI or the API. In the web UI, open **Image** and pick the DFU `.zip`; the browser unpacks and checks it, and **Stage** uploads it. Or from your computer:
 
 ```bash
-DFU32_TOKEN=<token> python3 tools/dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --upload dfu32-xxxx.local
+python3 tools/dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --upload dfu32-xxxx.local
 ```
 
-Both send `POST /api/v1/staging` with the `.bin` as the body and the `.dat`, version (from a MeshCore file name unless you give `--version`), optional `--board` and the `.bin`'s SHA-256 in the query. Afterwards `staged` should end with `result OK`, with `from upload:<zip name>` and an empty `target`. The image isn't tied to the target, and without `--board` DFU32 doesn't compare it with `target board`.
+If DFU32 requires a token, add `--token <token>` (or set `DFU32_TOKEN`). Both send `POST /api/v1/staging` with the `.bin` as the body and the `.dat`, version (from a MeshCore file name unless you give `--version`), optional `--board` and the `.bin`'s SHA-256 in the query. Afterwards `staged` should end with `result OK`, with `from upload:<zip name>` and an empty `target`. The image isn't tied to the target, and without `--board` DFU32 doesn't compare it with `target board`.
 
 Worth trying on the bench:
 - **Wrong .dat:** zip a `.dat` from another build with the `.bin`. The UI and the tool refuse it before uploading; with `curl` (below), DFU32 answers `422 DAT_CRC_MISMATCH` and nothing is staged.
@@ -166,7 +166,7 @@ Worth trying on the bench:
 - **By hand**, from an unpacked zip:
 
   ```bash
-  curl -X POST -H "Authorization: Bearer $DFU32_TOKEN" --data-binary @app.bin \
+  curl -X POST --data-binary @app.bin \
     "http://dfu32-xxxx.local/api/v1/staging?version=v1.18.0-81dbae5&dat=$(xxd -p app.dat | tr -d '\n')"
   ```
 
@@ -243,7 +243,7 @@ Everything above can be done with `curl` from the PC. DFU32 answers on `http://d
 DFU=http://dfu32-xxxx.local/api/v1
 ```
 
-**Claim the device once.** The token is shown only this time; DFU32 keeps just its SHA-256. If you lose it, `token rotate` on the console prints a new one (`token clear` unclaims).
+**Turn on the token** (optional: with none set, the calls below also work without `-H "Authorization: …"`). The token is shown only this time; DFU32 keeps just its SHA-256. If you lose it, `token rotate` on the console prints a new one (`token clear` turns it off).
 
 ```bash
 curl -s -X POST $DFU/claim
@@ -292,7 +292,7 @@ Other calls:
 | `POST /ble/scan` with `{"duration_s":10,"dfu_only":true}` | Advertisers, strongest first, with `dfu` and `matches_target` hints. Run `start ota` first. |
 | `GET /logs` then `GET /logs?since=<next>` | Live log tail. |
 | `GET /config` · `PUT /config` | `hostname`, `ntp_server` (both need a reboot), `wifi_off_dfu`, `dfu_deadline_max_s`. |
-| `POST /system/reboot` · `POST /system/token/rotate` | |
+| `POST /system/reboot` · `POST /system/token/rotate` · `POST /system/token/clear` | |
 
 The console's `job` shows the same state as `status`; `job abort` aborts.
 
@@ -345,7 +345,7 @@ A full run flashes the repeater about 20 times and takes roughly an hour, most o
 
 ### What it changes on DFU32
 
-- It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also unclaims the device and claims it again.
+- It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also turns the token off and on again (with `token clear` and `POST /system/token/clear`).
 - It creates or overwrites the target (`--target-id`, default `t096`). If another target id exists, it is deleted, because v1 allows only one.
 - 3.13 renames DFU32 to `bench-dfu`, reboots, then renames it back and reboots again (`--keep-hostname` skips the rename back).
 - The staged image ends up as the image under test.
@@ -411,7 +411,7 @@ These need a phone or a computer with Bluetooth, and eyes on the board, so the b
 **Button** (BOOT on the Feather S3 and N16R8, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
 
 7. **Hold 2–5 s:** amber slow blink while held; on release `improv` shows "open" and the NeoPixel blinks white. It closes by itself after 5 minutes.
-8. **Hold 5–15 s:** amber fast blink; on release the log says "API token cleared", `GET /status` shows `"claimed":false`, and `POST /claim` works again.
+8. **Hold 5–15 s:** amber fast blink; on release the log says "API token cleared", `GET /status` shows `"claimed":false`, and the API works without a token again.
 9. **Hold 15 s or more:** solid amber; on release DFU32 erases its settings and WiFi and reboots into Improv. `runs` and `staged` still show the run history and the staged image.
 10. **Short press (< 2 s):** nothing happens.
 
@@ -421,8 +421,8 @@ These need a phone or a computer with Bluetooth, and eyes on the board, so the b
 
 Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 
-1. **Claim:** on an unclaimed device the page offers **Claim this device** and shows the token once. Reload: you are still signed in. In a private window you get **Sign in**; a wrong token says so, the right one works.
-2. **Improv redirect:** after provisioning over Improv BLE (§8), the client's "visit device" link opens this page on the claim screen.
+1. **Token:** with no token set the page opens on Status with no sign-in. **System → Access → Require a token** shows the token once. Reload: you are still signed in. In a private window you get **Sign in**; a wrong token says so, the right one works. **Turn off token** makes the private window work without signing in.
+2. **Improv redirect:** after provisioning over Improv BLE (§8), the client's "visit device" link opens this page, ready to use.
 3. **Target:** run `start ota`, **Scan**, **Use as target** fills the MAC; fill in id, board and manifest URL, **Save**. Reloading shows the saved values. Change one tuning value and save.
 4. **Happy path from the UI only:** **Check** shows the version and board match; **Flash**, then `start ota` over LoRa from the companion app. The job card shows armed (countdown), then the progress bar and rate, then succeeded, with a link to the run. This is the M4 "done when" (after joining WiFi over Improv).
 5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
@@ -457,7 +457,7 @@ Improv Serial shares the console port with the REPL (SPEC §9.2). Before the ins
 
 Once `main` has it, the installer page itself (MILESTONES M5 bench):
 
-10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens the claim screen.
+10. **Install and provision:** from a manual `pages` deployment: a Feather S3 (erased) and a Feather V2. Install, enter the SSID and passphrase, and "Visit device" opens DFU32's web UI on Status (no token is set yet).
 11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.

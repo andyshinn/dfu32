@@ -134,7 +134,7 @@ class Image(unittest.TestCase):
 class FakeDfu32:
     """A DFU32 that checks POST /api/v1/staging the way the firmware does (SPEC.md §8, §10.1)."""
 
-    def __init__(self, token: str = "tok"):
+    def __init__(self, token: str | None = "tok"):  # None: token auth off, as DFU32 ships
         import http.server
         import json
         import threading
@@ -160,7 +160,7 @@ class FakeDfu32:
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 fake.requests.append({"path": u.path, "query": q, "body": body,
                                       "auth": self.headers.get("Authorization")})
-                if self.headers.get("Authorization") != "Bearer " + token:
+                if token is not None and self.headers.get("Authorization") != "Bearer " + token:
                     return self.reply(401, {"error": "UNAUTHORIZED"})
                 pkt = si.parse_dat(bytes.fromhex(q["dat"]))
                 if si.crc16_ccitt(body) != pkt.crc16:
@@ -250,8 +250,16 @@ class Upload(unittest.TestCase):
         self.assertIn("HTTP 401", err)
         rc, _, err = self.run_cli(str(z), "--upload", self.dfu32.url)
         self.assertEqual(rc, 1)
-        self.assertIn("needs the API token", err)
-        self.assertEqual(len(self.dfu32.requests), 1)  # no request without a token
+        self.assertIn("requires an API token", err)
+        self.assertIsNone(self.dfu32.requests[-1]["auth"])  # no header at all without a token
+
+    def test_device_without_a_token(self):
+        open_dfu32 = FakeDfu32(token=None)
+        self.addCleanup(open_dfu32.close)
+        bin_data, dat = synthetic_package(1024)
+        rc, _, err = self.run_cli(str(self.zip_of(bin_data, dat, "pkg.zip")), "--upload", open_dfu32.url)
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(open_dfu32.requests[-1]["auth"])
 
     def test_checked_before_uploading(self):
         bin_data, dat = synthetic_package(1024)

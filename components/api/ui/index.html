@@ -98,8 +98,11 @@ function note(kind, ...kids) { return h("div.note.n-" + kind, ...kids); }
 // ---- API --------------------------------------------------------------------------------
 const TOKEN_KEY = "dfu32.token";
 let token = "";
+let newToken = "";  // a token just issued here, shown under System → Access until dismissed
 try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) {}
 function setToken(t) { token = t; try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+// A 401 means the device requires a token this browser doesn't have (any more): back to sign-in.
+function onUnauthorized() { setToken(""); newToken = ""; if (status) status.device.claimed = true; route(); }
 class ApiError extends Error { constructor(status, body) { super((body && (body.detail || body.error)) || "HTTP " + status); this.status = status; this.body = body; } }
 async function api(method, path, body) {
   const headers = {};
@@ -109,7 +112,7 @@ async function api(method, path, body) {
   const r = await fetch("/api/v1" + path, { method, headers, body: data, cache: "no-store" });
   let j = null;
   if (r.status !== 204) { try { j = await r.json(); } catch (e) {} }
-  if (r.status === 401) { setToken(""); route(); throw new ApiError(401, j); }
+  if (r.status === 401) { onUnauthorized(); throw new ApiError(401, j); }
   if (!r.ok) throw new ApiError(r.status, j);
   return j;
 }
@@ -149,8 +152,9 @@ async function route() {
   stopLogs();
   if (!status) await refresh();
   if (!status) return;
-  if (!status.device.claimed) return viewClaim();
-  if (!token) return viewToken();
+  // Token auth is opt-in: with no token set on the device, everything is open.
+  if (!status.device.claimed) { if (token) setToken(""); newToken = ""; }
+  else if (!token) return viewToken();
   $("#nav").hidden = false;
   if (!cfg) cfg = await api("GET", "/config").catch(() => null);
   const [name, arg] = (location.hash.slice(1) || "status").split("/");
@@ -160,21 +164,7 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 
-// ---- claim / token ----------------------------------------------------------------------
-function viewClaim() {
-  $("#nav").hidden = true;
-  const btn = h("button.pri", { onclick: () => act(btn, async () => {
-    const r = await api("POST", "/claim");
-    setToken(r.token);
-    status.device.claimed = true;
-    $("#main").replaceChildren(h("section.center", h("h2", "Device claimed"),
-      h("p", "This is the API token. This browser remembers it; copy it now for scripts or Home Assistant: it is never shown again."),
-      h("pre", r.token), h("p", h("button.pri", { onclick: () => { location.hash = "#status"; route(); } }, "Continue"))));
-  }) }, "Claim this device");
-  $("#main").replaceChildren(h("section.center", h("h2", "Claim this DFU32"),
-    h("p", "Nobody has claimed this device yet. Claiming creates the API token that every other page and script needs."),
-    btn));
-}
+// ---- sign in (only when the device requires a token) -----------------------------------
 function viewToken() {
   $("#nav").hidden = true;
   const inp = h("input", { placeholder: "API token", autocomplete: "off", spellcheck: "false" });
@@ -184,9 +174,9 @@ function viewToken() {
     route();
   }) }, "Sign in");
   $("#main").replaceChildren(h("section.center", h("h2", "Sign in"),
-    h("p", "Paste the API token from when this device was claimed."),
+    h("p", "This DFU32 requires an API token. Paste the one shown when the token was turned on."),
     h("div.row", inp, btn),
-    h("p.mute.small", "Lost it? On the console run ", h("code", "token rotate"), ", or hold the button 5–15 s to unclaim and claim again.")));
+    h("p.mute.small", "Lost it? On the console run ", h("code", "token rotate"), " for a new one or ", h("code", "token clear"), " to turn the token off, or hold the button 5–15 s to turn it off.")));
 }
 
 // ---- status -----------------------------------------------------------------------------
@@ -326,11 +316,11 @@ function viewImage() {
       prog.replaceChildren(h("div.bar", bar), h("div.small.mute", "Uploading…"));
       const x = new XMLHttpRequest();
       x.open("POST", "/api/v1/staging?dat=" + window.dfu32Staging.hex(pkg.dat) + "&version=" + encodeURIComponent(v) + (b ? "&board=" + encodeURIComponent(b) : "") + "&name=" + encodeURIComponent(clipName(f.name)));
-      x.setRequestHeader("Authorization", "Bearer " + token);
+      if (token) x.setRequestHeader("Authorization", "Bearer " + token);
       x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(100 * e.loaded / e.total) + "%"; };
       x.onload = async () => {
         let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
-        if (x.status === 401) { setToken(""); return route(); }
+        if (x.status === 401) return onUnauthorized();
         if (x.status !== 200) { go.disabled = false; return prog.replaceChildren(note("bad", j.detail || j.error || "Upload failed (HTTP " + x.status + ")")); }
         prog.replaceChildren(note("info", "Staged " + j.version + ". Flash it from ", h("a", { href: "#status" }, "Status"), " with Flash from: staged image."));
         await refresh();
@@ -484,10 +474,11 @@ async function viewSystem() {
     prog.replaceChildren(h("div.bar", bar), h("div.small.mute", "Uploading…"));
     const x = new XMLHttpRequest();
     x.open("POST", "/api/v1/system/ota" + (force.checked ? "?force=1" : ""));
-    x.setRequestHeader("Authorization", "Bearer " + token);
+    if (token) x.setRequestHeader("Authorization", "Bearer " + token);
     x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(100 * e.loaded / e.total) + "%"; };
     x.onload = () => {
       let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status === 401) { onUnauthorized(); return; }
       if (x.status !== 200) { upload.disabled = false; prog.replaceChildren(note("bad", j.detail || j.error || "Upload failed (HTTP " + x.status + ")")); return; }
       prog.replaceChildren(note("info", "Installed " + j.version + ". Rebooting; waiting for it to come back…"));
       waitBack(j.version, prog);
@@ -496,14 +487,26 @@ async function viewSystem() {
     x.send(f);
   } }, "Install");
 
-  const tok = h("div");
-  const rotate = h("button", { onclick: () => { if (confirm("Issue a new API token? The old one stops working everywhere (scripts, Home Assistant).")) act(rotate, async () => {
-    const r = await api("POST", "/system/token/rotate"); setToken(r.token);
-    tok.replaceChildren(note("info", "New token (saved in this browser; copy it for scripts):"), h("pre", r.token));
-  }); } }, "Rotate token");
   const reboot = h("button.dng", { onclick: () => { if (confirm("Reboot DFU32?")) act(reboot, async () => {
     await api("POST", "/system/reboot" + (active(status.job) ? "?force=1" : "")); toast("Rebooting…"); setTimeout(refresh, 8000);
   }); } }, "Reboot");
+  // A new token is kept in this browser and shown below the Access buttons until dismissed.
+  const showToken = (t) => { setToken(t); newToken = t; status.device.claimed = true; return viewSystem(); };
+  const access = [];
+  if (d.claimed) {
+    const rotate = h("button", { onclick: () => { if (confirm("Issue a new API token? The old one stops working everywhere (scripts, Home Assistant).")) act(rotate, async () => {
+      showToken((await api("POST", "/system/token/rotate")).token);
+    }); } }, "Rotate token");
+    const off = h("button", { onclick: () => { if (confirm("Stop requiring a token? Anyone who can reach DFU32 on your network can then use this page and the API.")) act(off, async () => {
+      await api("POST", "/system/token/clear"); setToken(""); newToken = ""; status.device.claimed = false; viewSystem(); toast("Token turned off");
+    }); } }, "Turn off token");
+    access.push(h("p.mute.small", "An API token is required for everything but the status summary."),
+      h("div.row", rotate, off, h("button", { onclick: () => { setToken(""); newToken = ""; route(); } }, "Sign out of this browser"), reboot));
+  } else {
+    const on = h("button", { onclick: () => act(on, async () => { showToken((await api("POST", "/claim")).token); }) }, "Require a token");
+    access.push(h("p.mute.small", "No token is set: anyone who can reach DFU32 on your network can use this page and the API. Require a token to lock it down; each browser then signs in once."),
+      h("div.row", on, reboot));
+  }
 
   $("#main").replaceChildren(
     h("section", h("h2", "Device"), dl([["Firmware", d.version + (cfg.partition ? " (" + cfg.partition + ")" : "")], ["Board", d.board], ["Hostname", d.hostname + ".local"], ["Uptime", dur(d.uptime_s * 1000)],
@@ -512,7 +515,9 @@ async function viewSystem() {
       h("div.row", { style: "margin-top:.7rem" }, h("label.chk", wifiOff, "Stop WiFi during transfers by default"), save)),
     h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload dfu32.bin from a CI build or release for this board. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),
       h("div.row", file, h("label.chk", force, "allow another board's build"), upload), prog),
-    h("section", h("h2", "Access"), h("div.row", rotate, h("button", { onclick: () => { setToken(""); route(); } }, "Sign out of this browser"), reboot), tok));
+    h("section", h("h2", "Access"), ...access,
+      newToken ? [note("info", "New token (saved in this browser; copy it for scripts or Home Assistant: once dismissed it is never shown again):"), h("pre", newToken),
+        h("button", { onclick: () => { newToken = ""; viewSystem(); } }, "Done, I copied it")] : null));
 }
 async function waitBack(version, prog) {
   const until = Date.now() + 150000;

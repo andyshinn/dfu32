@@ -40,6 +40,7 @@ enum class Route : uint8_t {
     Config,        // GET/PUT /api/v1/config
     Reboot,        // POST /api/v1/system/reboot
     TokenRotate,   // POST /api/v1/system/token/rotate
+    TokenClear,    // POST /api/v1/system/token/clear (turns token auth off)
     SystemOta,     // POST /api/v1/system/ota (raw firmware image)
     DebugFault,    // POST /api/v1/debug/fault (CONFIG_DFU32_DEBUG_ENDPOINTS only)
 };
@@ -53,7 +54,8 @@ struct RouteMatch {
 /// Matches a request URI (any "?query" is ignored; one trailing '/' is ok).
 RouteMatch match_route(std::string_view uri);
 bool method_allowed(Route r, Method m) noexcept;
-/// Routes that work without a token (and while unclaimed).
+/// Routes that work without a token even when one is set. (While no token
+/// is set, every route does: token auth is opt-in, SPEC.md §9.3.)
 bool is_public(Route r) noexcept;
 /// The value of `key` in the URI's query string, or "" (no %-decoding:
 /// for values that are numbers or flags).

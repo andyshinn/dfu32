@@ -302,17 +302,17 @@ def c_hash_mismatch(ctx: Ctx) -> None:
 # ============================================================================================
 
 
-@check("3.1", "claim, token auth, 429 throttle, token rotate")
+@check("3.1", "open API, claim, token auth, 429 throttle, token rotate, token clear")
 def c_claim(ctx: Ctx) -> None:
     api = ctx.ensure_api()
     out = ctx.con.cmd("token clear", 10)
-    ctx.expect("Unclaimed" in out, "`token clear` unclaimed the device", out)
+    ctx.expect("Token cleared" in out, "`token clear` turned the token off", out)
     ctx.token = None
     api.token = None
     st = api.status()
     ctx.expect(st is not None and st["device"]["claimed"] is False, "GET /status works without a token, claimed:false")
     r = api.get("/targets", token=None)
-    ctx.expect(r.status == 403 and r.error == "UNCLAIMED", "while unclaimed, other calls get 403 UNCLAIMED", r.short())
+    ctx.expect(r.status == 200, "with no token set, other calls work without one", r.short())
     r = api.post("/claim", token=None)
     ctx.expect(r.status == 200 and bool(r.get("token")), "POST /claim returned a token", r.short())
     ctx.set_token(r.get("token"))
@@ -332,13 +332,20 @@ def c_claim(ctx: Ctx) -> None:
     ctx.expect(bool(new), "`token rotate` printed a new token")
     old = ctx.token
     ctx.set_token(new)
-    time.sleep(1.2)
-    r = api.get("/targets", token=old)
+    # A new credential resets the throttle, so no more 429s from here on.
+    r = api.get("/targets", retry_429=False)
+    ctx.expect(r.status == 200, "the new token works at once (rotating ends the auth penalty)", r.short())
+    r = api.get("/targets", token=old, retry_429=False)
     ctx.expect(r.status == 401, "the old token stops working", r.short())
-    time.sleep(1.2)
-    r = api.get("/targets")
-    ctx.expect(r.status == 200, "the new token works", r.short())
-    ctx.countdown(62, "waiting out the 60 s auth penalty so later checks aren't throttled")
+    r = api.post("/system/token/clear", token=None, retry_429=False)
+    ctx.expect(r.status == 401, "POST /system/token/clear needs the token", r.short())
+    r = api.post("/system/token/clear", retry_429=False)
+    ctx.expect(r.status == 200 and r.get("claimed") is False, "POST /system/token/clear turned the token off", r.short())
+    r = api.get("/targets", token=None)
+    ctx.expect(r.status == 200, "after token/clear, calls work without a token again", r.short())
+    r = api.post("/claim", token=None)
+    ctx.expect(r.status == 200 and bool(r.get("token")), "POST /claim turns the token back on", r.short())
+    ctx.set_token(r.get("token"))
 
 
 @check("3.2", "PUT/GET target, /status, one-target limit")

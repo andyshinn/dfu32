@@ -16,11 +16,13 @@ Otherwise, a DFU32 with no WiFi stored opens **Improv BLE** by itself; its NeoPi
 
 To change the network later, hold the button for 2–5 seconds (the NeoPixel blinks amber slowly while held); Improv opens again for 5 minutes. Over USB, `wifi <ssid> <password>` on the console does the same.
 
-## 2. Claim it
+## 2. API token (optional)
 
-The first visit to the web UI shows **Claim this device**. Claiming creates the API token. The browser keeps it, and the page shows it once so you can copy it for scripts or Home Assistant.
+Out of the box DFU32 needs no token: the web UI and the API are open to anything that can reach it on your network. For a device that stays on your LAN, that is usually fine.
 
-Lost the token? Hold the button 5–15 seconds (amber fast blink) to unclaim, or run `token rotate` on the console.
+To lock it down, open **System → Access → Require a token**. The page shows the token once so you can copy it for scripts or Home Assistant; this browser keeps it, and any other browser signs in once with it. **Turn off token** in the same place makes it open again.
+
+Lost the token? Hold the button 5–15 seconds (amber fast blink), or run `token clear` on the console: both turn the token off. `token rotate` prints a new one instead.
 
 ## 3. Serve the firmware (optional)
 
@@ -52,7 +54,7 @@ The scan put the repeater into OTA mode. Reboot it (or wait for it to time out) 
 
 First get the image onto DFU32 (it is **staged**: kept in DFU32's flash until replaced):
 
-- **Upload it:** on **Image**, choose (or drop) the DFU `.zip`. Your browser unpacks it and checks it, you confirm the version (taken from a MeshCore file name), and **Stage** sends it to DFU32, which checks it again and writes it. The image isn't tied to the target. Without a board on it, DFU32 can't tell if it suits the repeater, so pick the right zip (or fill in **Board**, which DFU32 then compares with the target's). From a script: `python3 tools/dfu32_stage_image.py <zip> --upload dfu32-xxxx.local --token <token>`.
+- **Upload it:** on **Image**, choose (or drop) the DFU `.zip`. Your browser unpacks it and checks it, you confirm the version (taken from a MeshCore file name), and **Stage** sends it to DFU32, which checks it again and writes it. The image isn't tied to the target. Without a board on it, DFU32 can't tell if it suits the repeater, so pick the right zip (or fill in **Board**, which DFU32 then compares with the target's). From a script: `python3 tools/dfu32_stage_image.py <zip> --upload dfu32-xxxx.local` (add `--token <token>` if DFU32 requires one).
 - **Or over USB**, with no network: on [dfu32.app](https://dfu32.app/), **Connect device**, **Stage nRF52 image**, pick the zip.
 - **Or from your server** (§3), on **Status**: **Check** fetches the manifest and shows the version, whether it suits the board, and whether it is newer than what DFU32 last flashed (it changes nothing). **Stage** downloads and verifies the image. Flashing with *Flash from: manifest* does both itself.
 
@@ -96,4 +98,4 @@ If the new firmware can't bring WiFi and the web UI back within 90 seconds, DFU3
 
 The red LED (Feathers) stays on while a repeater is known to be erased, and blinks during a transfer.
 
-Hold the button and let go: 2–5 s opens Improv for 5 minutes, 5–15 s unclaims the API token, 15 s or more erases DFU32's settings and WiFi (not the staged image or the run history). The factory reset is refused while a flash is running.
+Hold the button and let go: 2–5 s opens Improv for 5 minutes, 5–15 s clears the API token (open access), 15 s or more erases DFU32's settings and WiFi (not the staged image or the run history). The factory reset is refused while a flash is running.

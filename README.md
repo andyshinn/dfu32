@@ -4,7 +4,7 @@ DFU32 is ESP32 firmware that flashes nRF52 boards over BLE using Nordic **legacy
 
 DFU32 is firmware-agnostic. The motivating use case is MeshCore LoRa repeaters.
 
-**Status:** Milestone M5. A browser installer on GitHub Pages flashes DFU32 and sets its WiFi over Improv Serial (or join over Improv BLE from Home Assistant). DFU32 then serves a web UI (claimed on first use) that configures the target, stages its image from your server and flashes the repeater over BLE once you run `start ota`, with automatic retries, run records and live progress. It updates itself from the same UI, with rollback. Next is v1.0 hardening (M6): the soak test, the other boards and release builds. Start with [docs/OPERATOR.md](docs/OPERATOR.md); see also [docs/RECOVERY.md](docs/RECOVERY.md), [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
+**Status:** Milestone M5. A browser installer on GitHub Pages flashes DFU32 and sets its WiFi over Improv Serial (or join over Improv BLE from Home Assistant). DFU32 then serves a web UI (with an optional API token) that configures the target, stages its image from your server and flashes the repeater over BLE once you run `start ota`, with automatic retries, run records and live progress. It updates itself from the same UI, with rollback. Next is v1.0 hardening (M6): the soak test, the other boards and release builds. Start with [docs/OPERATOR.md](docs/OPERATOR.md); see also [docs/RECOVERY.md](docs/RECOVERY.md), [docs/BENCH.md](docs/BENCH.md) and [docs/MILESTONES.md](docs/MILESTONES.md).
 
 - [SPEC.md](SPEC.md): the full specification
 - [docs/MILESTONES.md](docs/MILESTONES.md): phased plan
@@ -83,7 +83,7 @@ Build directories from the older `idf.py -B build/<profile> -DDFU32_BOARD=<profi
 
 PSRAM is required. A board without it won't boot this firmware.
 
-The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into download mode by itself. Pull BOOT0 to GND, press reset, flash, then release BOOT0 and press reset again. Its status LED is the blue one on GPIO2 (the RAK19007 has no NeoPixel). It has no user button, so a lost API token can only be recovered by reflashing with an NVS erase; while you still have the token, `POST /api/v1/system/token/rotate` replaces it.
+The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into download mode by itself. Pull BOOT0 to GND, press reset, flash, then release BOOT0 and press reset again. Its status LED is the blue one on GPIO2 (the RAK19007 has no NeoPixel). It has no user button, so a lost API token is cleared with `token clear` on the USB console (or by reflashing with an NVS erase); while you still have the token, `POST /api/v1/system/token/clear` turns it off and `/rotate` replaces it.
 
 Change settings for a profile with `idf.py --preset <profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
 

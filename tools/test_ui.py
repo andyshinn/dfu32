@@ -93,7 +93,7 @@ class TestPage(unittest.TestCase):
     def test_uses_only_known_endpoints(self):
         paths = set(re.findall(r'"(/(?:status|claim|targets|jobs|runs|staging|ble|logs|config|system)[^"]*)"', self.js))
         allowed = ("/status", "/claim", "/targets", "/jobs/current/abort", "/runs", "/staging", "/ble/scan",
-                   "/logs", "/config", "/system/reboot", "/system/token/rotate", "/system/ota")
+                   "/logs", "/config", "/system/reboot", "/system/token/rotate", "/system/token/clear", "/system/ota")
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
 

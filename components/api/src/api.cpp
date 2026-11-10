@@ -57,7 +57,11 @@ constexpr const char* kDfuUuid = "00001530-1212-efde-1523-785feabcd123";
 
 httpd_handle_t g_server = nullptr;
 
-// Token state, cached from NVS (only the SHA-256 is ever stored).
+// Token state, cached from NVS (only the SHA-256 is ever stored). g_cred_mu
+// serialises credential changes (claim, rotate, clear) from HTTP, the console
+// and the button, so NVS and the cache never disagree; g_auth_mu guards the
+// cache itself. Lock order: g_cred_mu, then g_auth_mu.
+std::mutex g_cred_mu;
 std::mutex g_auth_mu;
 bool g_claimed = false;
 std::array<uint8_t, 32> g_token_hash{};
@@ -158,28 +162,46 @@ bool claimed() {
     return g_claimed;
 }
 
-/// New random token; stores its hash. Empty on failure.
-std::string issue_token() {
+enum class Issued { Ok, AlreadySet, Failed };
+
+/// New random token, replacing any old one; stores its hash. With
+/// `only_if_open` (POST /claim), refuses when a token is already set; the
+/// check and the write are one step, so a racing rotate/clear can't interleave.
+Issued issue_token(std::string& out, bool only_if_open = false) {
+    out.clear();
+    std::lock_guard<std::mutex> cred(g_cred_mu);
+    if (only_if_open && claimed()) return Issued::AlreadySet;
     std::array<uint8_t, 32> raw{};
     esp_fill_random(raw.data(), raw.size());
     const std::string token = base64url_encode(raw);
     std::array<uint8_t, 32> hash{};
-    if (!sha256(token, hash) || !config::save_token_hash(hash)) return {};
+    if (!sha256(token, hash) || !config::save_token_hash(hash)) return Issued::Failed;
     std::lock_guard<std::mutex> lk(g_auth_mu);
     g_token_hash = hash;
     g_claimed = true;
-    return token;
+    g_throttle = AuthThrottle{};  // a new credential starts with a clean slate
+    out = token;
+    return Issued::Ok;
+}
+
+/// Turns token auth off: forgets the stored hash.
+bool forget_token() {
+    std::lock_guard<std::mutex> cred(g_cred_mu);
+    if (!config::clear_token()) return false;
+    std::lock_guard<std::mutex> lk(g_auth_mu);
+    g_claimed = false;
+    g_token_hash = {};
+    g_throttle = AuthThrottle{};
+    return true;
 }
 
 /// Checks the bearer token; sends the error response itself when refusing.
+/// Token auth is opt-in (SPEC.md §9.3): with no token set, everything is open.
 bool authorize(httpd_req_t* req, esp_err_t& sent) {
     std::array<uint8_t, 32> want{};
     {
         std::lock_guard<std::mutex> lk(g_auth_mu);
-        if (!g_claimed) {
-            sent = send_error(req, "403 Forbidden", "UNCLAIMED", "claim the device first: POST /api/v1/claim");
-            return false;
-        }
+        if (!g_claimed) return true;
         // After repeated failures, check at most one token per second and
         // refuse the rest at once (never sleep on the server thread).
         if (!g_throttle.try_attempt(now_ms())) {
@@ -297,10 +319,16 @@ esp_err_t h_status(httpd_req_t* req) {
 }
 
 esp_err_t h_claim(httpd_req_t* req) {
-    if (claimed()) return send_error(req, "409 Conflict", "ALREADY_CLAIMED", "use the token issued at claim time");
-    const std::string token = issue_token();
-    if (token.empty()) return send_error(req, "500 Internal Server Error", "INTERNAL", "could not store the token");
-    ESP_LOGI(TAG, "device claimed");
+    std::string token;
+    switch (issue_token(token, /*only_if_open=*/true)) {
+        case Issued::Ok: break;
+        case Issued::AlreadySet:
+            return send_error(req, "409 Conflict", "ALREADY_CLAIMED",
+                              "a token is already set: use it, or rotate it (POST /api/v1/system/token/rotate)");
+        case Issued::Failed:
+            return send_error(req, "500 Internal Server Error", "INTERNAL", "could not store the token");
+    }
+    ESP_LOGI(TAG, "API token set: the API now requires it");
     json::ObjectWriter w;
     w.add("token", token);
     return send_obj(req, "200 OK", w);
@@ -640,9 +668,17 @@ esp_err_t h_reboot(httpd_req_t* req) {
     return send_obj(req, "202 Accepted", w);
 }
 
+esp_err_t h_token_clear(httpd_req_t* req) {
+    if (!forget_token()) return send_error(req, "500 Internal Server Error", "INTERNAL", "could not clear the token");
+    ESP_LOGW(TAG, "API token cleared over HTTP: the API is open until a token is set again");
+    json::ObjectWriter w;
+    w.add_bool("claimed", false);
+    return send_obj(req, "200 OK", w);
+}
+
 esp_err_t h_rotate(httpd_req_t* req) {
-    const std::string token = issue_token();
-    if (token.empty()) return send_error(req, "500 Internal Server Error", "INTERNAL", "could not store the token");
+    std::string token;
+    if (issue_token(token) != Issued::Ok) return send_error(req, "500 Internal Server Error", "INTERNAL", "could not store the token");
     ESP_LOGI(TAG, "API token rotated");
     json::ObjectWriter w;
     w.add("token", token);
@@ -1050,6 +1086,7 @@ esp_err_t dispatch(httpd_req_t* req) {
         case Route::Config: return h_config(req);
         case Route::Reboot: return h_reboot(req);
         case Route::TokenRotate: return h_rotate(req);
+        case Route::TokenClear: return h_token_clear(req);
         case Route::DebugFault: return h_fault(req);
         case Route::NotFound: break;
     }
@@ -1057,8 +1094,8 @@ esp_err_t dispatch(httpd_req_t* req) {
 }
 
 // The web UI (SPEC.md §10.2): components/api/ui/index.html, gzipped at build
-// time (tools/dfu32_ui.py) and embedded. It works while unclaimed (the claim
-// screen), which is where an Improv redirect lands.
+// time (tools/dfu32_ui.py) and embedded. It is always served, token or not;
+// an Improv redirect lands here.
 extern "C" const uint8_t ui_gz_start[] asm("_binary_index_html_gz_start");
 extern "C" const uint8_t ui_gz_end[] asm("_binary_index_html_gz_end");
 
@@ -1072,15 +1109,13 @@ esp_err_t h_root(httpd_req_t* req) {
 
 }  // namespace
 
-std::string rotate_token() { return issue_token(); }
-
-bool unclaim() {
-    if (!config::clear_token()) return false;
-    std::lock_guard<std::mutex> lk(g_auth_mu);
-    g_claimed = false;
-    g_token_hash = {};
-    return true;
+std::string rotate_token() {
+    std::string token;
+    issue_token(token);
+    return token;
 }
+
+bool clear_token() { return forget_token(); }
 
 bool start() {
     if (g_server != nullptr) return true;
@@ -1114,7 +1149,7 @@ bool start() {
     root.handler = &h_root;
     httpd_register_uri_handler(g_server, &root);
     net::advertise_http(static_cast<uint16_t>(cfg.server_port));
-    ESP_LOGI(TAG, "HTTP API on port %u (%s)", cfg.server_port, claimed() ? "claimed" : "unclaimed: POST /api/v1/claim");
+    ESP_LOGI(TAG, "HTTP API on port %u (%s)", cfg.server_port, claimed() ? "token required" : "open: no token set");
     return true;
 }
 

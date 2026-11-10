@@ -9,8 +9,9 @@ parttool.py or esptool (the command is printed at the end).
 With --upload, the package goes to a running DFU32 over WiFi instead
 (POST /api/v1/staging): the .bin as the body, the .dat, version, optional
 board and the .bin's SHA-256 in the query. DFU32 runs the same checks and
-writes the staging partition itself; nothing else is touched. The API token
-comes from --token or the DFU32_TOKEN environment variable.
+writes the staging partition itself; nothing else is touched. If the DFU32
+requires an API token, give it with --token or the DFU32_TOKEN environment
+variable.
 
 Inputs are either an adafruit-nrfutil DFU .zip (the MeshCore release format)
 or a separate firmware.bin + firmware.dat. The image is validated the same way
@@ -21,7 +22,7 @@ against the .dat.
 Examples:
   dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --board rak4631 -o staging.img
   dfu32_stage_image.py --bin firmware.bin --dat firmware.dat --board xiao -o staging.img
-  DFU32_TOKEN=... dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --upload dfu32-ab12.local
+  dfu32_stage_image.py RAK_4631_repeater-v1.18.0-81dbae5.zip --upload dfu32-ab12.local
 """
 from __future__ import annotations
 
@@ -222,8 +223,10 @@ def upload(device: str, token: str, bin_data: bytes, dat: bytes, *, version: str
     """Stages the image on a running DFU32. Returns its staged header; raises ValueError with DFU32's reason."""
     url = upload_url(device, dat=dat, version=version, board=board, sha256=hashlib.sha256(bin_data).digest(),
                      name=name)
-    req = urllib.request.Request(url, data=bin_data, method="POST", headers={
-        "Authorization": "Bearer " + token, "Content-Type": "application/octet-stream"})
+    headers = {"Content-Type": "application/octet-stream"}
+    if token:  # only when the DFU32 requires one
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=bin_data, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
@@ -232,7 +235,9 @@ def upload(device: str, token: str, bin_data: bytes, dat: bytes, *, version: str
             body = json.loads(e.read() or b"{}")
         except ValueError:
             body = {}
-        raise ValueError(f"DFU32 refused it (HTTP {e.code}): {body.get('error', '')} {body.get('detail', '')}".rstrip())
+        hint = " (this DFU32 requires an API token: --token or DFU32_TOKEN)" if e.code == 401 and not token else ""
+        raise ValueError(f"DFU32 refused it (HTTP {e.code}): {body.get('error', '')} {body.get('detail', '')}".rstrip()
+                         + hint)
     except (urllib.error.URLError, OSError) as e:
         raise ValueError(f"cannot reach {device}: {getattr(e, 'reason', e)}")
 
@@ -246,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     out.add_argument("-o", "--output", type=Path, help="staging image to write")
     out.add_argument("--upload", metavar="DFU32", help="stage it on a running DFU32 over WiFi (host name or URL)")
     ap.add_argument("--token", default=os.environ.get("DFU32_TOKEN", ""),
-                    help="API token for --upload (default: $DFU32_TOKEN)")
+                    help="API token for --upload, if the DFU32 requires one (default: $DFU32_TOKEN)")
     ap.add_argument("--board", default="", help="board id recorded in the header (e.g. rak4631)")
     ap.add_argument("--version", default="", help="version string recorded in the header")
     ap.add_argument("--target-id", default="", help="DFU32 target id recorded in the header")
@@ -286,9 +291,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def main_upload(args: argparse.Namespace) -> int:
-    if not args.token:
-        print("error: --upload needs the API token: --token or DFU32_TOKEN", file=sys.stderr)
-        return 1
     if args.target_id:
         print("note: --target-id is ignored with --upload: an uploaded image isn't tied to a target", file=sys.stderr)
     try:

@@ -15,7 +15,7 @@ struct Hooks {
     std::function<bool()> identifying;
     // Button actions; they run on the indicator task, never in the button ISR/timer.
     std::function<void()> on_improv_window;  // released after 2-5 s
-    std::function<void()> on_unclaim;        // released after 5-15 s
+    std::function<void()> on_clear_token;    // released after 5-15 s
     std::function<void()> on_factory_reset;  // released after 15 s or more
 };
 
