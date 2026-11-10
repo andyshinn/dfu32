@@ -1,0 +1,28 @@
+# Seeed Studio XIAO ESP32S3 (ESP32-S3R8: 8 MB flash, 8 MB octal PSRAM). Also
+# fits the XIAO ESP32S3 Sense, the same board with a camera add-on.
+# Pins verified against arduino-esp32 variants/XIAO_ESP32S3/pins_arduino.h and
+# Zephyr boards/seeed/xiao_esp32s3 (user LED on GPIO21, active low).
+# The radio has no on-board antenna: fit the supplied U.FL antenna before use.
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/8mb.csv"
+
+CONFIG_SPIRAM_MODE_OCT=y
+
+# Native USB on the USB-C connector.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# BLE 5 features (2M PHY, DLE) on S3.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=y
+
+CONFIG_DFU32_BOARD_NAME="xiao_esp32s3"
+# No addressable LED.
+CONFIG_DFU32_NEOPIXEL_GPIO=-1
+CONFIG_DFU32_NEOPIXEL_POWER_GPIO=-1
+# Orange user LED, lit when GPIO21 is low.
+CONFIG_DFU32_STATUS_LED_GPIO=21
+CONFIG_DFU32_STATUS_LED_ACTIVE_LOW=y
+# BOOT button (the "B" button next to the USB-C connector).
+CONFIG_DFU32_BUTTON_GPIO=0

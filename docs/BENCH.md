@@ -49,7 +49,7 @@ Each CI run uploads a `dfu32-<board>` artifact. Its `dfu32-<board>-merged.bin` c
 | Layout | Boards | App offset |
 |---|---|---|
 | 4 MB | Feather S3 | `0x20000` |
-| 8 MB | Feather V2, N16R8 | `0x30000` |
+| 8 MB | Feather V2, N16R8, XIAO ESP32S3 | `0x30000` |
 
 ```bash
 python -m esptool --port /dev/cu.usbserial-575E0522651 --baud 460800 write-flash 0x30000 build/feather_esp32_v2/dfu32.bin
@@ -188,7 +188,7 @@ The tool validates the image and prints the flash command. Quit the monitor (`Ct
 python -m esptool --port /dev/cu.usbmodem1101 write-flash 0x300000 staging.img
 ```
 
-On the 8 MB layout (Feather V2, N16R8) the offset is `0x630000`.
+On the 8 MB layout (Feather V2, N16R8, XIAO ESP32S3) the offset is `0x630000`.
 
 Back in the monitor, check the image:
 
@@ -408,7 +408,7 @@ These need a phone or a computer with Bluetooth, and eyes on the board, so the b
 5. **Busy:** while Improv is open, the console's `scan` says "Improv BLE provisioning is open", and `POST /flash` answers `409` with holder `improv`. `improv stop` frees it.
 6. **Device info:** the Improv web page shows DFU32, the firmware version (from `git describe`, e.g. `v0.3.0-12-gabc1234`), the chip and board (e.g. `ESP32-S3 / feather_esp32s3`) and the hostname. `/api/v1/status` shows the same version.
 
-**Button** (BOOT on the Feather S3 and N16R8, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
+**Button** (BOOT on the Feather S3, N16R8 and XIAO ESP32S3, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
 
 7. **Hold 2–5 s:** amber slow blink while held; on release `improv` shows "open" and the NeoPixel blinks white. It closes by itself after 5 minutes.
 8. **Hold 5–15 s:** amber fast blink; on release the log says "API token cleared", `GET /status` shows `"claimed":false`, and the API works without a token again.

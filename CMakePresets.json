@@ -32,6 +32,14 @@
             "cacheVariables": {
                 "DFU32_BOARD": "rak11200_rak19007"
             }
+        },
+        {
+            "name": "xiao_esp32s3",
+            "displayName": "Seeed Studio XIAO ESP32S3 (8 MB / 8 MB PSRAM)",
+            "binaryDir": "build/xiao_esp32s3",
+            "cacheVariables": {
+                "DFU32_BOARD": "xiao_esp32s3"
+            }
         }
     ]
 }

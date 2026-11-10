@@ -326,6 +326,7 @@ footer a { color: var(--muted); }
     { id: 'feather_esp32_v2', name: 'Adafruit Feather ESP32 V2', short: 'Feather ESP32 V2', spec: 'ESP32 · 8 MB flash · 2 MB PSRAM' },
     { id: 'esp32s3_n16r8', name: 'ESP32-S3 N16R8 DevKitC', short: 'S3 N16R8 DevKitC', spec: 'ESP32-S3 · 16 MB flash · 8 MB PSRAM' },
     { id: 'rak11200_rak19007', name: 'RAKwireless WisBlock RAK11200 (RAK19007 base)', short: 'RAK11200', spec: 'ESP32 · 4 MB flash · 8 MB PSRAM' },
+    { id: 'xiao_esp32s3', name: 'Seeed Studio XIAO ESP32S3', short: 'XIAO ESP32S3', spec: 'ESP32-S3 · 8 MB flash · 8 MB PSRAM' },
   ];
   const boardName = id => (BOARDS.find(b => b.id === id) || { short: id }).short;
   const manifestUrl = id => `manifest-${id}.json`;
@@ -342,7 +343,7 @@ footer a { color: var(--muted); }
   let custom = null;
 
   // With no board chosen the button still connects, with this manifest. It has
-  // no builds, because two profiles share each chip family; adoptDeviceBoard()
+  // no builds, because profiles share chip families; adoptDeviceBoard()
   // fills them in, from the chosen version, once a running DFU32 reports its
   // board over Improv; dfu32_entry names that version (its index in VERSIONS,
   // which only ever grows), since its version string may not be known yet.
