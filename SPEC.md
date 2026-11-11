@@ -215,7 +215,7 @@ Status codes: `01` SUCCESS, `02` INVALID_STATE, `03` NOT_SUPPORTED, `04` DATA_SI
   - Every data write **must be a multiple of 4**, or the bootloader returns `10 03 03` **[verified]**. A non-4n+3 MTU such as 185 must be rounded down.
   - Never pass `len > mtu−3` to esp-nimble-cpp `writeValue(…, false)`. It **silently turns into a long write with response** **[verified]**. The client asserts this.
 - **App size** must be a multiple of 4. This is a precheck; DFU32 never pads, because padding would change the CRC.
-- **Connection interval:** DFU32 requests a fixed **30 ms** by default (the target's `interval_ms`, 8–100; `--interval` on the console).
+- **Connection interval:** DFU32 requests a fixed **30 ms** by default (the target's `interval_ms`, 15–100, rounded down to a 1.25 ms step; `--interval` on the console takes any value).
   - Bench throughput on OTAFIX with ~1 packet per event: 30 ms 9.2 kB/s, 20 ms 12.4 kB/s, 15 ms 14.8 kB/s.
   - 11.25 ms and 7.5 ms overran the bootloader's lazy-erase buffering.
 - **PRN:** default **4** (the target's `prn`, 1–8). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. DFU32 caps PRN at 8 for every bootloader (`--force-prn` overrides). A stream-phase `06` or link loss makes the next attempt more conservative (§6.5).
@@ -339,7 +339,7 @@ Also: VERIFYING_STAGED → FAILED (nothing staged, re-hash fails), and RADIO_HAN
 
 | Check | Error |
 |---|---|
-| `manifest.boards` contains `target.board` (exact, case-insensitive). Skipped when the target has no board set | `BOARD_MISMATCH` |
+| `manifest.boards` contains `target.board` (exact, case-insensitive). Skipped when the target has no board set; the staged header then records the manifest's board if it lists exactly one | `BOARD_MISMATCH` |
 | `.bin`/`.dat` SHA-256 and size match the manifest | `HASH_MISMATCH` / `SIZE_MISMATCH` |
 | `bin.size % 4 == 0` | `IMAGE_NOT_WORD_ALIGNED` |
 | `bin.size ≤ target.max_app_size`. Default 798 720 (S140 7.3.0, the smaller case). Configurable per target, e.g. 802 816 for S140 6.1.1. | `IMAGE_TOO_LARGE` |
@@ -427,7 +427,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | ↳ `mac`, `addr_type` | 6 B, u8 | **app** MAC (§5.2) and address type |
 | ↳ `manifest_url` | str ≤ 255 | |
 | ↳ `max_app_size` | u32 | default 798 720 |
-| ↳ `prn`, `interval_ms`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs: 4 (1–8), 30 (8–100), 3 (1–10), 600 (10–3600), 500 (0–5000), 5000 (500–60000) |
+| ↳ `prn`, `interval_ms`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs: 4 (1–8), 30 (15–100), 3 (1–10), 600 (10–3600), 500 (0–5000), 5000 (500–60000) |
 | ↳ `last_ok_version`, `last_ok_at` | str, u64 | updated on success |
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)

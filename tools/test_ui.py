@@ -100,7 +100,7 @@ class TestPage(unittest.TestCase):
     def test_every_option_has_help(self):
         # Options are built with opt(), which adds the "?" and its explanation;
         # a bare label would be an option without one.
-        self.assertNotIn('h("label', self.js.replace('h("label.chk", el,', "").replace('h("label", h("span.lt"', ""))
+        self.assertNotIn('h("label', self.js.replace('h("label.chk", el, text)', "").replace('h("label", { for: el.id }', ""))
         self.assertGreater(sum(self.js.count(f) for f in ("opt(", "field(", "knob(")), 20)
 
     def test_target_form(self):

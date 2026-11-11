@@ -228,7 +228,7 @@ Tuning knobs:
 
 | Option | Default | Use |
 |---|---|---|
-| `--prn N` | 4 | Packets per receipt (up to 8). Try 2 if transfers stall. |
+| `--prn N` | 4 | Packets per receipt (up to 8). Try 2 if transfers stall. The console's `flash` takes PRN, interval, attempts and settle from these flags only, never from the stored target's tuning knobs. |
 | `--packet N` | automatic | Cap the packet size, e.g. `--packet 20` to compare throughput. |
 | `--interval MS` | 30 ms | Request a fixed BLE connection interval. Shorter means more packets per second, but **on OTAFIX, 11.25 ms and below overrun the bootloader** (see results). `probe` takes it too, and both report the interval actually negotiated. |
 | `--settle MS` | 500 | Delay between START and the size packet. |
@@ -263,7 +263,7 @@ Every other call sends `-H "Authorization: Bearer $TOKEN"`. `GET /status` works 
 curl -s -X PUT $DFU/targets/t096 -H "Authorization: Bearer $TOKEN" -d '{"name":"Bench T096","board":"heltec_t096","mac":"F4:1C:36:A7:33:95","manifest_url":"http://<pc-ip>:8000/t096/manifest.json"}'
 ```
 
-Tuning knobs go in the same record: `prn` (1–8, default 4), `interval_ms` (8–100, default 30), `max_attempts` (1–10), `arm_timeout_s` (10–3600), `start_settle_ms`, `prn_timeout_ms`, `max_app_size`.
+Tuning knobs go in the same record: `prn` (1–8, default 4), `interval_ms` (15–100, default 30), `max_attempts` (1–10), `arm_timeout_s` (10–3600), `start_settle_ms`, `prn_timeout_ms`, `max_app_size`.
 
 **Check, stage, flash:**
 
@@ -487,7 +487,7 @@ Once `main` has it, the installer page itself (MILESTONES M5 bench):
 | 2026-11-05 | Feather V2 (1M PHY), **M2a retries** | Heltec T096, OTAFIX 2.3 | same | `--interval 8` | attempt 1: LINK_OR_OVERRUN after 27 KB; attempt 2 at 30 ms: 44.9 s | **61.0 s, recovered by itself** |
 | 2026-11-05 | Feather V2 (1M PHY), **M2a retries** | Heltec T096, OTAFIX 2.3, **power-cycled at ~12%** | same | default (20 ms) | attempt 1: link lost after 52 KB; attempt 2 found the bootloader at MAC+1, 30 ms: 45.2 s | **65.3 s, recovered by itself** |
 | 2026-11-07 | Feather V2 (1M PHY), API, **WiFi off** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | 413,680 B MeshCore repeater v1.18.1 | default (20 ms), staged | 12.3 kB/s mean, all first attempt | **39.0 s mean, 5/5** |
-| 2026-11-07 | Feather V2 (1M PHY), API, **WiFi on** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | same | default (20 ms), staged | 10.2 kB/s mean, all first attempt | **47.2 s mean, 5/5**: chosen default (live progress, under a minute) |
+| 2026-11-07 | Feather V2 (1M PHY), API, **WiFi on** (5 runs, bench runner 5.1) | Heltec T096, OTAFIX 2.3 | same | default (20 ms), staged | 10.2 kB/s mean, all first attempt | **47.2 s mean, 5/5**: chosen default for WiFi (live progress, under a minute) |
 
 PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardless, which looks like about one 244-byte packet per connection event. At PRN 30, NimBLE's TX buffers also fill up; the back-off retries absorb it. So the radio schedule is the limit, not receipt round trips or nRF flash.
 
@@ -501,7 +501,7 @@ PRN 8 → 30 gains only about 11%. Throughput sits around 41 packets/s regardles
   - 11.25 ms works out to about 89 packets/s, right at the ~94 packets/s OTAFIX erase limit, which fits it failing.
   - 20 ms works (+35% over the default). 15 ms (about 67 packets/s) is the next test.
 - Options:
-  - an interval between the old default and 11.25 ms. 20 ms and 15 ms both work. **20 ms is now the default**, roughly 2× under the erase limit; 15 ms is faster but has less margin;
+  - an interval between the old default and 11.25 ms. 20 ms and 15 ms both work. **20 ms became the default** (roughly 2× under the erase limit; 15 ms is faster but has less margin). The default has since moved to **30 ms with PRN 4**, chosen for margin and not re-benched: the "default (20 ms)" rows above are from before that, and from the 30 ms row a default run is about a quarter slower than they show;
   - pacing around 4 KB page boundaries, an experimental `--page-pause` idea;
   - M2 retries falling back to the default interval and PRN after a link loss or `06` in the stream.
 - The 2 s supervision timeout cut the buttonless jump from 4.5 s to 2.4 s.

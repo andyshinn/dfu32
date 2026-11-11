@@ -16,7 +16,10 @@ namespace dfu32 {
 inline constexpr uint16_t kDefaultPrn = dfu::kDefaultPrn;  // 4
 inline constexpr uint16_t kMaxPrn = dfu::kMaxSafePrn;      // 8
 inline constexpr uint16_t kDefaultIntervalMs = dfu::kDefaultIntervalMs;  // 30
-inline constexpr uint16_t kMinIntervalMs = 8;    // BLE's floor is 7.5 ms
+// 15 ms is the fastest interval the bench has seen work (docs/BENCH.md: 11.25 ms and
+// 7.5 ms lost the link on OTAFIX, after the app was erased). The console's
+// `--interval` still takes anything, for bench runs.
+inline constexpr uint16_t kMinIntervalMs = 15;
 inline constexpr uint16_t kMaxIntervalMs = 100;  // well inside the 2 s supervision timeout
 inline constexpr uint16_t kDefaultMaxAttempts = 3;
 inline constexpr uint16_t kMaxAttemptsLimit = 10;
@@ -41,7 +44,7 @@ struct TargetConfig {
 
     // Tuning knobs (per target, SPEC.md §9.1).
     uint16_t prn = kDefaultPrn;                    // 1..8 (receipts acknowledge arrival, not flash writes)
-    uint16_t interval_ms = kDefaultIntervalMs;     // 8..100, BLE connection interval for attempt 1
+    uint16_t interval_ms = kDefaultIntervalMs;     // 15..100, BLE connection interval for attempt 1
     uint16_t max_attempts = kDefaultMaxAttempts;   // 1..10
     uint16_t arm_timeout_s = kDefaultArmTimeoutS;  // 10..3600
     uint16_t start_settle_ms = kDefaultStartSettleMs;  // 0..5000

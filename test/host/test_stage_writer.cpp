@@ -128,13 +128,17 @@ TEST_CASE("Stage writer: precheck failures leave the old image alone", "[stage]"
         f.meta.board = "heltec_t114";
         CHECK(f.stage().code == Err::BoardMismatch);
     }
-    SECTION("no board on the target: not compared, staged without one") {
+    SECTION("no board on the target: not compared, and a one-board manifest names the image") {
         f.meta.board.clear();
         REQUIRE(f.stage().ok());
         dfu::StagingHeader h;
         REQUIRE(dfu::decode_staging_header({f.region.mem.data(), dfu::kStagingHeaderSize}, h) ==
                 dfu::StagingHeaderError::Ok);
-        CHECK(h.board.empty());
+        CHECK(h.board == "rak4631");  // so an ID given to the target later is still checked at flash
+        f.m.boards = {"rak4631", "rak3401"};
+        CHECK(dfu32::staged_board(f.m, f.meta).empty());  // several boards: can't say which
+        f.meta.board = "RAK3401";
+        CHECK(dfu32::staged_board(f.m, f.meta) == "RAK3401");
         return;  // it staged, so the "old image untouched" checks below don't apply
     }
     SECTION(".dat hash") {

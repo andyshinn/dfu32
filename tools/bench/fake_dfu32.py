@@ -232,7 +232,7 @@ class FakeDfu32:
         ok = not self.target["board"] or self.target["board"] in m["boards"]
         self.emit(f"  version    {m['version']}\n")
         self.emit(f"  boards     {', '.join(m['boards'])}  -> target board \"{self.target['board']}\": "
-                  f"{'match' if ok else 'MISMATCH'}\n")
+                  f"{'not set, not compared' if not self.target['board'] else 'match' if ok else 'MISMATCH'}\n")
         same = self.staged and self.staged["sha256"] == m["bin"]["sha256"]
         self.emit(f"  staged     \"{self.staged['version']}\": {'same image' if same else 'different image'}\n"
                   if self.staged else "  staged     nothing\n")
@@ -336,7 +336,7 @@ class FakeDfu32:
             if len(r["attempts"]) > 1:
                 for a in r["attempts"]:
                     tail = "" if a["kind"] == "NONE" else f" [{a['kind']}, 27000 B acked]"
-                    self.emit(f"  attempt {a['n']}         interval {a['interval_ms']} ms, PRN 8: {a['outcome']}{tail}\n")
+                    self.emit(f"  attempt {a['n']}         interval {a['interval_ms']} ms, PRN {a['prn']}: {a['outcome']}{tail}\n")
             self.emit(f"FLASH OK in 38.4 s{' (after retries)' if len(r['attempts']) > 1 else ''}. Check the "
                       "repeater with `ver`.\n")
             self.emit(f"Recorded as run #{r['seq']} (`run {r['seq']}` for details).\n")
@@ -371,7 +371,7 @@ class FakeDfu32:
         check()
         attempts = []
         if interval < 11:
-            attempts.append({"n": 1, "interval_ms": interval, "prn": 8, "outcome": "link lost",
+            attempts.append({"n": 1, "interval_ms": interval, "prn": 4, "outcome": "link lost",
                              "kind": "LINK_OR_OVERRUN", "bytes_acked": 27000})
             interval = 30
         self._job_marker["transferring"] = True
@@ -385,7 +385,7 @@ class FakeDfu32:
                 on_progress(i * 41368, 413680)
             time.sleep(seconds / steps)
         self.in_bootloader = False
-        attempts.append({"n": len(attempts) + 1, "interval_ms": interval, "prn": 8, "outcome": "OK", "kind": "NONE",
+        attempts.append({"n": len(attempts) + 1, "interval_ms": interval, "prn": 4, "outcome": "OK", "kind": "NONE",
                          "bytes_acked": 413680})
         self._job_marker = None
         rec = self.add_run({"result": "SUCCEEDED", "error": "", "failure_kind": "NONE", "target": self.target["mac"],
@@ -432,7 +432,8 @@ class FakeDfu32:
         if hashlib.sha256(data).hexdigest() != m["bin"]["sha256"]:
             self.staged = None
             return "HASH_MISMATCH: downloaded image doesn't match the manifest", False, 0
-        self.staged = {"sha256": m["bin"]["sha256"], "version": m["version"], "board": self.target["board"],
+        board = self.target["board"] or (m["boards"][0] if len(m["boards"]) == 1 else "")
+        self.staged = {"sha256": m["bin"]["sha256"], "version": m["version"], "board": board,
                        "target": self.target["id"], "size": len(data), "manifest_sha256": msha}
         return "", False, len(data)
 

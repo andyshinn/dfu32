@@ -41,10 +41,9 @@ button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 button.dng{color:var(--bad)}
 button:disabled{opacity:.5;cursor:default}
 input,select{font:inherit;padding:.4rem .5rem;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);min-width:0}
-label{display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;color:var(--mute)}
+label,.opt{display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;color:var(--mute)}
 label.chk{flex-direction:row;align-items:center;gap:.4rem;color:var(--fg);font-size:.95rem}
 .lt{display:flex;align-items:center;gap:.35rem}
-.chkw{display:flex;flex-direction:column;gap:.3rem}
 .q{flex:none;width:1.15rem;height:1.15rem;padding:0;border-radius:50%;font-size:.72rem;font-weight:700;line-height:1;color:var(--mute);background:var(--card)}
 .q:hover,.q[aria-expanded=true]{color:var(--acc);border-color:var(--acc)}
 .hint{max-width:26rem;padding:.4rem .55rem;border-radius:6px;background:var(--chip);color:var(--fg);font-size:.8rem;line-height:1.4;cursor:default}
@@ -101,13 +100,18 @@ function dl(pairs) { const d = h("dl.grid"); for (const [k, v] of pairs) if (v !
 function note(kind, ...kids) { return h("div.note.n-" + kind, ...kids); }
 // A labelled control with a "?" beside the label: it opens a short explanation of
 // what the option is and where its value comes from. chk = a checkbox row.
+// The "?" and the explanation sit outside the <label>, which would otherwise
+// label the button (its first control) and not the field.
+let optN = 0;
 function opt(text, help, el, chk) {
-  const hint = h("span.hint", { hidden: true, onclick: (e) => e.preventDefault() }, help);  // reading it isn't a click on the control
+  const hint = h("span.hint", { hidden: true }, help);
   const q = h("button.q", { type: "button", "aria-label": "About: " + text, "aria-expanded": "false", onclick: () => {
     hint.hidden = !hint.hidden; q.setAttribute("aria-expanded", String(!hint.hidden));
   } }, "?");
   q.title = hint.textContent;
-  return chk ? h("div.chkw", h("label.chk", el, h("span", text), q), hint) : h("label", h("span.lt", text, q), el, hint);
+  if (chk) return h("div.opt", h("span.lt", h("label.chk", el, text), q), hint);
+  el.id = "o" + ++optN;
+  return h("div.opt", h("span.lt", h("label", { for: el.id }, text), q), el, hint);
 }
 
 // ---- API --------------------------------------------------------------------------------
@@ -376,14 +380,15 @@ async function viewTarget() {
   if (tid) t = await api("GET", "/targets/" + tid).catch((e) => { toast(e.message); return {}; });
   const f = {};
   const field = (k, label, help, attrs = {}) => { f[k] = h("input", Object.assign({ value: t[k] ?? "" }, attrs)); return opt(label, help, f[k]); };
-  // A tuning knob: blank on a new target means DFU32's default, shown as the placeholder.
+  // A tuning knob: blank means DFU32's default, shown as the placeholder (Save sends it).
   const knob = (k, label, def, min, max, help) => field(k, label, help, { type: "number", min, max, placeholder: def });
   f.addr_type = h("select", h("option", { value: 1 }, "random"), h("option", { value: 0 }, "public"));
   f.addr_type.value = String(t.addr_type ?? 1);
   // The UI's one "ID" is the API's `board`; the API's own id (the {id} in the path) stays as it is.
   const save = h("button.pri", { onclick: () => act(save, async () => {
     const body = {};
-    for (const [k, el] of Object.entries(f)) { const v = el.value.trim(); if (v === "" && NUM.includes(k)) continue; body[k] = NUM.includes(k) ? Number(v) : v; }
+    // A cleared knob goes back to its default (the placeholder it then shows); max app size to 0.
+    for (const [k, el] of Object.entries(f)) { const v = el.value.trim(); body[k] = !NUM.includes(k) ? v : v === "" ? kDef[k] ?? 0 : Number(v); }
     await api("PUT", "/targets/" + encodeURIComponent(tid || "target"), body);
     toast("Saved"); await refresh(); viewTarget();
   }) }, "Save");
@@ -394,8 +399,8 @@ async function viewTarget() {
       opt("Address type", "The kind of Bluetooth address the MAC is. nRF52 boards, MeshCore repeaters among them, use random. Scan below shows the type for each device and Use as target fills it in.", f.addr_type),
       field("board", "ID (optional)", "A name for what this repeater is, such as its board: rak4631. Choose it yourself. When the staged image has an ID too (the one typed when staging it on the Image page, or the boards a manifest lists), the two must match (capitals don't matter) or DFU32 refuses to flash, which keeps another board's image off this repeater. If either is blank, nothing is compared. Up to 31 characters, no spaces.", { placeholder: "rak4631" }),
       field("manifest_url", "Manifest URL (optional)", ["Only for fetching images from a server: the http:// address of the manifest.json that ", h("code", "tools/dfu32_pack.py"), " writes next to the image, on a web server DFU32 can reach. HTTPS isn't supported. Leave it blank to upload images on the Image page instead."], { placeholder: "http://server/rak4631/manifest.json" })),
-    h("details", h("summary", "Tuning"), h("p.mute.small", "The defaults suit most repeaters."), h("div.form",
-      knob("interval_ms", "Interval (ms)", kDef.interval_ms, 8, 100, "The BLE connection interval DFU32 asks for during the transfer, 8–100 ms; default 30. Shorter is faster (about one packet per interval), but on the bench the OTAFIX bootloader lost the link at 11.25 ms and below, and worked at 15, 20 and 30. A run's page shows the interval each attempt used."),
+    h("details", h("summary", "Tuning"), h("p.mute.small", "The defaults suit most repeaters. Clear a field and save to go back to its default."), h("div.form",
+      knob("interval_ms", "Interval (ms)", kDef.interval_ms, 15, 100, "The BLE connection interval DFU32 asks for during the transfer, 15–100 ms, rounded down to a multiple of 1.25; default 30. Shorter is faster (about one packet per interval): on the bench 15, 20 and 30 worked, and the OTAFIX bootloader lost the link at 11.25 and below, so 15 is the floor. A run's page shows the interval each attempt used."),
       knob("prn", "PRN (1-8)", kDef.prn, 1, 8, "Packets DFU32 sends before it waits for the bootloader's receipt; default 4. Lower is slower but easier on the bootloader, which holds only 8 packets while it writes flash. After a lost link, the next attempt halves it (down to 2)."),
       knob("max_attempts", "Attempts (1-10)", kDef.max_attempts, 1, 10, "How many times a flash tries the transfer before it fails; default 3. A retry after a lost link runs slower."),
       knob("arm_timeout_s", "Arm timeout (s)", kDef.arm_timeout_s, 10, 3600, ["How long DFU32 waits for the repeater to appear after Flash, 10–3600 s; default 600. It is the time you have to run ", h("code", "start ota"), ". The Status page can override it for one flash."]),

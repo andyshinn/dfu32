@@ -139,13 +139,13 @@ TEST_CASE("Target config: tuning knobs round-trip and are range-checked", "[targ
     r.prn = 8;  // the cap, above the default
     CHECK(validate(r).empty());
     r = t;
-    r.interval_ms = 7;
+    r.interval_ms = 14;  // 11.25 ms and below overran OTAFIX on the bench
     CHECK_FALSE(validate(r).empty());
     r = t;
     r.interval_ms = 101;
     CHECK_FALSE(validate(r).empty());
     r = t;
-    r.interval_ms = 8;
+    r.interval_ms = 15;
     CHECK(validate(r).empty());
     r.interval_ms = 100;
     CHECK(validate(r).empty());

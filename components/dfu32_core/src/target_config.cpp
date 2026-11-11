@@ -104,7 +104,7 @@ std::string validate(const TargetConfig& t) {
     if (auto e = validate_manifest_url(t.manifest_url); !e.empty()) return e;
     if (auto e = validate_max_app_size(t.max_app_size); !e.empty()) return e;
     if (t.prn < 1 || t.prn > kMaxPrn) return "prn must be 1-8";
-    if (t.interval_ms < kMinIntervalMs || t.interval_ms > kMaxIntervalMs) return "interval_ms must be 8-100";
+    if (t.interval_ms < kMinIntervalMs || t.interval_ms > kMaxIntervalMs) return "interval_ms must be 15-100";
     if (t.max_attempts < 1 || t.max_attempts > kMaxAttemptsLimit) return "max_attempts must be 1-10";
     if (t.arm_timeout_s < kMinArmTimeoutS || t.arm_timeout_s > kMaxArmTimeoutS) return "arm_timeout_s must be 10-3600";
     if (t.start_settle_ms > kMaxStartSettleMs) return "start_settle_ms must be 0-5000";
