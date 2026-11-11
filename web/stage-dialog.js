@@ -33,6 +33,9 @@ const kB = n => (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
 const { h4, utf8len } = S;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const LOGS_ITEM = 'Logs & Console';  // the device dialog's last fixed item; HOOK_ITEM in fetch_esp_web_tools.py
+// dfu32.app/?trace=1: esptool-js logs every serial exchange to the console
+// (console.log, "TRACE ..." lines), for debugging a stage that fails.
+const TRACE = typeof location !== 'undefined' && new URLSearchParams(location.search).has('trace');
 const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
 
 
@@ -354,11 +357,14 @@ class FriendlyError extends Error {
 /** Reset into the ROM bootloader, find `staging`, write `image` there, verify, reset. Returns the partition. */
 export async function writeStaging(port, image, onStep) {
   const { ESPLoader, Transport } = await import(ESPTOOL_JS);
-  const transport = new Transport(port, false);
+  const transport = new Transport(port, TRACE);
   const log = [];
   const terminal = { clean() {}, writeLine: s => log.push(s), write: s => log.push(s) };
   // 115200 like ESP Web Tools: the boards' USB bridges are known good there.
-  const loader = new ESPLoader({ transport, baudrate: 115200, terminal, enableTracing: false });
+  // The same read buffer ESP Web Tools opens the port with: Web Serial's default
+  // is 255 bytes, and esptool-js leaves it at that unless told otherwise.
+  const loader = new ESPLoader({ transport, baudrate: 115200, terminal, enableTracing: TRACE,
+    serialOptions: { bufferSize: 8192 } });
   try {
     onStep('Connecting to the ESP32');
     try {
@@ -389,7 +395,8 @@ export async function writeStaging(port, image, onStep) {
     onStep('Restarting DFU32');
     return part;
   } catch (e) {
-    if (log.length) console.debug('esptool-js log:\n' + log.join('\n'));
+    // Visible at the default console level, so a failure report can include it.
+    if (log.length) console.warn('esptool-js log:\n' + log.join('\n'));
     throw e;
   } finally {
     // ESP Web Tools' hard reset: RTS first, then esptool-js' chip-specific release.

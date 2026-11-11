@@ -174,6 +174,8 @@ Worth trying on the bench:
 
 On [dfu32.app](https://dfu32.app/), click **Connect device**, pick DFU32's port, then choose **Stage nRF52 image** and the DFU `.zip`. Check the version, then click **Stage**. The image carries no board, so DFU32 doesn't compare it with `target board`: picking the right zip is up to you. The page validates the package like `dfu32_stage_image.py`, finds the staging partition from the partition table, writes it and restarts DFU32. Quit any serial monitor first so the port is free. When DFU32 is back, `staged` should end with `result OK`.
 
+If it stalls (for example at *Reading the partition table*), open the page as `https://dfu32.app/?trace=1` and stage again: esptool-js then logs every serial exchange to the browser console as `TRACE` lines, and the esptool-js log is printed (as a warning) when staging fails.
+
 ### From the PC with esptool
 
 On your computer, build the staging image:
