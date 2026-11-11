@@ -86,8 +86,11 @@ std::vector<Network> SerialHost::scan_networks() {
     // the BLE transfer down), nor while an Improv attempt from either
     // transport is joining a network (a scan would get in the way of
     // associating). The client then just sees no networks for now.
-    // The scan blocks this task for about 2 s; frames that arrive meanwhile
-    // wait in the queue (4 deep; the client sends one RPC at a time).
+    // The scan blocks this task for about 2 s on a 2.4 GHz chip; frames that
+    // arrive meanwhile wait in the queue (4 deep; the client sends one RPC at
+    // a time). On a dual-band chip (ESP32-C5) net::scan() covers the 5 GHz
+    // channels too, with a passive dwell on each DFS channel, so expect
+    // several times that. Not yet measured on hardware (SPEC.md §4, [bench]).
     if (Attempt::any_running()) return {};
     const char* holder = job::holder();
     if (holder != nullptr && std::strcmp(holder, "improv") != 0) return {};
