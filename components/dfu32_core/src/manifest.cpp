@@ -162,6 +162,10 @@ bool board_matches(const Manifest& m, std::string_view board) noexcept {
     return std::any_of(m.boards.begin(), m.boards.end(), [&](const std::string& b) { return iequals(b, board); });
 }
 
+bool manifest_board_ok(const Manifest& m, std::string_view target_board) noexcept {
+    return target_board.empty() || board_matches(m, target_board);
+}
+
 bool staged_board_ok(std::string_view image_board, std::string_view target_board) noexcept {
     return image_board.empty() || target_board.empty() || iequals(image_board, target_board);
 }

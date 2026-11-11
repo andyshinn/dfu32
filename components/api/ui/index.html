@@ -43,6 +43,11 @@ button:disabled{opacity:.5;cursor:default}
 input,select{font:inherit;padding:.4rem .5rem;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);min-width:0}
 label{display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;color:var(--mute)}
 label.chk{flex-direction:row;align-items:center;gap:.4rem;color:var(--fg);font-size:.95rem}
+.lt{display:flex;align-items:center;gap:.35rem}
+.chkw{display:flex;flex-direction:column;gap:.3rem}
+.q{flex:none;width:1.15rem;height:1.15rem;padding:0;border-radius:50%;font-size:.72rem;font-weight:700;line-height:1;color:var(--mute);background:var(--card)}
+.q:hover,.q[aria-expanded=true]{color:var(--acc);border-color:var(--acc)}
+.hint{max-width:26rem;padding:.4rem .55rem;border-radius:6px;background:var(--chip);color:var(--fg);font-size:.8rem;line-height:1.4;cursor:default}
 .form{display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:.7rem}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
@@ -94,6 +99,16 @@ function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.s
 function badge(text, kind) { return h("span.badge" + (kind ? ".b-" + kind : ""), text); }
 function dl(pairs) { const d = h("dl.grid"); for (const [k, v] of pairs) if (v !== undefined && v !== null && v !== "") d.append(h("dt", k), h("dd", v)); return d; }
 function note(kind, ...kids) { return h("div.note.n-" + kind, ...kids); }
+// A labelled control with a "?" beside the label: it opens a short explanation of
+// what the option is and where its value comes from. chk = a checkbox row.
+function opt(text, help, el, chk) {
+  const hint = h("span.hint", { hidden: true, onclick: (e) => e.preventDefault() }, help);  // reading it isn't a click on the control
+  const q = h("button.q", { type: "button", "aria-label": "About: " + text, "aria-expanded": "false", onclick: () => {
+    hint.hidden = !hint.hidden; q.setAttribute("aria-expanded", String(!hint.hidden));
+  } }, "?");
+  q.title = hint.textContent;
+  return chk ? h("div.chkw", h("label.chk", el, h("span", text), q), hint) : h("label", h("span.lt", text, q), el, hint);
+}
 
 // ---- API --------------------------------------------------------------------------------
 const TOKEN_KEY = "dfu32.token";
@@ -193,7 +208,7 @@ function renderStatus() {
   const sec = h("section", h("h2", "Job"));
   if (!j.id) sec.append(h("p.mute", "No job since boot."));
   else {
-    sec.append(h("div.row", badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]), h("span.mute", j.kind + " from " + j.source + (j.target ? " · " + j.target : "") + (j.phase ? " · " + j.phase : ""))));
+    sec.append(h("div.row", badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]), h("span.mute", j.kind + " from " + j.source + (j.phase ? " · " + j.phase : ""))));
     if (j.bytes_total) {
       const pct = Math.min(100, Math.round(100 * j.bytes_done / j.bytes_total));
       sec.append(h("div.bar", h("i", { style: "width:" + pct + "%" })), h("div.small.mute", kB(j.bytes_done) + " of " + kB(j.bytes_total) + " (" + pct + "%)" + (j.rate_bps ? " · " + (j.rate_bps / 1000).toFixed(1) + " kB/s" : "") + (j.attempt ? " · attempt " + j.attempt + " of " + j.max_attempts : "")));
@@ -216,15 +231,15 @@ function renderStatus() {
     if (!c.fetches) a.append(h("p.mute.small", "The target has no manifest URL, so it flashes the staged image. ", status.staged ? "Add a manifest URL to fetch images from a server." : [h("a", { href: "#image" }, "Upload one"), " first, or add a manifest URL to fetch images from a server."]));
     if (checkResult) {
       const r = checkResult;
-      a.append(h("h3", "Manifest"), dl([["Version", r.version + (r.update_available ? " (new)" : " (already flashed)")], ["Boards", (r.boards || []).join(", ") + (r.board_ok ? "" : " — does not include " + r.target_board)], ["Image", r.bin ? kB(r.bin.size) + " · sha256 " + short(r.bin.sha256) : ""], ["Staged", r.staged_same ? "same image" : r.staged_version || "nothing"], ["Created", r.created], ["Notes", r.notes]]));
-      if (!r.board_ok) a.append(note("bad", "This manifest is not for the target's board (\"" + r.target_board + "\"): staging and flashing would stop with BOARD_MISMATCH."));
+      a.append(h("h3", "Manifest"), dl([["Version", r.version + (r.update_available ? " (new)" : " (already flashed)")], ["For ID", (r.boards || []).join(", ") + (r.board_ok ? (r.target_board ? "" : " (the target has no ID: not compared)") : " — does not include " + r.target_board)], ["Image", r.bin ? kB(r.bin.size) + " · sha256 " + short(r.bin.sha256) : ""], ["Staged", r.staged_same ? "same image" : r.staged_version || "nothing"], ["Created", r.created], ["Notes", r.notes]]));
+      if (!r.board_ok) a.append(note("bad", "This manifest is not for the target's ID (\"" + r.target_board + "\"): staging and flashing would stop with BOARD_MISMATCH."));
     }
   }
   out.push(a);
 
   const s = status.staged, t = status.targets && status.targets[0];
   out.push(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Staged image"), h("a", { href: "#image" }, s ? "Manage" : "Upload one")), h("div", { style: "margin-top:.75rem" }, s ? stagedInfo(s) : h("p.mute", "Nothing staged."))));
-  if (t) out.push(h("section", h("h2", "Target"), dl([["Id", t.id], ["Name", t.name], ["Board", t.board], ["Last flashed", t.last_ok_version ? t.last_ok_version + (t.last_ok_at ? " · " + when(t.last_ok_at) : "") : "never (by this DFU32)"]])));
+  if (t) out.push(h("section", h("h2", "Target"), dl([["ID", t.board || h("span.mute", "not set (images aren't compared with it)")], ["Last flashed", t.last_ok_version ? t.last_ok_version + (t.last_ok_at ? " · " + when(t.last_ok_at) : "") : "never (by this DFU32)"]])));
   $("#main").replaceChildren(...out);
 }
 
@@ -254,8 +269,11 @@ function actionControls(tid, fetches) {
     }
     act(c.bAbort, async () => { const r = await api("POST", "/jobs/current/abort"); if (r.warning) toast(r.warning, 8000); refresh(); });
   } }, "Abort");
-  c.row1 = h("div.row", fetches ? [c.bCheck, c.bStage, h("label.chk", c.force, "re-download")] : null, c.bFlash, c.bAbort);
-  c.row2 = h("div.row", { style: "margin-top:.7rem" }, h("label", "Flash from", c.source), h("label", "Arm timeout (s)", c.arm), h("label.chk", c.wifiOff, "WiFi off during the transfer"));
+  c.row1 = h("div.row", fetches ? [c.bCheck, c.bStage, opt("re-download", "Makes Stage download the image again even when the same one is already staged. Normally the staged copy is checked and reused.", c.force, true)] : null, c.bFlash, c.bAbort);
+  c.row2 = h("div.row", { style: "margin-top:.7rem" },
+    opt("Flash from", fetches ? "Where Flash takes the image. manifest: fetch it from the target's manifest URL first (reusing the staged copy if it is the same). staged image: flash what the Image page shows, with no download." : "Flash sends the staged image: the one the Image page shows. With a manifest URL on the target, DFU32 can fetch images from a server instead.", c.source),
+    opt("Arm timeout (s)", "For this flash only: how long DFU32 waits for the repeater to appear after you press Flash, which is the time you have to run start ota on it. 10–3600 s. Blank uses the target's setting (Target → Tuning, 600 s unless changed).", c.arm),
+    opt("WiFi off during the transfer", "Stops DFU32's WiFi while the image is sent, so its radio serves Bluetooth alone; this page is unreachable meanwhile and catches up afterwards. Starts out as the default from System → Settings.", c.wifiOff, true));
   return (actCtl = c);
 }
 
@@ -282,7 +300,7 @@ async function loadPackage(file) {
 function clipName(n) { n = n.slice(0, 64); while (encodeURIComponent(n).length > 192) n = n.slice(0, -1); return n; }
 function stagedFrom(u) { return /^(upload|usb)(:|$)/.test(u) ? (u.startsWith("usb") ? "USB (installer page)" : "upload") + (u.includes(":") ? ": " + u.slice(u.indexOf(":") + 1) : "") : u; }
 function stagedInfo(s) {
-  return dl([["Version", s.version], ["Board", s.board || "not set (any target's)"], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["For target", s.target || "any"], ["From", stagedFrom(s.manifest_url)]]);
+  return dl([["Version", s.version], ["ID", s.board || "not set (not compared with the target's)"], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["From", stagedFrom(s.manifest_url)]]);
 }
 
 function viewImage() {
@@ -330,8 +348,10 @@ function viewImage() {
       x.send(new Blob([pkg.bin]));
     } }, "Stage");
     form.replaceChildren(dl([["File", f.name], ["Image", kB(pkg.bin.length) + " · " + (pkg.type === 0x52 ? "nRF52" : "nRF54") + " (" + window.dfu32Staging.h4(pkg.type) + ") · SoftDevice " + pkg.sd.join(", ") + " · CRC OK"]]),
-      h("div.form", { style: "margin-top:.7rem" }, h("label", "Version (as the repeater's ver prints it)", ver), h("label", "Board (optional: checked against the target's)", board)),
-      h("p.mute.small", "Check that it's built for the repeater's board: without a board here, DFU32 can't tell."),
+      h("div.form", { style: "margin-top:.7rem" },
+        opt("Version", ["A label for this image: DFU32 records it with each flash and shows it as the last version flashed. It is guessed from a MeshCore file name; otherwise type what the repeater's ", h("code", "ver"), " command prints for this build, such as v1.18.0-81dbae5. 1–63 characters."], ver),
+        opt("ID (optional)", "What this image is built for, such as rak4631. If the target has an ID too, the two must match (capitals don't matter) or DFU32 refuses to flash. If either is blank, nothing is compared. The package doesn't carry it: type the same ID you gave the target.", board)),
+      h("p.mute.small", "Check that it's built for the repeater's board: unless both this image and the target have an ID, DFU32 can't tell."),
       h("div.row", go), prog);
   }
   file.addEventListener("change", () => { if (file.files[0]) pick(file.files[0]); file.value = ""; });
@@ -347,30 +367,41 @@ function viewImage() {
 }
 
 // ---- target -----------------------------------------------------------------------------
-const NUM = ["addr_type", "max_app_size", "prn", "max_attempts", "arm_timeout_s", "start_settle_ms", "prn_timeout_ms"];
+// The firmware's tuning defaults (dfu32_core/target_config.hpp), shown as placeholders.
+const kDef = { interval_ms: 30, prn: 4, max_attempts: 3, arm_timeout_s: 600, start_settle_ms: 500, prn_timeout_ms: 5000 };
+const NUM = ["addr_type", "max_app_size", "prn", "interval_ms", "max_attempts", "arm_timeout_s", "start_settle_ms", "prn_timeout_ms"];
 async function viewTarget() {
   const tid = targetId();
   let t = {};
   if (tid) t = await api("GET", "/targets/" + tid).catch((e) => { toast(e.message); return {}; });
   const f = {};
-  const field = (k, label, attrs = {}) => { f[k] = h("input", Object.assign({ value: t[k] ?? "" }, attrs)); return h("label", label, f[k]); };
+  const field = (k, label, help, attrs = {}) => { f[k] = h("input", Object.assign({ value: t[k] ?? "" }, attrs)); return opt(label, help, f[k]); };
+  // A tuning knob: blank on a new target means DFU32's default, shown as the placeholder.
+  const knob = (k, label, def, min, max, help) => field(k, label, help, { type: "number", min, max, placeholder: def });
   f.addr_type = h("select", h("option", { value: 1 }, "random"), h("option", { value: 0 }, "public"));
   f.addr_type.value = String(t.addr_type ?? 1);
+  // The UI's one "ID" is the API's `board`; the API's own id (the {id} in the path) stays as it is.
   const save = h("button.pri", { onclick: () => act(save, async () => {
-    const id = f.id.value.trim() || "target";
     const body = {};
-    for (const [k, el] of Object.entries(f)) { if (k === "id") continue; const v = el.value.trim(); if (v === "" && NUM.includes(k)) continue; body[k] = NUM.includes(k) ? Number(v) : v; }
-    await api("PUT", "/targets/" + encodeURIComponent(id), body);
+    for (const [k, el] of Object.entries(f)) { const v = el.value.trim(); if (v === "" && NUM.includes(k)) continue; body[k] = NUM.includes(k) ? Number(v) : v; }
+    await api("PUT", "/targets/" + encodeURIComponent(tid || "target"), body);
     toast("Saved"); await refresh(); viewTarget();
   }) }, "Save");
-  const del = h("button.dng", { hidden: !tid, onclick: () => { if (confirm("Delete target \"" + tid + "\"?")) act(del, async () => { await api("DELETE", "/targets/" + tid); toast("Deleted"); await refresh(); viewTarget(); }); } }, "Delete");
-  const form = h("section", h("h2", tid ? "Target " + tid : "New target"),
-    h("div.form", field("id", "Id (optional)", { readonly: !!tid, placeholder: "target" }), field("name", "Name (optional)"), field("board", "Board (optional: checked against the image's)", { placeholder: "rak4631" }),
-      field("mac", "App MAC (from start ota)", { placeholder: "AA:BB:CC:DD:EE:FF" }), h("label", "Address type", f.addr_type),
-      field("manifest_url", "Manifest URL (optional: to fetch images from a server)", { placeholder: "http://server/rak4631/manifest.json" })),
-    h("details", h("summary", "Tuning"), h("div.form", field("prn", "PRN (1-8)", { type: "number" }), field("max_attempts", "Attempts (1-10)", { type: "number" }),
-      field("arm_timeout_s", "Arm timeout (s)", { type: "number" }), field("start_settle_ms", "START settle (ms)", { type: "number" }),
-      field("prn_timeout_ms", "Receipt timeout (ms)", { type: "number" }), field("max_app_size", "Max app size (B, 0 = default)", { type: "number" }))),
+  const del = h("button.dng", { hidden: !tid, onclick: () => { if (confirm("Delete the target and its settings?")) act(del, async () => { await api("DELETE", "/targets/" + tid); toast("Deleted"); await refresh(); viewTarget(); }); } }, "Delete");
+  const form = h("section", h("h2", tid ? "Target" : "New target"),
+    h("div.form",
+      field("mac", "App MAC (required)", ["The repeater's Bluetooth address while it runs its normal firmware: the only setting a flash needs. Run ", h("code", "start ota"), " on the repeater (USB console, or remotely from the companion app): its reply shows the address. Or run it and press Scan below, then Use as target. DFU32 finds the bootloader at this address or the next one up."], { placeholder: "AA:BB:CC:DD:EE:FF" }),
+      opt("Address type", "The kind of Bluetooth address the MAC is. nRF52 boards, MeshCore repeaters among them, use random. Scan below shows the type for each device and Use as target fills it in.", f.addr_type),
+      field("board", "ID (optional)", "A name for what this repeater is, such as its board: rak4631. Choose it yourself. When the staged image has an ID too (the one typed when staging it on the Image page, or the boards a manifest lists), the two must match (capitals don't matter) or DFU32 refuses to flash, which keeps another board's image off this repeater. If either is blank, nothing is compared. Up to 31 characters, no spaces.", { placeholder: "rak4631" }),
+      field("manifest_url", "Manifest URL (optional)", ["Only for fetching images from a server: the http:// address of the manifest.json that ", h("code", "tools/dfu32_pack.py"), " writes next to the image, on a web server DFU32 can reach. HTTPS isn't supported. Leave it blank to upload images on the Image page instead."], { placeholder: "http://server/rak4631/manifest.json" })),
+    h("details", h("summary", "Tuning"), h("p.mute.small", "The defaults suit most repeaters."), h("div.form",
+      knob("interval_ms", "Interval (ms)", kDef.interval_ms, 8, 100, "The BLE connection interval DFU32 asks for during the transfer, 8–100 ms; default 30. Shorter is faster (about one packet per interval), but on the bench the OTAFIX bootloader lost the link at 11.25 ms and below, and worked at 15, 20 and 30. A run's page shows the interval each attempt used."),
+      knob("prn", "PRN (1-8)", kDef.prn, 1, 8, "Packets DFU32 sends before it waits for the bootloader's receipt; default 4. Lower is slower but easier on the bootloader, which holds only 8 packets while it writes flash. After a lost link, the next attempt halves it (down to 2)."),
+      knob("max_attempts", "Attempts (1-10)", kDef.max_attempts, 1, 10, "How many times a flash tries the transfer before it fails; default 3. A retry after a lost link runs slower."),
+      knob("arm_timeout_s", "Arm timeout (s)", kDef.arm_timeout_s, 10, 3600, ["How long DFU32 waits for the repeater to appear after Flash, 10–3600 s; default 600. It is the time you have to run ", h("code", "start ota"), ". The Status page can override it for one flash."]),
+      knob("start_settle_ms", "START settle (ms)", kDef.start_settle_ms, 0, 5000, "Pause between the START command and the image size that follows it, 0–5000 ms; default 500. The bootloader silently drops the size if it arrives too soon. Raise it only if runs fail right at START."),
+      knob("prn_timeout_ms", "Receipt timeout (ms)", kDef.prn_timeout_ms, 500, 60000, "How long DFU32 waits for each receipt before the attempt counts as failed, 500–60000 ms; default 5000. Raise it if a run's log shows receipt timeouts while the link is still up."),
+      knob("max_app_size", "Max app size (B)", "0 = default", 0, 16777216, "The largest image DFU32 will send, in bytes. 0 (or blank) uses the default for the image's chip: 798720 for nRF52. Change it only if this repeater's bootloader leaves a different amount of room for the app; it must be a multiple of 4."))),
     h("div.row", { style: "margin-top:.8rem" }, save, del),
     tid ? null : h("p.mute.small", "DFU32 v1 handles one target. Saving creates it. Only the MAC is needed to flash an image you upload on the Image page; a manifest URL lets DFU32 fetch images itself."));
   $("#main").replaceChildren(form, scanSection((mac, type) => { f.mac.value = mac; f.addr_type.value = type === "public" ? "0" : "1"; toast("Filled in the MAC: save to keep it"); }));
@@ -390,7 +421,8 @@ function scanSection(use) {
   }) }, "Scan");
   return h("section", h("h2", "Find the repeater"),
     h("p.mute.small", "Run ", h("code", "start ota"), " on the repeater first: MeshCore repeaters don't advertise otherwise."),
-    h("div.row", h("label", "Seconds", secs), h("label.chk", dfuOnly, "DFU-looking only"), btn), list);
+    h("div.row", opt("Seconds", "How long to listen for Bluetooth advertisers, 1–30 s. The repeater advertises for a few minutes after start ota, so 10 is usually plenty.", secs),
+      opt("DFU-looking only", "Lists only devices that look ready for an update: a name ending in _OTA (a repeater after start ota), a name containing DFU, or the DFU service (a bootloader). Untick it to see every advertiser nearby.", dfuOnly, true), btn), list);
 }
 
 // ---- runs -------------------------------------------------------------------------------
@@ -511,10 +543,13 @@ async function viewSystem() {
   $("#main").replaceChildren(
     h("section", h("h2", "Device"), dl([["Firmware", d.version + (cfg.partition ? " (" + cfg.partition + ")" : "")], ["Board", d.board], ["Hostname", d.hostname + ".local"], ["Uptime", dur(d.uptime_s * 1000)],
       ["WiFi", w.connected ? (cfg.wifi_ssid || "") + " · " + w.ip + " · " + w.rssi + " dBm" : "not connected"], ["Clock", d.unix_time ? when(d.unix_time) : "not synced"], ["BLE", d.busy ? "in use: " + d.busy : "free"]])),
-    h("section", h("h2", "Settings"), h("div.form", h("label", "Hostname (blank = default)", host), h("label", "NTP server (blank = pool.ntp.org)", ntp), h("label", "Run deadline cap (s)", deadline)),
-      h("div.row", { style: "margin-top:.7rem" }, h("label.chk", wifiOff, "Stop WiFi during transfers by default"), save)),
+    h("section", h("h2", "Settings"), h("div.form",
+        opt("Hostname", "DFU32's name on your network: it answers at http://<hostname>.local/. Lowercase letters, digits and '-', up to 31. Blank goes back to the default, dfu32- and the last four digits of its MAC. Takes effect after a reboot.", host),
+        opt("NTP server", "The time server DFU32 asks for the clock that dates run records. Blank uses pool.ntp.org; give a server on your network if it has no internet. Takes effect after a reboot.", ntp),
+        opt("Run deadline cap (s)", "The longest a flash may run once the repeater is found, 120–7200 s; default 1200. DFU32 works out a deadline from the image size and the number of attempts, and this caps it: when it passes, DFU32 drops the link and brings WiFi back.", deadline)),
+      h("div.row", { style: "margin-top:.7rem" }, opt("Stop WiFi during transfers by default", "Whether Flash starts with \"WiFi off during the transfer\" ticked. With WiFi off, DFU32's radio serves Bluetooth alone, and this page is unreachable until the transfer ends. The Status page can still change it for one flash.", wifiOff, true), save)),
     h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload dfu32.bin from a CI build or release for this board. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),
-      h("div.row", file, h("label.chk", force, "allow another board's build"), upload), prog),
+      h("div.row", file, opt("allow another board's build", "Skips the check that the file was built for this DFU32's board (shown under Device above). Leave it off unless you are moving to a different build on purpose: firmware for other hardware may not boot, and DFU32 then rolls back.", force, true), upload), prog),
     h("section", h("h2", "Access"), ...access,
       newToken ? [note("info", "New token (saved in this browser; copy it for scripts or Home Assistant: once dismissed it is never shown again):"), h("pre", newToken),
         h("button", { onclick: () => { newToken = ""; viewSystem(); } }, "Done, I copied it")] : null));

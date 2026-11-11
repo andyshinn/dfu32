@@ -128,6 +128,15 @@ TEST_CASE("Stage writer: precheck failures leave the old image alone", "[stage]"
         f.meta.board = "heltec_t114";
         CHECK(f.stage().code == Err::BoardMismatch);
     }
+    SECTION("no board on the target: not compared, staged without one") {
+        f.meta.board.clear();
+        REQUIRE(f.stage().ok());
+        dfu::StagingHeader h;
+        REQUIRE(dfu::decode_staging_header({f.region.mem.data(), dfu::kStagingHeaderSize}, h) ==
+                dfu::StagingHeaderError::Ok);
+        CHECK(h.board.empty());
+        return;  // it staged, so the "old image untouched" checks below don't apply
+    }
     SECTION(".dat hash") {
         f.m.dat.sha256[0] ^= 1;
         CHECK(f.stage().code == Err::HashMismatch);

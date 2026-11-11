@@ -228,11 +228,11 @@ Tuning knobs:
 
 | Option | Default | Use |
 |---|---|---|
-| `--prn N` | 8 | Packets per receipt. Try 4 if transfers stall. |
+| `--prn N` | 4 | Packets per receipt (up to 8). Try 2 if transfers stall. |
 | `--packet N` | automatic | Cap the packet size, e.g. `--packet 20` to compare throughput. |
-| `--interval MS` | 20 ms | Request a fixed BLE connection interval. Shorter means more packets per second, but **on OTAFIX, 11.25 ms and below overrun the bootloader** (see results). `probe` takes it too, and both report the interval actually negotiated. |
+| `--interval MS` | 30 ms | Request a fixed BLE connection interval. Shorter means more packets per second, but **on OTAFIX, 11.25 ms and below overrun the bootloader** (see results). `probe` takes it too, and both report the interval actually negotiated. |
 | `--settle MS` | 500 | Delay between START and the size packet. |
-| `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval, then halves PRN. |
+| `--attempts N` | 3 | Total attempts (1–10). After a stream overrun or link loss, the next attempt uses a 30 ms interval (if it was shorter), then halves PRN. |
 | `--force-prn` | off | Allow PRN above 8. It overruns OTAFIX at fast intervals. |
 | `--wait S` | 600 | How long to wait for the target. |
 | `--wifi on\|off` | on | WiFi stays up during the flash (SPEC §7.1). `--wifi off` stops it for the transfer and restores it afterwards. The run record's `wifi_off` shows which was used. |
@@ -263,7 +263,7 @@ Every other call sends `-H "Authorization: Bearer $TOKEN"`. `GET /status` works 
 curl -s -X PUT $DFU/targets/t096 -H "Authorization: Bearer $TOKEN" -d '{"name":"Bench T096","board":"heltec_t096","mac":"F4:1C:36:A7:33:95","manifest_url":"http://<pc-ip>:8000/t096/manifest.json"}'
 ```
 
-Tuning knobs go in the same record: `prn` (1–8), `max_attempts` (1–10), `arm_timeout_s` (10–3600), `start_settle_ms`, `prn_timeout_ms`, `max_app_size`.
+Tuning knobs go in the same record: `prn` (1–8, default 4), `interval_ms` (8–100, default 30), `max_attempts` (1–10), `arm_timeout_s` (10–3600), `start_settle_ms`, `prn_timeout_ms`, `max_app_size`.
 
 **Check, stage, flash:**
 

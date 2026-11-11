@@ -99,7 +99,8 @@ TEST_CASE("Target config: JSON round trip", "[target]") {
 TEST_CASE("Target config: tuning knobs round-trip and are range-checked", "[target]") {
     TargetConfig t;
     t.id = "attic";
-    t.prn = 4;
+    t.prn = 2;
+    t.interval_ms = 20;
     t.max_attempts = 5;
     t.arm_timeout_s = 900;
     t.start_settle_ms = 750;
@@ -109,7 +110,8 @@ TEST_CASE("Target config: tuning knobs round-trip and are range-checked", "[targ
     CHECK(validate(t).empty());
     TargetConfig back;
     REQUIRE(from_json(to_json(t), back));
-    CHECK(back.prn == 4);
+    CHECK(back.prn == 2);
+    CHECK(back.interval_ms == 20);
     CHECK(back.max_attempts == 5);
     CHECK(back.arm_timeout_s == 900);
     CHECK(back.start_settle_ms == 750);
@@ -121,6 +123,9 @@ TEST_CASE("Target config: tuning knobs round-trip and are range-checked", "[targ
     TargetConfig old;
     REQUIRE(from_json(R"({"id":"x","mac":"F4:1C:36:A7:33:95"})", old));
     CHECK(old.prn == kDefaultPrn);
+    CHECK(old.prn == 4);
+    CHECK(old.interval_ms == kDefaultIntervalMs);
+    CHECK(old.interval_ms == 30);
     CHECK(old.max_attempts == kDefaultMaxAttempts);
     CHECK(old.arm_timeout_s == kDefaultArmTimeoutS);
 
@@ -130,6 +135,20 @@ TEST_CASE("Target config: tuning knobs round-trip and are range-checked", "[targ
     r = t;
     r.prn = 0;
     CHECK_FALSE(validate(r).empty());
+    r = t;
+    r.prn = 8;  // the cap, above the default
+    CHECK(validate(r).empty());
+    r = t;
+    r.interval_ms = 7;
+    CHECK_FALSE(validate(r).empty());
+    r = t;
+    r.interval_ms = 101;
+    CHECK_FALSE(validate(r).empty());
+    r = t;
+    r.interval_ms = 8;
+    CHECK(validate(r).empty());
+    r.interval_ms = 100;
+    CHECK(validate(r).empty());
     r = t;
     r.max_attempts = 11;
     CHECK_FALSE(validate(r).empty());
@@ -152,8 +171,9 @@ TEST_CASE("Target config: PUT merge", "[target]") {
     CHECK(t.prn == kDefaultPrn);
 
     // Update one field; the rest stay.
-    CHECK(apply_json(R"({"prn":4})", "attic", t).empty());
-    CHECK(t.prn == 4);
+    CHECK(apply_json(R"({"prn":8,"interval_ms":20})", "attic", t).empty());
+    CHECK(t.prn == 8);
+    CHECK(t.interval_ms == 20);
     CHECK(t.board == "rak4631");
 
     // A GET result can be PUT back: read-only fields are ignored.
@@ -168,6 +188,7 @@ TEST_CASE("Target config: PUT merge", "[target]") {
     CHECK_FALSE(apply_json(R"({"prn":"8"})", "attic", t).empty());
     CHECK_FALSE(apply_json(R"({"prn":-1})", "attic", t).empty());
     CHECK_FALSE(apply_json(R"({"prn":20})", "attic", t).empty());
+    CHECK_FALSE(apply_json(R"({"interval_ms":5})", "attic", t).empty());
     CHECK_FALSE(apply_json(R"({"mac":"nope"})", "attic", t).empty());
     CHECK_FALSE(apply_json(R"([1])", "attic", t).empty());
     CHECK_FALSE(apply_json("{", "attic", t).empty());
@@ -178,15 +199,16 @@ TEST_CASE("Target config: PUT merge", "[target]") {
 TEST_CASE("Target config: a stored record that breaks the rules can be repaired", "[target]") {
     // e.g. hand-edited NVS, or a rule added after the record was saved.
     TargetConfig t;
-    REQUIRE(from_json(R"({"id":"attic","board":"rak4631","prn":20,"max_attempts":0,"mac":"nope",)"
+    REQUIRE(from_json(R"({"id":"attic","board":"rak4631","prn":20,"interval_ms":500,"max_attempts":0,"mac":"nope",)"
                       R"("manifest_url":"https://x/m.json","last_ok_version":"v1"})",
                       t));
     CHECK_FALSE(validate(t).empty());
 
     TargetConfig fixed = t;
-    CHECK(sanitize(fixed) == 4);
+    CHECK(sanitize(fixed) == 5);
     CHECK(validate(fixed).empty());
     CHECK(fixed.prn == kDefaultPrn);
+    CHECK(fixed.interval_ms == kDefaultIntervalMs);
     CHECK(fixed.max_attempts == kDefaultMaxAttempts);
     CHECK(fixed.mac.empty());
     CHECK(fixed.manifest_url.empty());

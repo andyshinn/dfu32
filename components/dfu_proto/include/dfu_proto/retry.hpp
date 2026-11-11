@@ -42,9 +42,15 @@ inline constexpr uint16_t kMaxSafePrn = 8;
 /// capped to kMaxSafePrn too; callers wanting it must bypass the cap explicitly.
 uint16_t cap_prn(uint16_t requested) noexcept;
 
+/// What an attempt starts from unless told otherwise. Bench (docs/BENCH.md):
+/// 20 ms and 15 ms also work on OTAFIX and are faster, 11.25 ms and below
+/// overrun it; 30 ms and PRN 4 trade speed for margin.
+inline constexpr uint16_t kDefaultPrn = 4;
+inline constexpr uint16_t kDefaultIntervalMs = 30;
+
 struct AttemptParams {
-    uint16_t prn = 8;
-    uint16_t interval_ms = 20;
+    uint16_t prn = kDefaultPrn;
+    uint16_t interval_ms = kDefaultIntervalMs;
 };
 
 struct RetryPolicy {
@@ -59,7 +65,8 @@ struct RetryPolicy {
 };
 
 /// One step more conservative: lengthen the connection interval up to the
-/// policy's slowest (20 -> 30 ms), then halve PRN down to min_prn. Returns the
+/// policy's slowest (e.g. 20 -> 30 ms; the default already is), then halve PRN
+/// down to min_prn. Returns the
 /// input unchanged once both are at their limits.
 AttemptParams degrade(const AttemptParams& p, const RetryPolicy& policy) noexcept;
 

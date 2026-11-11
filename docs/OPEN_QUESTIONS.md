@@ -13,7 +13,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 | Flow | Arm, then wait (stage and verify first, then scan up to `arm_timeout_s`) |
 | Update policy | Manual only, no polling |
 | Staging partition | v1, and it is the primary store (flash, survives reboot). PSRAM holds buffers and logs. |
-| Board safety rail | Configured `target.board` must be in `manifest.boards` |
+| Board safety rail | Configured `target.board` (the UI's ID), when set, must be in `manifest.boards` |
 | Target identity | Configured **app** MAC; DFU32 accepts MAC or MAC+1 that advertises the DFU UUID |
 | BLE picker | `POST /api/v1/ble/scan` plus "Use as target" in the UI |
 | API auth | Optional bearer token, off until turned on (LAN device); hash stored in NVS |

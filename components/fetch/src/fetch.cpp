@@ -195,7 +195,7 @@ Status get_stream(const std::string& url, uint32_t expected_size, const std::fun
 Status check(const std::string& manifest_url, const std::string& board, CheckReport& out) {
     out = CheckReport{};
     if (Status s = fetch_manifest(manifest_url, out.manifest, out.manifest_sha256); !s.ok()) return s;
-    out.board_ok = board_matches(out.manifest, board);
+    out.board_ok = manifest_board_ok(out.manifest, board);
     StagedImage img;
     if (img.open() && img.header_status() == dfu::StagingHeaderError::Ok) {
         out.staged_valid = true;

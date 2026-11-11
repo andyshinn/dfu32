@@ -53,7 +53,7 @@ inline constexpr uint32_t kFlashSector = 4096;
 /// Who the image is staged for, recorded in the header.
 struct StageMeta {
     std::string target_id;     // <= 31
-    std::string board;         // <= 31; must be in manifest.boards
+    std::string board;         // <= 31; when set, must be in manifest.boards
     std::string manifest_url;  // <= 255
     Sha256 manifest_sha256{};
     uint64_t staged_at = 0;    // unix seconds, 0 if SNTP has no time yet

@@ -896,7 +896,7 @@ esp_err_t h_stage_upload(httpd_req_t* req) {
         if (!staged_board_ok(q.board, t.board)) {
             drain(req, remaining);
             return send_error(req, "422 Unprocessable Content", "BOARD_MISMATCH",
-                              "the image is for board \"" + q.board + "\", the target is \"" + t.board + "\"");
+                              "the image is for ID \"" + q.board + "\", the target is \"" + t.board + "\"");
         }
     }
     meta.board = q.board;

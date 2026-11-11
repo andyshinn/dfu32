@@ -71,10 +71,10 @@ Status check_bin_size(uint32_t size, const dfu::InitPacket& init, const StageMet
 
 Status precheck_image(const Manifest& m, std::span<const uint8_t> dat, const StageMeta& meta, uint32_t region_size,
                       ISha256& sha, dfu::InitPacket& init) {
-    if (!board_matches(m, meta.board)) {
+    if (!manifest_board_ok(m, meta.board)) {
         std::string listed;
         for (const auto& b : m.boards) listed += (listed.empty() ? "" : ", ") + b;
-        return Status::fail(Err::BoardMismatch, "target board '" + meta.board + "' not in manifest boards [" + listed + "]");
+        return Status::fail(Err::BoardMismatch, "target ID '" + meta.board + "' not in manifest boards [" + listed + "]");
     }
     if (Status s = check_meta(meta); !s.ok()) return s;
 

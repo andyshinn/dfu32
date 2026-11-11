@@ -191,7 +191,7 @@ void print_target(const TargetConfig& t) {
         std::printf(" (%s), bootloader after reset at %s or %s", t.addr_type ? "random" : "public", mac.str().c_str(),
                     mac.plus_one().str().c_str());
     }
-    std::printf("\n  board      %s\n", t.board.empty() ? "(not set: needed for `check`/`stage`)" : t.board.c_str());
+    std::printf("\n  board      %s\n", t.board.empty() ? "(not set: images aren't compared with it)" : t.board.c_str());
     std::printf("  manifest   %s\n", t.manifest_url.empty() ? "(not set)" : t.manifest_url.c_str());
     if (t.max_app_size) {
         std::printf("  max app    %" PRIu32 " B\n", t.max_app_size);
@@ -325,7 +325,7 @@ int cmd_check(int argc, char** argv) {
     std::string boards;
     for (const auto& b : m.boards) boards += (boards.empty() ? "" : ", ") + b;
     std::printf("  boards     %s  -> target board \"%s\": %s\n", boards.c_str(), t.board.c_str(),
-                t.board.empty() ? "NOT SET" : r.board_ok ? "match" : "MISMATCH");
+                t.board.empty() ? "not set, not compared" : r.board_ok ? "match" : "MISMATCH");
     std::printf("  bin        %" PRIu32 " B  sha256 %s\n             %s\n", m.bin.size, sha256_hex(m.bin.sha256).c_str(),
                 m.bin.url.c_str());
     std::printf("  dat        %" PRIu32 " B  %s\n", m.dat.size, m.dat.url.c_str());
@@ -348,10 +348,6 @@ int cmd_stage(int argc, char** argv) {
     }
     if (url.empty() && t.manifest_url.empty()) {
         std::printf("No manifest URL. Use: stage <url>, or set one with `target url <url>`.\n");
-        return 1;
-    }
-    if (t.board.empty()) {
-        std::printf("Set the target's board first (`target board <name>`, matched against manifest \"boards\").\n");
         return 1;
     }
     if (!require_network()) return 1;
@@ -480,7 +476,7 @@ int cmd_flash(int argc, char** argv) {
         return 1;
     }
     ble::FlashOptions o;
-    o.prn = static_cast<uint16_t>(opt_long(argc, argv, "--prn", 8));
+    o.prn = static_cast<uint16_t>(opt_long(argc, argv, "--prn", dfu::kDefaultPrn));
     o.force_prn = has_flag(argc, argv, "--force-prn");
     o.max_packet = static_cast<uint16_t>(opt_long(argc, argv, "--packet", 0));
     o.start_settle_ms = static_cast<uint32_t>(opt_long(argc, argv, "--settle", 500));
