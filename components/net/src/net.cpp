@@ -260,25 +260,6 @@ bool forget() {
     return ok;
 }
 
-bool try_credentials(const std::string& ssid, const std::string& password) {
-    if (!s_init) return false;
-    if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) return false;
-    const bool ok = set_credentials(ssid, password);
-    // Back to flash for everything else; this config stays RAM-only until
-    // commit_credentials() writes it again.
-    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
-    return ok;
-}
-
-bool commit_credentials() {
-    if (!s_init) return false;
-    wifi_config_t cfg{};
-    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK || cfg.sta.ssid[0] == 0) return false;
-    const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);  // storage is FLASH again
-    if (err != ESP_OK) ESP_LOGE(TAG, "saving WiFi credentials: %s", esp_err_to_name(err));
-    return err == ESP_OK;
-}
-
 bool stored_credentials(std::string& ssid, std::string& password) {
     if (!s_init) return false;
     wifi_config_t cfg{};

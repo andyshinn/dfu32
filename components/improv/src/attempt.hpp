@@ -2,8 +2,9 @@
 //
 // One WiFi connection attempt from Improv (SPEC.md §9.2), shared by the BLE
 // and Serial transports: only one attempt runs at a time, whichever started it.
-// The new network is tried from RAM; it is written to flash only once it has
-// an IP, otherwise the previous network is put back. Not thread-safe: each
+// The new network is saved to flash as it is applied; if it doesn't get an IP
+// in time, the previous network is put back (and saved), or cleared if there
+// was none. Not thread-safe: each
 // transport calls its own Attempt from its own task.
 #pragma once
 
@@ -24,7 +25,7 @@ public:
     /// Joined once the device has an IP, TimedOut past the deadline.
     Poll poll() const;
 
-    /// Keeps the new network (writes it to flash). Returns the redirect URL.
+    /// Keeps the new network (already saved). Returns the redirect URL.
     std::string keep();
     /// Puts the previous network back (or clears it again if there was none).
     void give_up();
