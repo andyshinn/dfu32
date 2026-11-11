@@ -137,7 +137,7 @@ class MatchesPython(unittest.TestCase):
                                  {k: v for k, v in py.items() if k != "builds"})
 
     def test_chip_family_matches(self):
-        chips = ["esp32", "esp32s3", "esp32c3", "ESP32S2", "esp8266"]
+        chips = ["esp32", "esp32s3", "esp32c3", "esp32c5", "ESP32S2", "esp8266"]
         for chip, got in zip(chips, run_js([{"op": "chip", "chip": c} for c in chips])):
             self.assertEqual(got["ok"], wm.chip_family(chip))
         self.assertIn("unknown chip", one({"op": "chip", "chip": "rp2040"})["err"])

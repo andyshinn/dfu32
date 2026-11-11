@@ -72,7 +72,9 @@ CHIPS = {
     0x000C: ("ESP32-C2", 0x0),
     0x000D: ("ESP32-C6", 0x0),
     0x0010: ("ESP32-H2", 0x0),
+    0x0017: ("ESP32-C5", 0x2000),
 }
+BOOT_OFFSETS = sorted({off for _, off in CHIPS.values()})
 ASSET_RE = re.compile(r"^dfu32-([a-z0-9_]+)-merged\.bin$")
 SEMVER_PRE = re.compile(r"^v?\d+\.\d+\.\d+-[0-9A-Za-z.-]+$")
 PART_FILES = ("bootloader.bin", "partition-table.bin", "ota_data_initial.bin", "dfu32.bin")
@@ -137,9 +139,9 @@ def app_info(app: bytes) -> dict:
 
 def split_merged(merged: bytes) -> dict:
     """The four parts of a merged image, at their flash offsets, plus the chip family and app info."""
-    boot_off = next((o for o in (0x0, 0x1000) if len(merged) > o + 24 and merged[o] == IMAGE_MAGIC), None)
+    boot_off = next((o for o in BOOT_OFFSETS if len(merged) > o + 24 and merged[o] == IMAGE_MAGIC), None)
     if boot_off is None:
-        raise SplitError("no bootloader at 0x0 or 0x1000")
+        raise SplitError("no bootloader at " + " or ".join(f"0x{o:X}" for o in BOOT_OFFSETS))
     (chip_id,) = struct.unpack_from("<H", merged, boot_off + 12)
     if chip_id not in CHIPS:
         raise SplitError(f"unknown chip id {chip_id}")

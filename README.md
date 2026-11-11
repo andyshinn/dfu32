@@ -81,6 +81,7 @@ Build directories from the older `idf.py -B build/<profile> -DDFU32_BOARD=<profi
 | `esp32s3_n16r8` | Generic ESP32-S3 N16R8 DevKitC | 16 MB / 8 MB |
 | `rak11200_rak19007` | RAKwireless WisBlock RAK11200 on a RAK19007 base | 4 MB / 8 MB (4 MB mapped) |
 | `xiao_esp32s3` | Seeed Studio XIAO ESP32S3 (or XIAO ESP32S3 Sense) | 8 MB / 8 MB |
+| `xiao_esp32c5` | Seeed Studio XIAO ESP32C5 | 8 MB / 8 MB |
 
 PSRAM is required. A board without it won't boot this firmware.
 
@@ -88,11 +89,13 @@ The RAK11200 has no auto-reset circuit, so `idf.py flash` can't put it into down
 
 The XIAO ESP32S3 has no on-board antenna, so fit the U.FL antenna it ships with before using WiFi or BLE. Its attention LED is the orange user LED (GPIO21); it has no NeoPixel. The BOOT button is the user button.
 
+The XIAO ESP32C5 (ESP32-C5, RISC-V) is the same: fit its U.FL antenna, the attention LED is the yellow user LED (GPIO27), and BOOT (GPIO28) is the user button. It can join 5 GHz networks as well as 2.4 GHz. Its bootloader sits at `0x2000`, which the builds, the merged image and the installer page already account for.
+
 Change settings for a profile with `idf.py --preset <profile> menuconfig`. The generated `sdkconfig` lives in that build directory.
 
 To add a board, create `boards/<name>/sdkconfig.defaults` and a matching preset in `CMakePresets.json` (`binaryDir` `build/<name>`, `DFU32_BOARD` `<name>`). `python3 tools/check_presets.py` checks they agree, and CI builds every preset. Personal presets go in a `CMakeUserPresets.json`, which git ignores.
 
-Component versions are pinned per chip in `dependencies.lock.esp32` and `dependencies.lock.esp32s3`, and CI fails if a build changes them. After changing an `idf_component.yml`, build one profile for each chip and commit the updated lock files.
+Component versions are pinned per chip in `dependencies.lock.esp32`, `dependencies.lock.esp32s3` and `dependencies.lock.esp32c5`, and CI fails if a build changes them. After changing an `idf_component.yml`, build one profile for each chip and commit the updated lock files.
 
 Check the app against its size budget (90% of an OTA slot):
 

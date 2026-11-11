@@ -73,7 +73,7 @@ class Build:
 
 class ChipFamily(unittest.TestCase):
     def test_names(self):
-        for chip, family in (("esp32", "ESP32"), ("esp32s3", "ESP32-S3"), ("esp32c3", "ESP32-C3"),
+        for chip, family in (("esp32", "ESP32"), ("esp32s3", "ESP32-S3"), ("esp32c3", "ESP32-C3"), ("esp32c5", "ESP32-C5"),
                              ("esp32c61", "ESP32-C61"), ("ESP32S2", "ESP32-S2"), ("esp8266", "ESP8266")):
             self.assertEqual(wm.chip_family(chip), family)
 

@@ -1,0 +1,33 @@
+# Seeed Studio XIAO ESP32C5 (ESP32-C5-WROOM-1: 8 MB flash, 8 MB quad PSRAM).
+# RISC-V, dual-band (2.4 and 5 GHz) WiFi 6, BLE 5.
+# Pins verified against arduino-esp32 variants/XIAO_ESP32C5/pins_arduino.h
+# (LED_BUILTIN 27) and Zephyr boards/seeed/xiao_esp32c5 (user LED on GPIO27,
+# active low; boot button on GPIO28).
+# The radio has no on-board antenna: fit the supplied U.FL antenna before use.
+# The ROM loads the C5's bootloader from 0x2000, not 0x0; the build and the
+# installer page take that offset from flasher_args.json.
+CONFIG_IDF_TARGET="esp32c5"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/8mb.csv"
+
+# The C5 only has quad PSRAM.
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# Native USB on the USB-C connector.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# BLE 5 features (2M PHY, DLE) on C5.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=y
+
+CONFIG_DFU32_BOARD_NAME="xiao_esp32c5"
+# No addressable LED.
+CONFIG_DFU32_NEOPIXEL_GPIO=-1
+CONFIG_DFU32_NEOPIXEL_POWER_GPIO=-1
+# Yellow user LED, lit when GPIO27 is low. GPIO27 is a strapping pin, but it is
+# only read when GPIO28 (BOOT) is low at reset, so the LED can't stop a normal boot.
+CONFIG_DFU32_STATUS_LED_GPIO=27
+CONFIG_DFU32_STATUS_LED_ACTIVE_LOW=y
+# BOOT button (the "B" button next to the USB-C connector).
+CONFIG_DFU32_BUTTON_GPIO=28

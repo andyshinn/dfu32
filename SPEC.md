@@ -71,7 +71,7 @@ DFU32 can also stage without arming: `POST /targets/{id}/stage`. This lets the o
 | BLE | NimBLE via `h2zero/esp-nimble-cpp` **pinned `2.6.0`** (master is 3.0.0-dev). Central for DFU, observer for scanning, peripheral only for Improv BLE while unprovisioned. |
 | JSON | `espressif/cjson` managed component (IDF 6 removed the built-in `json` component), behind `dfu32_core/json.hpp`. |
 | Hashing | mbedTLS / PSA SHA-256 (built in). CRC16-CCITT implemented locally. |
-| Supported SoCs | ESP32-S3 (BLE 5: 2M PHY, DLE) and classic ESP32 (BLE 4.2: DLE, no 2M PHY). |
+| Supported SoCs | ESP32-S3 and ESP32-C5 (BLE 5: 2M PHY, DLE) and classic ESP32 (BLE 4.2: DLE, no 2M PHY). |
 | Min flash / PSRAM | 4 MB flash, **2 MB PSRAM required**. PSRAM holds the 64 KB log ring, HTTP and JSON buffers, and WiFi/LWIP buffers (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`). That leaves internal RAM for NimBLE, which stays on internal allocation. Staging stays in flash, for offline retry after a reboot. |
 | Bench boards | **Adafruit Feather ESP32-S3** (primary: native USB, NeoPixel, BOOT button) and **Adafruit Feather ESP32 V2** (secondary target, or the fake-bootloader test fixture, §14.3). |
 | Also supported | Generic ESP32-S3 N16R8 DevKitC (8/16 MB layout). |
@@ -106,12 +106,15 @@ Board profiles live in `boards/<name>/sdkconfig.defaults` and are layered on top
 | `esp32s3_n16r8` | 16 MB / 8 MB | `partitions/8mb.csv` (8 MB is plenty) | USB-Serial-JTAG | GPIO48 / none *(varies by clone, verify)* | none | BOOT GPIO0 |
 | `rak11200_rak19007` (WisBlock RAK11200 core on a RAK19007 base) | 4 MB / 8 MB (ESP32-WROVER-B; 4 MB mapped) | `partitions/4mb.csv` | UART0 via the base board's USB-C | none | blue LED2 GPIO2 *(not red)* | none (reset only) |
 | `xiao_esp32s3` (Seeed Studio XIAO ESP32S3; also the Sense) | 8 MB / 8 MB octal PSRAM (ESP32-S3R8) | `partitions/8mb.csv` | USB-Serial-JTAG | none | orange user LED GPIO21, active low *(not red)* | BOOT GPIO0 |
+| `xiao_esp32c5` (Seeed Studio XIAO ESP32C5) | 8 MB / 8 MB quad PSRAM (ESP32-C5-WROOM-1) | `partitions/8mb.csv` | USB-Serial-JTAG | none | yellow user LED GPIO27, active low *(not red)* | BOOT GPIO28 |
 
 The Feather pins are verified against Adafruit's board definitions: arduino-esp32 `variants/adafruit_feather_esp32s3/pins_arduino.h` and `variants/adafruit_feather_esp32_v2/pins_arduino.h`, plus CircuitPython `ports/espressif/boards/adafruit_feather_esp32s3_4mbflash_2mbpsram/`. The NeoPixel power pin must be driven HIGH before the LED is used.
 
 The RAK11200 pins come from RAK's `WisCore_RAK11200_Board` variant (as carried in meshtastic/firmware `variants/esp32/rak11200/pins_arduino.h`): LED1 green on GPIO12, LED2 blue on GPIO2. The attention LED is LED2: GPIO2 is a strapping pin only in combination with GPIO0 low (download mode), so driving it high can't affect a normal boot. GPIO12 is the MTDI strapping pin that selects the flash voltage; if it were still driven high when the chip samples it across a reset, the WROVER-B's 3.3 V flash could get 1.8 V, so the firmware never drives it. The board has no auto-reset circuit, so flashing needs BOOT0 held low at reset. It has no NeoPixel, so its only indicator is the attention LED (§13.4). With no button, a lost token is cleared with `token clear` on the USB console or by reflashing with an NVS erase; `token/clear` and `token/rotate` over HTTP need the current token (§9.3).
 
 The XIAO ESP32S3 pins come from arduino-esp32 `variants/XIAO_ESP32S3/pins_arduino.h` (`LED_BUILTIN` 21) and Zephyr `boards/seeed/xiao_esp32s3` (GPIO21 `GPIO_ACTIVE_LOW`); flash size and octal PSRAM from the arduino-esp32 `XIAO_ESP32S3` board entry. The user LED is lit when GPIO21 is low, so the profile sets `DFU32_STATUS_LED_ACTIVE_LOW`. GPIO21 is not a strapping pin on the S3. The board has no NeoPixel, so its only indicator is the attention LED (§13.4). The BOOT button (GPIO0) has the same strapping-pin caveat as the Feather S3's (see the button quirks below). The radio needs the external U.FL antenna; without one, WiFi and BLE range is very short.
+
+The XIAO ESP32C5 pins come from arduino-esp32 `variants/XIAO_ESP32C5/pins_arduino.h` (`LED_BUILTIN` 27) and Zephyr `boards/seeed/xiao_esp32c5` (GPIO27 `GPIO_ACTIVE_LOW`, boot button GPIO28); the module (ESP32-C5-WROOM-1, 8 MB flash, 8 MB PSRAM) from the same Zephyr board. The C5 has quad PSRAM only. GPIO27 and GPIO28 are both strapping pins: GPIO28 low at reset selects download mode (the BOOT button, as on the S3), and GPIO27 is only read in that case, so the LED can't affect a normal boot. The ROM loads the C5's bootloader from `0x2000` (not `0x0` as on the S3, or `0x1000` as on the classic ESP32); the partition table stays at `0x8000`, so the bootloader must fit in 24 KB. It has no NeoPixel and needs the external U.FL antenna, like the XIAO ESP32S3. The radio is dual-band, so DFU32 can join a 5 GHz network on this board. **[bench]** Not yet run on hardware: CI builds it, but nobody has flashed a repeater from one.
 
 Both button pins have quirks:
 - Feather S3 BOOT (GPIO0) is a strapping pin. A long-press is only interpreted once the app is running; holding it at reset enters the ROM download mode, as normal.
@@ -461,7 +464,7 @@ DFU32 is a LAN device, so token auth is opt-in. Whether it is on is whether a to
   - **2–5 s** (amber slow blink): open Improv BLE for 5 minutes (§9.2).
   - **Clear the token, 5–15 s** (amber fast blink): clears `token_sha256` without touching anything else, so the API is open again.
   - **Factory reset, 15 s or more** (solid amber): erases the `dfu32` namespace and WiFi credentials, then reboots. The staging partition and run log are kept. It is refused while a job, a console flash/probe or a scan holds the BLE lease (a reset mid-flash would leave the target erased), and it doesn't reboot unless both erasures succeeded.
-- The button is `CONFIG_DFU32_BUTTON_GPIO` (BOOT on the Feather S3 and N16R8, the user button on GPIO38 on the Feather V2).
+- The button is `CONFIG_DFU32_BUTTON_GPIO` (BOOT on the Feather S3, N16R8 and both XIAOs, the user button on GPIO38 on the Feather V2).
 - On boards with no button, use `token clear` on the console, `POST /api/v1/system/token/clear` or `/rotate` while authenticated, or reflash with an NVS erase.
 
 ---
@@ -816,7 +819,7 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
 DFU32 Kconfig (`main/Kconfig.projbuild`):
 - `DFU32_MAX_TARGETS` (default 1)
 - `DFU32_NEOPIXEL_GPIO`, `DFU32_NEOPIXEL_POWER_GPIO`, `DFU32_STATUS_LED_GPIO` (plain red LED), `DFU32_BUTTON_GPIO`. −1 = none; set by the board profile.
-- `DFU32_STATUS_LED_ACTIVE_LOW` (n): the plain LED is lit when its GPIO is low (`xiao_esp32s3`)
+- `DFU32_STATUS_LED_ACTIVE_LOW` (n): the plain LED is lit when its GPIO is low (`xiao_esp32s3`, `xiao_esp32c5`)
 - `DFU32_LOG_RING_KB` (default 64, in PSRAM)
 - `DFU32_IMPROV_BLE` (y)
 - `DFU32_DEBUG_ENDPOINTS` (n): fault injection (§14.2)

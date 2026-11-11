@@ -48,6 +48,8 @@ TEST_CASE("OTA image: wrong chip, project or board is refused", "[ota]") {
     ImageInfo info;
     CHECK(check_image_start(image(0x0000, "dfu32", "v1", "feather_esp32_v2"), kS3, info) ==
           "image is for ESP32, this device is ESP32-S3");
+    CHECK(check_image_start(image(0x0017, "dfu32", "v1", "xiao_esp32c5"), kS3, info) ==
+          "image is for ESP32-C5, this device is ESP32-S3");
     CHECK(check_image_start(image(0x0009, "blink", "v1", nullptr), kS3, info) ==
           "image is the project \"blink\", not \"dfu32\"");
     const std::string other = check_image_start(image(0x0009, "dfu32", "v1", "esp32s3_n16r8"), kS3, info);
