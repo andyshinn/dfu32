@@ -67,8 +67,12 @@ bool Attempt::begin(const std::string& ssid, const std::string& password, int64_
         g_running = true;
     }
     had_previous_ = net::stored_credentials(previous_ssid_, previous_password_);
-    // RAM only until it connects: a power cut mid-attempt keeps the old network.
-    if (!net::try_credentials(ssid, password)) {
+    // Saved to flash now, as the console's `wifi` command does; a failed
+    // attempt puts the previous network back (give_up). An earlier version
+    // tried the network from RAM (esp_wifi_set_storage(RAM)) and re-applied
+    // the same config with FLASH storage once it joined, but the driver
+    // doesn't write an unchanged config, so the network was lost on reboot.
+    if (!net::set_credentials(ssid, password)) {
         ESP_LOGE(TAG, "could not apply the WiFi settings");
         wipe(previous_password_);
         end();
@@ -88,8 +92,7 @@ Attempt::Poll Attempt::poll() const {
 }
 
 std::string Attempt::keep() {
-    if (!net::commit_credentials()) ESP_LOGW(TAG, "connected, but saving the network failed; it is lost on reboot");
-    wipe(previous_password_);
+    wipe(previous_password_);  // the new network is already saved (begin)
     const std::string url = "http://" + net::status().ip + "/";
     ESP_LOGI(TAG, "joined \"%s\"; provisioned, redirect %s", trying_ssid_.c_str(), url.c_str());
     end();
@@ -99,10 +102,12 @@ std::string Attempt::keep() {
 void Attempt::give_up() {
     ESP_LOGW(TAG, "could not join \"%s\"; %s", trying_ssid_.c_str(),
              had_previous_ ? "going back to the previous network" : "clearing it again");
-    if (had_previous_) {
-        net::set_credentials(previous_ssid_, previous_password_);
-    } else {
-        net::forget();
+    // The new network was saved by begin(), so this restore is all that keeps
+    // the previous one: say so if it fails.
+    const bool restored = had_previous_ ? net::set_credentials(previous_ssid_, previous_password_) : net::forget();
+    if (!restored) {
+        ESP_LOGE(TAG, "%s failed: \"%s\" is still the saved network; set WiFi again (Improv or `wifi`)",
+                 had_previous_ ? "restoring the previous network" : "clearing the network", trying_ssid_.c_str());
     }
     wipe(previous_password_);
     end();

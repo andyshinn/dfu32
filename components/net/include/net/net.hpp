@@ -37,15 +37,8 @@ bool set_credentials(const std::string& ssid, const std::string& password);
 /// Clears stored credentials and disconnects.
 bool forget();
 
-/// Like set_credentials(), but the new network is kept in RAM only: a power
-/// cut during the attempt leaves the stored one as it was. Make it permanent
-/// with commit_credentials() once it has connected (Improv, SPEC.md §9.2).
-bool try_credentials(const std::string& ssid, const std::string& password);
-/// Writes the network in use to flash. Call while connected (not connecting).
-bool commit_credentials();
-
-/// The network in use (stored, or being tried), so a failed Improv attempt
-/// can put the previous one back. False when none is set.
+/// The network in use, so a failed Improv attempt can put the previous one
+/// back. False when none is set.
 bool stored_credentials(std::string& ssid, std::string& password);
 
 struct ScanResult {
