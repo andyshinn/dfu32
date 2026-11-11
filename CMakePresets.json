@@ -40,6 +40,14 @@
             "cacheVariables": {
                 "DFU32_BOARD": "xiao_esp32s3"
             }
+        },
+        {
+            "name": "xiao_esp32c5",
+            "displayName": "Seeed Studio XIAO ESP32C5 (8 MB / 8 MB PSRAM)",
+            "binaryDir": "build/xiao_esp32c5",
+            "cacheVariables": {
+                "DFU32_BOARD": "xiao_esp32c5"
+            }
         }
     ]
 }

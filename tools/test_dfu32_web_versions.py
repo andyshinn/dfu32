@@ -21,7 +21,8 @@ import dfu32_web_manifest as wm  # noqa: E402
 import dfu32_web_versions as wv  # noqa: E402
 from test_dfu32_web_manifest import flasher_args  # noqa: E402
 
-CHIP_S3, CHIP_ESP32 = 9, 0
+CHIP_S3, CHIP_ESP32, CHIP_C5 = 9, 0, 0x17
+BOOT_OFFSET = {CHIP_ESP32: 0x1000, CHIP_C5: 0x2000}  # 0x0 otherwise
 # (label, type, subtype, offset, size) like partitions/4mb.csv and 8mb.csv.
 TABLE_4MB = [("nvs", 1, 2, 0x9000, 0x6000), ("otadata", 1, 0, 0xF000, 0x2000), ("phy_init", 1, 1, 0x11000, 0x1000),
              ("runlog", 1, 0x41, 0x12000, 0xE000), ("ota_0", 0, 0x10, 0x20000, 0x170000),
@@ -66,7 +67,7 @@ def app_image(chip_id: int = CHIP_S3, version: str = "v0.4.0", board: str | None
 def merged_image(chip_id: int = CHIP_S3, table=TABLE_4MB, app: bytes | None = None,
                  boot: bytes | None = None) -> tuple[bytes, list[tuple[int, bytes]]]:
     """A merged image as idf.py merge-bin writes it (0xFF between parts), and the parts in it."""
-    boot_off = 0x1000 if chip_id == CHIP_ESP32 else 0x0
+    boot_off = BOOT_OFFSET.get(chip_id, 0x0)
     boot = boot or esp_image(chip_id, [b"\x11" * 5000, b"\x22" * 700])
     app = app or app_image(chip_id)
     otadata = next(e for e in table if e[0] == "otadata")
@@ -113,6 +114,14 @@ class Split(unittest.TestCase):
         s = wv.split_merged(merged)
         self.assertEqual(s["chip_family"], "ESP32")
         self.assertEqual([o for o, _ in s["parts"]], [0x1000, 0x8000, 0x18000, 0x30000])
+        self.assertEqual(s["parts"], parts)
+
+    def test_c5_8mb(self):
+        app = app_image(CHIP_C5, board="xiao_esp32c5")
+        merged, parts = merged_image(CHIP_C5, TABLE_8MB, app=app)
+        s = wv.split_merged(merged)
+        self.assertEqual(s["chip_family"], "ESP32-C5")
+        self.assertEqual([o for o, _ in s["parts"]], [0x2000, 0x8000, 0x18000, 0x30000])
         self.assertEqual(s["parts"], parts)
 
     def test_factory_partition_wins(self):

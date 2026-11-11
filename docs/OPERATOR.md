@@ -96,6 +96,6 @@ If the new firmware can't bring WiFi and the web UI back within 90 seconds, DFU3
 | solid red | the last job failed |
 | red, fast blink | the repeater's app is erased: flash it again |
 
-The plain LED (red on the Feathers, blue on the RAK11200, orange on the XIAO ESP32S3) stays on while a repeater is known to be erased, and blinks during a transfer.
+The plain LED (red on the Feathers, blue on the RAK11200, orange on the XIAO ESP32S3, yellow on the XIAO ESP32C5) stays on while a repeater is known to be erased, and blinks during a transfer.
 
 Hold the button and let go: 2–5 s opens Improv for 5 minutes, 5–15 s clears the API token (open access), 15 s or more erases DFU32's settings and WiFi (not the staged image or the run history). The factory reset is refused while a flash is running.
