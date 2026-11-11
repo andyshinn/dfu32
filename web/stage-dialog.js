@@ -33,9 +33,10 @@ const kB = n => (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
 const { h4, utf8len } = S;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const LOGS_ITEM = 'Logs & Console';  // the device dialog's last fixed item; HOOK_ITEM in fetch_esp_web_tools.py
-// dfu32.app/?trace=1: esptool-js logs every serial exchange to the console
-// (console.log, "TRACE ..." lines), for debugging a stage that fails.
-const TRACE = typeof location !== 'undefined' && new URLSearchParams(location.search).has('trace');
+// dfu32.app/?trace=1: esptool-js logs every serial exchange up to the image
+// write (console.log, "TRACE ..." lines) plus its debug messages, for debugging a
+// stage that fails; on a failure the whole trace is also printed in one block.
+const TRACE = typeof location !== 'undefined' && new URLSearchParams(location.search).get('trace') === '1';
 const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
 
 
@@ -357,13 +358,13 @@ class FriendlyError extends Error {
 /** Reset into the ROM bootloader, find `staging`, write `image` there, verify, reset. Returns the partition. */
 export async function writeStaging(port, image, onStep) {
   const { ESPLoader, Transport } = await import(ESPTOOL_JS);
-  const transport = new Transport(port, TRACE);
+  const transport = new Transport(port, TRACE);  // tracing: the Transport's own flag
   const log = [];
   const terminal = { clean() {}, writeLine: s => log.push(s), write: s => log.push(s) };
   // 115200 like ESP Web Tools: the boards' USB bridges are known good there.
   // The same read buffer ESP Web Tools opens the port with: Web Serial's default
   // is 255 bytes, and esptool-js leaves it at that unless told otherwise.
-  const loader = new ESPLoader({ transport, baudrate: 115200, terminal, enableTracing: TRACE,
+  const loader = new ESPLoader({ transport, baudrate: 115200, terminal, debugLogging: TRACE,
     serialOptions: { bufferSize: 8192 } });
   try {
     onStep('Connecting to the ESP32');
@@ -380,6 +381,9 @@ export async function writeStaging(port, image, onStep) {
     if (image.length > part.size) {
       throw new FriendlyError(`The image (${kB(image.length)}) doesn't fit the staging partition (${kB(part.size)}).`, new Error('image larger than the partition'));
     }
+    // The write is hundreds of KB, which esptool-js would hex-dump twice per
+    // block: stop tracing here; the steps worth tracing are behind us.
+    transport.tracing = false;
     onStep('Writing the image', 0);
     await loader.writeFlash({
       fileArray: [{ data: image, address: part.offset }],
@@ -395,8 +399,10 @@ export async function writeStaging(port, image, onStep) {
     onStep('Restarting DFU32');
     return part;
   } catch (e) {
-    // Visible at the default console level, so a failure report can include it.
+    // Visible at the default console level, so a failure report can include it,
+    // and with ?trace=1 the serial trace too, in one block to copy.
     if (log.length) console.warn('esptool-js log:\n' + log.join('\n'));
+    if (TRACE && transport.traceLog) console.warn('esptool-js trace:\n' + transport.traceLog);
     throw e;
   } finally {
     // ESP Web Tools' hard reset: RTS first, then esptool-js' chip-specific release.
