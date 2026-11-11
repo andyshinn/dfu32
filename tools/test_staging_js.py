@@ -54,6 +54,16 @@ for (const q of reqs) {
     else if (q.op === 'staging') v = s.findStaging(fromHex(q.data));
     else if (q.op === 'parts') v = s.parsePartitionTable(fromHex(q.data));
     else if (q.op === 'guess') v = { version: s.guessVersion(q.name) };
+    else if (q.op === 'findtable') {
+      // A fake esptool-js loader: records what the page asked of the ESP32.
+      const calls = [], steps = [];
+      const loader = {
+        flashMd5sum: async (a, n) => { calls.push(['md5', a, n]); if (q.md5Throws) throw new Error('timeout'); return q.flashMd5; },
+        readFlash: async (a, n) => { calls.push(['read', a, n]); return fromHex(q.flash); },
+      };
+      const r = await s.findPartitionTable(loader, q.tables.map(fromHex), l => steps.push(l));
+      v = { table: s.hex(r.table), via: r.via, calls, steps };
+    }
     else if (q.op === 'clip') v = { clipped: s.clipUtf8(q.text, q.max), len: s.utf8len(q.text), h4: s.h4(q.max) };
     out.push({ ok: v });
   } catch (e) {
@@ -200,6 +210,46 @@ class Rejects(unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NODE, "node is not installed")
+class FindPartitionTable(unittest.TestCase):
+    """Matching the ESP32's partition table by MD5 instead of streaming it back."""
+    T4 = partition_table([("nvs", 1, 2, 0x9000, 0x6000), ("staging", 1, 0x40, 0x300000, 0xD0000)])
+    T8 = partition_table([("nvs", 1, 2, 0x9000, 0xF000), ("staging", 1, 0x40, 0x630000, 0x100000)])
+
+    def find(self, flash: bytes, tables, **kw) -> dict:
+        req = {"op": "findtable", "flash": flash.hex(), "tables": [t.hex() for t in tables],
+               "flashMd5": hashlib.md5(flash).hexdigest().upper(), **kw}  # the stub's hex, any case
+        got = one(req)
+        self.assertIn("ok", got, got)
+        return got["ok"]
+
+    def test_matched_by_md5_without_reading(self):
+        r = self.find(self.T8, [self.T4, self.T8])
+        self.assertEqual((r["via"], bytes.fromhex(r["table"])), ("md5", self.T8))
+        self.assertEqual(r["calls"], [["md5", 0x8000, 0xC00]])
+        self.assertEqual(r["steps"], ["Checking the partition table"])
+
+    def test_no_match_reads_it(self):
+        other = partition_table([("staging", 1, 0x40, 0x200000, 0x80000)])
+        r = self.find(other, [self.T4, self.T8])
+        self.assertEqual((r["via"], bytes.fromhex(r["table"])), ("read", other))
+        self.assertEqual(r["calls"], [["md5", 0x8000, 0xC00], ["read", 0x8000, 0xC00]])
+        self.assertEqual(r["steps"], ["Checking the partition table", "Reading the partition table"])
+
+    def test_md5_failure_reads_it(self):
+        r = self.find(self.T4, [self.T4], md5Throws=True)
+        self.assertEqual(r["via"], "read")
+
+    def test_no_published_tables_reads_it(self):
+        r = self.find(self.T4, [])
+        self.assertEqual(r["calls"], [["read", 0x8000, 0xC00]])
+
+    def test_wrong_sized_table_is_never_matched(self):
+        r = self.find(self.T4, [self.T4[:0x800]])
+        self.assertEqual(r["via"], "read")
+        self.assertEqual(r["calls"], [["read", 0x8000, 0xC00]])  # nothing to compare: no MD5 asked
+
+
 class PartitionTable(unittest.TestCase):
     def test_finds_staging_in_both_layouts(self):
         for csv, offset, size in [("4mb.csv", 0x300000, 0xD0000), ("8mb.csv", 0x630000, 0x100000)]:
