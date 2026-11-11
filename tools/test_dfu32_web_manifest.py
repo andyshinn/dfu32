@@ -251,6 +251,16 @@ class StagingPage(unittest.TestCase):
             row = next(l for l in (REPO / "partitions" / csv).read_text().splitlines() if l.startswith("staging"))
             self.assertEqual(int(row.split(",")[2], 0), self.const("STAGING_SUBTYPE"))
 
+    def test_serial_options_and_trace_switch(self):
+        # ESP Web Tools' read buffer, not Web Serial's 255-byte default; ?trace=1 only, and
+        # tracing stops before the image write (hundreds of KB, hex-dumped twice per block).
+        self.assertIn("serialOptions: { bufferSize: 8192 }", self.DIALOG)
+        self.assertIn("get('trace') === '1'", self.DIALOG)
+        self.assertIn("new Transport(port, TRACE)", self.DIALOG)
+        self.assertIn("debugLogging: TRACE", self.DIALOG)
+        self.assertLess(self.DIALOG.index("transport.tracing = false"), self.DIALOG.index("loader.writeFlash("))
+        self.assertIn("transport.traceLog", self.DIALOG)
+
     def test_hooks_named_in_fetch_tool(self):
         # Every ESP Web Tools element the dialog draws with is checked at deploy time.
         used = set(re.findall(r"<(ewt?-[a-z-]+)", self.DIALOG)) | {"ewt-install-dialog"}

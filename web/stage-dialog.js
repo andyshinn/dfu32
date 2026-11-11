@@ -33,6 +33,10 @@ const kB = n => (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
 const { h4, utf8len } = S;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const LOGS_ITEM = 'Logs & Console';  // the device dialog's last fixed item; HOOK_ITEM in fetch_esp_web_tools.py
+// dfu32.app/?trace=1: esptool-js logs every serial exchange up to the image
+// write (console.log, "TRACE ..." lines) plus its debug messages, for debugging a
+// stage that fails; on a failure the whole trace is also printed in one block.
+const TRACE = typeof location !== 'undefined' && new URLSearchParams(location.search).get('trace') === '1';
 const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
 
 
@@ -318,7 +322,12 @@ class StageDialog extends HTMLElement {
         version: p.version, manifestUrl: S.clipUtf8('usb:' + p.file.name, 255),
         stagedAt: Math.floor(Date.now() / 1000),
       });
-      await writeStaging(this.port, image, (label, pct) => this.setProgress(label, pct));
+      // The board DFU32 reported over Improv ("ESP32-S3 / esp32s3_n16r8") picks
+      // which published partition tables to compare against.
+      const board = String((this.info && this.info.chipFamily) || '').split(' / ')[1] || '';
+      this.setProgress('Preparing');
+      const tables = await knownTables(board);
+      await writeStaging(this.port, image, (label, pct) => this.setProgress(label, pct), { tables });
     } catch (e) {
       this.busy = false;
       console.error('DFU32 staging failed', e);
@@ -351,14 +360,55 @@ class FriendlyError extends Error {
   }
 }
 
-/** Reset into the ROM bootloader, find `staging`, write `image` there, verify, reset. Returns the partition. */
-export async function writeStaging(port, image, onStep) {
+const BOARD_RE = /^[a-z0-9_]+$/;
+
+/**
+ * The partition tables this site publishes for `board`: its current build's
+ * (manifest-<board>.json) and each earlier release's (versions.json), distinct,
+ * 0xC00 bytes each. Anything that can't be fetched is skipped: the result only
+ * saves reading the table from the ESP32 (S.findPartitionTable).
+ */
+export async function knownTables(board) {
+  if (!BOARD_RE.test(board)) return [];
+  const getJson = async url => { const r = await fetch(url, { cache: 'no-cache' }); if (!r.ok) throw new Error(r.status); return r.json(); };
+  const manifests = [`manifest-${board}.json`];
+  try {
+    for (const v of (await getJson('versions.json')).versions || []) {
+      const m = v && v.manifests && v.manifests[board];
+      if (typeof m === 'string' && !manifests.includes(m)) manifests.push(m);
+    }
+  } catch (e) { /* no versions.json: the current build only */ }
+  const seen = new Set(), out = [];
+  await Promise.all(manifests.map(async url => {
+    try {
+      const base = new URL(url, location.href);
+      const part = ((await getJson(base)).builds || []).flatMap(b => b.parts || []).find(p => p.offset === S.PARTITION_TABLE_OFFSET);
+      if (!part) return;
+      const r = await fetch(new URL(part.path, base));
+      if (!r.ok) return;
+      const t = new Uint8Array(await r.arrayBuffer());
+      const md5 = S.md5Hex(t);
+      if (t.length === S.PARTITION_TABLE_SIZE && !seen.has(md5)) { seen.add(md5); out.push(t); }
+    } catch (e) { /* skip this one */ }
+  }));
+  return out;
+}
+
+/**
+ * Reset into the ROM bootloader, find `staging`, write `image` there, verify, reset.
+ * `tables`: the partition tables the site publishes for this board (knownTables), so
+ * the table can be matched by MD5 instead of read back. Returns the partition.
+ */
+export async function writeStaging(port, image, onStep, { tables = [] } = {}) {
   const { ESPLoader, Transport } = await import(ESPTOOL_JS);
-  const transport = new Transport(port, false);
+  const transport = new Transport(port, TRACE);  // tracing: the Transport's own flag
   const log = [];
   const terminal = { clean() {}, writeLine: s => log.push(s), write: s => log.push(s) };
   // 115200 like ESP Web Tools: the boards' USB bridges are known good there.
-  const loader = new ESPLoader({ transport, baudrate: 115200, terminal, enableTracing: false });
+  // The same read buffer ESP Web Tools opens the port with: Web Serial's default
+  // is 255 bytes, and esptool-js leaves it at that unless told otherwise.
+  const loader = new ESPLoader({ transport, baudrate: 115200, terminal, debugLogging: TRACE,
+    serialOptions: { bufferSize: 8192 } });
   try {
     onStep('Connecting to the ESP32');
     try {
@@ -367,13 +417,16 @@ export async function writeStaging(port, image, onStep) {
       if (e && e.name === 'InvalidStateError') throw new FriendlyError(PORT_BUSY, e);  // port.open() on a port already open
       throw new FriendlyError("Couldn't start the ESP32's bootloader. Close other programs using the port, or hold BOOT, tap RESET, release BOOT and try again.", e);
     }
-    onStep('Reading the partition table');
-    const table = await loader.readFlash(S.PARTITION_TABLE_OFFSET, S.PARTITION_TABLE_SIZE);
+    const { table, via } = await S.findPartitionTable(loader, tables, onStep);
+    if (TRACE) console.log(`DFU32: partition table ${via === 'md5' ? 'matched a published one by MD5' : 'read from flash'}`);
     const part = S.findStaging(table);
     if (!part) throw new FriendlyError('This ESP32 has no DFU32 staging partition. Install DFU32 on it first.', new Error('no data partition "staging" with subtype 0x40'));
     if (image.length > part.size) {
       throw new FriendlyError(`The image (${kB(image.length)}) doesn't fit the staging partition (${kB(part.size)}).`, new Error('image larger than the partition'));
     }
+    // The write is hundreds of KB, which esptool-js would hex-dump twice per
+    // block: stop tracing here; the steps worth tracing are behind us.
+    transport.tracing = false;
     onStep('Writing the image', 0);
     await loader.writeFlash({
       fileArray: [{ data: image, address: part.offset }],
@@ -389,7 +442,10 @@ export async function writeStaging(port, image, onStep) {
     onStep('Restarting DFU32');
     return part;
   } catch (e) {
-    if (log.length) console.debug('esptool-js log:\n' + log.join('\n'));
+    // Visible at the default console level, so a failure report can include it,
+    // and with ?trace=1 the serial trace too, in one block to copy.
+    if (log.length) console.warn('esptool-js log:\n' + log.join('\n'));
+    if (TRACE && transport.traceLog) console.warn('esptool-js trace:\n' + transport.traceLog);
     throw e;
   } finally {
     // ESP Web Tools' hard reset: RTS first, then esptool-js' chip-specific release.

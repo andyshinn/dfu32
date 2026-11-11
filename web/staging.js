@@ -291,6 +291,31 @@ export function findStaging(buf) {
   return parsePartitionTable(buf).find(e => e.label === 'staging' && e.type === 1 && e.subtype === STAGING_SUBTYPE) || null;
 }
 
+/**
+ * The ESP32's partition table, found without streaming it back: the flasher stub's
+ * MD5 of the table's region is compared with the MD5 of each table the installer
+ * site publishes for the board (`knownTables`, 0xC00 bytes each). A match is as
+ * good as reading it, since the MD5 covers every byte. Only when none matches (a
+ * DFU32 build the site doesn't list) is the region read with READ_FLASH, which
+ * stalls on some boards' USB-Serial/JTAG with the stub esptool-js bundles.
+ * `loader` needs flashMd5sum(addr, size) -> hex and readFlash(addr, size) -> bytes.
+ * Returns { table, via: 'md5' | 'read' }.
+ */
+export async function findPartitionTable(loader, knownTables = [], onStep = () => {}) {
+  const candidates = knownTables.filter(t => t && t.length === PARTITION_TABLE_SIZE);
+  if (candidates.length) {
+    onStep('Checking the partition table');
+    let flashMd5 = '';
+    try {
+      flashMd5 = String(await loader.flashMd5sum(PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE)).toLowerCase();
+    } catch (e) { /* fall back to reading it */ }
+    const table = candidates.find(t => md5Hex(t) === flashMd5);
+    if (table) return { table, via: 'md5' };
+  }
+  onStep('Reading the partition table');
+  return { table: await loader.readFlash(PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE), via: 'read' };
+}
+
 // ---- version from the file name ----
 
 // MeshCore assets are <env>-<version>-<commit>.zip, e.g. RAK_4631_repeater-v1.18.0-81dbae5.zip.
