@@ -5,7 +5,11 @@
 # active low; boot button on GPIO28).
 # The radio has no on-board antenna: fit the supplied U.FL antenna before use.
 # The ROM loads the C5's bootloader from 0x2000, not 0x0; the build and the
-# installer page take that offset from flasher_args.json.
+# installer page take that offset from flasher_args.json. With the partition
+# table at 0x8000 that leaves the bootloader 24 KB (0x6000). Measured on IDF
+# v6.1: 0x5720 B, 0x8E0 B (9%) free. The build fails if it outgrows that; if
+# an IDF update does it, add CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y here (which
+# drops the bootloader's INFO lines, such as the slot it boots).
 CONFIG_IDF_TARGET="esp32c5"
 
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
