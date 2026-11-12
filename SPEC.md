@@ -215,10 +215,10 @@ Status codes: `01` SUCCESS, `02` INVALID_STATE, `03` NOT_SUPPORTED, `04` DATA_SI
   - Every data write **must be a multiple of 4**, or the bootloader returns `10 03 03` **[verified]**. A non-4n+3 MTU such as 185 must be rounded down.
   - Never pass `len > mtu−3` to esp-nimble-cpp `writeValue(…, false)`. It **silently turns into a long write with response** **[verified]**. The client asserts this.
 - **App size** must be a multiple of 4. This is a precheck; DFU32 never pads, because padding would change the CRC.
-- **Connection interval:** DFU32 requests a fixed **20 ms** by default (`--interval` overrides it).
+- **Connection interval:** DFU32 requests a fixed **30 ms** by default (the target's `interval_ms`, 15–100, rounded down to a 1.25 ms step; `--interval` on the console takes any value).
   - Bench throughput on OTAFIX with ~1 packet per event: 30 ms 9.2 kB/s, 20 ms 12.4 kB/s, 15 ms 14.8 kB/s.
   - 11.25 ms and 7.5 ms overran the bootloader's lazy-erase buffering.
-- **PRN:** default **8** (configurable 1–16). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. DFU32 caps PRN at 8 for every bootloader (`--force-prn` overrides). A stream-phase `06` or link loss makes the next attempt more conservative (§6.5).
+- **PRN:** default **4** (the target's `prn`, 1–8). **Bench (OTAFIX 2.3, 7.5 ms interval): PRN 16 overran the bootloader's 8-packet pending-write buffer and failed with `10 03 06`.** Receipts acknowledge arrival, not flash completion. DFU32 caps PRN at 8 for every bootloader (`--force-prn` overrides). A stream-phase `06` or link loss makes the next attempt more conservative (§6.5).
   - ESPHome documents that the bootloader runs out of memory beyond 8 unacknowledged packets.
   - The bootloader RX pool is 16 buffers (OTAFIX/upstream ≥0.10) or 8 (older).
 - Flow:
@@ -339,7 +339,7 @@ Also: VERIFYING_STAGED → FAILED (nothing staged, re-hash fails), and RADIO_HAN
 
 | Check | Error |
 |---|---|
-| `manifest.boards` contains `target.board` (exact, case-insensitive) | `BOARD_MISMATCH` |
+| `manifest.boards` contains `target.board` (exact, case-insensitive). Skipped when the target has no board set; the staged header then records the manifest's board if it lists exactly one | `BOARD_MISMATCH` |
 | `.bin`/`.dat` SHA-256 and size match the manifest | `HASH_MISMATCH` / `SIZE_MISMATCH` |
 | `bin.size % 4 == 0` | `IMAGE_NOT_WORD_ALIGNED` |
 | `bin.size ≤ target.max_app_size`. Default 798 720 (S140 7.3.0, the smaller case). Configurable per target, e.g. 802 816 for S140 6.1.1. | `IMAGE_TOO_LARGE` |
@@ -423,11 +423,11 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
-| ↳ `board` | str ≤ 31 | free-form, matched against `manifest.boards` |
+| ↳ `board` | str ≤ 31 | free-form; the web UI's one **ID** field. Compared with the image's (`manifest.boards`, the staged header's `board`) when both are set; blank on either side means no comparison |
 | ↳ `mac`, `addr_type` | 6 B, u8 | **app** MAC (§5.2) and address type |
 | ↳ `manifest_url` | str ≤ 255 | |
 | ↳ `max_app_size` | u32 | default 798 720 |
-| ↳ `prn`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs: 8 (1–8), 3 (1–10), 600 (10–3600), 500 (0–5000), 5000 (500–60000) |
+| ↳ `prn`, `interval_ms`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs: 4 (1–8), 30 (15–100), 3 (1–10), 600 (10–3600), 500 (0–5000), 5000 (500–60000) |
 | ↳ `last_ok_version`, `last_ok_at` | str, u64 | updated on success |
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
@@ -585,11 +585,13 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget of ≤ 40 KB. It uses the same JSON API. When a token is set, the browser keeps it in `localStorage` and signs in once; with none set, the UI opens straight to Status. Views:
 
 - **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort. Check and Stage (and *Flash from: manifest*) appear only when the target has a manifest URL; otherwise the target flashes the staged image.
-- **Image:** the staged image (version, board, size, where it came from) with Verify and Clear, and **Stage a DFU package**: the operator picks (or drops) an adafruit-nrfutil `.zip`; the page reads it with `web/staging.js`, the installer page's reader (unzip with `DecompressionStream`, then the checks `dfu32_stage_image.py` runs: `.dat` layout and device type, word alignment, size, CRC16 against the `.dat`), suggests the version from a MeshCore file name, and uploads it with `POST /staging` (optional board). This is the installer page's USB staging (§9.4) over WiFi; the staged image is independent of the target.
-- **Target:** config form (only the MAC is needed to flash; the id defaults to `target`, and the manifest URL is only for fetching images from a server), plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
+- **Image:** the staged image (version, ID, size, where it came from) with Verify and Clear, and **Stage a DFU package**: the operator picks (or drops) an adafruit-nrfutil `.zip`; the page reads it with `web/staging.js`, the installer page's reader (unzip with `DecompressionStream`, then the checks `dfu32_stage_image.py` runs: `.dat` layout and device type, word alignment, size, CRC16 against the `.dat`), suggests the version from a MeshCore file name, and uploads it with `POST /staging` (optional ID, sent as `board`). This is the installer page's USB staging (§9.4) over WiFi; the staged image is independent of the target.
+- **Target:** config form, MAC first (only the MAC is needed to flash). One optional **ID** stands in for the API's id, name and board: it is saved as `board`, the API id stays `target` (or whatever an existing target has), and `name` isn't shown. The manifest URL is only for fetching images from a server. Tuning holds the knobs of §9.1, the connection interval among them. Plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
 - **Runs:** history table, with run detail and log tail.
 - **Logs:** live tail by polling `/logs?since=`.
 - **System:** WiFi info, hostname, DFU32 firmware upload, reboot, tuning defaults, and Access: require a token, or rotate it and turn it off.
+
+Every option has a **?** beside its label that opens a short note: what the option is and where its value comes from.
 
 The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
 
@@ -725,7 +727,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 ```
 
 - `url` values resolve relative to the manifest URL; absolute URLs are allowed.
-- `boards` is required and non-empty. DFU32 refuses if `target.board` isn't in it.
+- `boards` is required and non-empty. DFU32 refuses if `target.board` is set and isn't in it.
 - `init` is optional. If present, it is cross-checked against the parsed `.dat` and a mismatch gives `DAT_INVALID`. This catches a server-side mix-up of `.dat` files.
 - Unknown keys are ignored. `schema > 1` is refused (`MANIFEST_UNSUPPORTED`).
 - Parsed by `dfu32::parse_manifest` (`components/dfu32_core`) using cJSON from the component registry (`espressif/cjson`; ESP-IDF 6 no longer bundles it) behind a thin C++ wrapper (`dfu32_core/json.hpp`: ownership, case-sensitive lookup, exact-integer reads). The nesting limit is set to 16 (`CONFIG_CJSON_NESTING_LIMIT`) so a hostile document can't recurse through the task stack. Relative URLs follow RFC 3986 resolution against the manifest URL, and only `http://` is accepted.

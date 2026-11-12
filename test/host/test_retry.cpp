@@ -103,6 +103,20 @@ TEST_CASE("Degrade: interval first, then PRN", "[retry]") {
 
     AttemptParams unpaced{0, 30};
     CHECK(dfu::degrade(unpaced, pol).prn == 8);
+
+    // The defaults (PRN 4, 30 ms) are already at the slowest interval, so the
+    // first step halves PRN; a slower interval the operator chose is kept.
+    const AttemptParams def;
+    CHECK(def.prn == dfu::kDefaultPrn);
+    CHECK(def.interval_ms == dfu::kDefaultIntervalMs);
+    CHECK(dfu::kDefaultPrn == 4);
+    CHECK(dfu::kDefaultIntervalMs == 30);
+    p = dfu::degrade(def, pol);
+    CHECK(p.interval_ms == 30);
+    CHECK(p.prn == 2);
+    p = dfu::degrade(AttemptParams{4, 50}, pol);
+    CHECK(p.interval_ms == 50);
+    CHECK(p.prn == 2);
 }
 
 TEST_CASE("Retries until success, degrading after overruns", "[retry]") {

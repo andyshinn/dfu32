@@ -8,10 +8,19 @@
 #include <string>
 #include <string_view>
 
+#include "dfu_proto/retry.hpp"
+
 namespace dfu32 {
 
 /// Tuning-knob defaults and limits (SPEC.md §6, §9.1).
-inline constexpr uint16_t kDefaultPrn = 8;            // also the cap (dfu::kMaxSafePrn)
+inline constexpr uint16_t kDefaultPrn = dfu::kDefaultPrn;  // 4
+inline constexpr uint16_t kMaxPrn = dfu::kMaxSafePrn;      // 8
+inline constexpr uint16_t kDefaultIntervalMs = dfu::kDefaultIntervalMs;  // 30
+// 15 ms is the fastest interval the bench has seen work (docs/BENCH.md: 11.25 ms and
+// 7.5 ms lost the link on OTAFIX, after the app was erased). The console's
+// `--interval` still takes anything, for bench runs.
+inline constexpr uint16_t kMinIntervalMs = 15;
+inline constexpr uint16_t kMaxIntervalMs = 100;  // well inside the 2 s supervision timeout
 inline constexpr uint16_t kDefaultMaxAttempts = 3;
 inline constexpr uint16_t kMaxAttemptsLimit = 10;
 inline constexpr uint16_t kDefaultArmTimeoutS = 600;
@@ -26,7 +35,8 @@ inline constexpr uint16_t kMaxPrnTimeoutMs = 60000;
 struct TargetConfig {
     std::string id;            // slug [a-z0-9-], 1-31 chars; "" = not set yet
     std::string name;          // display name, <= 63
-    std::string board;         // matched against manifest.boards, <= 31
+    std::string board;         // the target's ID in the web UI, <= 31: compared with the image's
+                               // (staged header board, manifest.boards) when both are set
     std::string mac;           // app MAC "AA:BB:CC:DD:EE:FF" (MSB first), "" = not set
     uint8_t addr_type = 1;     // 0 public, 1 random
     std::string manifest_url;  // http://..., <= 255
@@ -34,6 +44,7 @@ struct TargetConfig {
 
     // Tuning knobs (per target, SPEC.md §9.1).
     uint16_t prn = kDefaultPrn;                    // 1..8 (receipts acknowledge arrival, not flash writes)
+    uint16_t interval_ms = kDefaultIntervalMs;     // 15..100, BLE connection interval for attempt 1
     uint16_t max_attempts = kDefaultMaxAttempts;   // 1..10
     uint16_t arm_timeout_s = kDefaultArmTimeoutS;  // 10..3600
     uint16_t start_settle_ms = kDefaultStartSettleMs;  // 0..5000

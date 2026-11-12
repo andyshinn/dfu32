@@ -207,6 +207,7 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
     ble::FlashOptions o;
     o.scan_ms = q.flash.arm_timeout_s * 1000;
     o.prn = q.target.prn;
+    o.conn.interval_ms = q.target.interval_ms;
     o.start_settle_ms = q.target.start_settle_ms;
     o.prn_timeout_ms = q.target.prn_timeout_ms;
     o.attempts = static_cast<uint8_t>(q.target.max_attempts);
@@ -400,7 +401,7 @@ void run(const Request& q) {
 
     set_phase("PRECHECK");
     if (!staged_board_ok(img.header().board, q.target.board)) {
-        fail("BOARD_MISMATCH: staged image is for board \"" + img.header().board + "\", target is \"" +
+        fail("BOARD_MISMATCH: staged image is for ID \"" + img.header().board + "\", target is \"" +
              q.target.board + "\"");
         return;
     }
@@ -488,7 +489,6 @@ SubmitResult submit(std::unique_ptr<Request> q, std::string& why, uint32_t& job_
 }
 
 std::string check_fetchable(const TargetConfig& t, const std::string& url_override) {
-    if (t.board.empty()) return "the target has no board set (matched against the manifest's \"boards\")";
     if (t.manifest_url.empty() && url_override.empty()) return "the target has no manifest_url";
     return {};
 }

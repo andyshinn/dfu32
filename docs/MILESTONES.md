@@ -29,7 +29,7 @@ The goal is to prove the BLE protocol path and nothing else. No WiFi, no HTTP, n
   - `scan`: list advertisers.
   - `staged`: show and verify the staged image (SHA-256, `.dat`, CRC16, prechecks).
   - `probe`: the non-destructive link test. It finds the target (MAC or MAC+1), does the buttonless jump, and reads Version, DIS, MTU and PHY. It reports the packet size, then sends SYS_RESET. It never sends START.
-  - `flash --yes`: one full attempt. The SD requirement is checked before START. The transfer runs START → INIT → PRN → RECEIVE → stream → VALIDATE → ACTIVATE (PRN 8 by default; `--prn`, `--packet` and `--settle` are tunable). It sends SYS_RESET after a failure.
+  - `flash --yes`: one full attempt. The SD requirement is checked before START. The transfer runs START → INIT → PRN → RECEIVE → stream → VALIDATE → ACTIVATE (PRN 8 by default then, 4 now; `--prn`, `--packet` and `--settle` are tunable). It sends SYS_RESET after a failure.
   - `blreset`: send SYS_RESET to a bootloader left mid-session.
 - Transfer logic lives in `dfu_proto::run_transfer()` behind an `ITransport` interface. It is host-tested against a simulated bootloader (`test/host/fake_bootloader.hpp`).
 - Everything is logged, including MTU, packet size, DIS string, per-phase timings and throughput.

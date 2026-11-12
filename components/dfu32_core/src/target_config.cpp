@@ -103,7 +103,8 @@ std::string validate(const TargetConfig& t) {
     if (t.addr_type > 1) return "addr_type must be 0 (public) or 1 (random)";
     if (auto e = validate_manifest_url(t.manifest_url); !e.empty()) return e;
     if (auto e = validate_max_app_size(t.max_app_size); !e.empty()) return e;
-    if (t.prn < 1 || t.prn > kDefaultPrn) return "prn must be 1-8";
+    if (t.prn < 1 || t.prn > kMaxPrn) return "prn must be 1-8";
+    if (t.interval_ms < kMinIntervalMs || t.interval_ms > kMaxIntervalMs) return "interval_ms must be 15-100";
     if (t.max_attempts < 1 || t.max_attempts > kMaxAttemptsLimit) return "max_attempts must be 1-10";
     if (t.arm_timeout_s < kMinArmTimeoutS || t.arm_timeout_s > kMaxArmTimeoutS) return "arm_timeout_s must be 10-3600";
     if (t.start_settle_ms > kMaxStartSettleMs) return "start_settle_ms must be 0-5000";
@@ -123,6 +124,7 @@ void write_json(json::ObjectWriter& w, const TargetConfig& t) {
         .add("manifest_url", t.manifest_url)
         .add("max_app_size", int64_t{t.max_app_size})
         .add("prn", int64_t{t.prn})
+        .add("interval_ms", int64_t{t.interval_ms})
         .add("max_attempts", int64_t{t.max_attempts})
         .add("arm_timeout_s", int64_t{t.arm_timeout_s})
         .add("start_settle_ms", int64_t{t.start_settle_ms})
@@ -147,7 +149,8 @@ unsigned sanitize(TargetConfig& t) {
     fix(t.addr_type > 1, t.addr_type, d.addr_type);
     fix(!validate_manifest_url(t.manifest_url).empty(), t.manifest_url, d.manifest_url);
     fix(!validate_max_app_size(t.max_app_size).empty(), t.max_app_size, d.max_app_size);
-    fix(t.prn < 1 || t.prn > kDefaultPrn, t.prn, d.prn);
+    fix(t.prn < 1 || t.prn > kMaxPrn, t.prn, d.prn);
+    fix(t.interval_ms < kMinIntervalMs || t.interval_ms > kMaxIntervalMs, t.interval_ms, d.interval_ms);
     fix(t.max_attempts < 1 || t.max_attempts > kMaxAttemptsLimit, t.max_attempts, d.max_attempts);
     fix(t.arm_timeout_s < kMinArmTimeoutS || t.arm_timeout_s > kMaxArmTimeoutS, t.arm_timeout_s, d.arm_timeout_s);
     fix(t.start_settle_ms > kMaxStartSettleMs, t.start_settle_ms, d.start_settle_ms);
@@ -183,6 +186,7 @@ constexpr FieldDef kFields[] = {
     {"manifest_url", Field::Str, true, 0},
     {"max_app_size", Field::U32, true, UINT32_MAX},
     {"prn", Field::U16, true, UINT16_MAX},
+    {"interval_ms", Field::U16, true, UINT16_MAX},
     {"max_attempts", Field::U16, true, UINT16_MAX},
     {"arm_timeout_s", Field::U16, true, UINT16_MAX},
     {"start_settle_ms", Field::U16, true, UINT16_MAX},
@@ -205,6 +209,7 @@ void set_int(TargetConfig& t, std::string_view key, int64_t v) {
     if (key == "addr_type") t.addr_type = static_cast<uint8_t>(v);
     else if (key == "max_app_size") t.max_app_size = static_cast<uint32_t>(v);
     else if (key == "prn") t.prn = static_cast<uint16_t>(v);
+    else if (key == "interval_ms") t.interval_ms = static_cast<uint16_t>(v);
     else if (key == "max_attempts") t.max_attempts = static_cast<uint16_t>(v);
     else if (key == "arm_timeout_s") t.arm_timeout_s = static_cast<uint16_t>(v);
     else if (key == "start_settle_ms") t.start_settle_ms = static_cast<uint16_t>(v);

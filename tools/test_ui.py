@@ -97,6 +97,38 @@ class TestPage(unittest.TestCase):
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
 
+    def test_every_option_has_help(self):
+        # Options are built with opt(), which adds the "?" and its explanation;
+        # a bare label would be an option without one.
+        self.assertNotIn('h("label', self.js.replace('h("label.chk", el, text)', "").replace('h("label", { for: el.id }', ""))
+        self.assertGreater(sum(self.js.count(f) for f in ("opt(", "field(", "knob(")), 20)
+
+    def test_target_form(self):
+        form = self.js[self.js.index("async function viewTarget"):self.js.index("function scanSection")]
+        fields = re.findall(r'(?:field|knob)\("(\w+)"|opt\("Address type".*?f\.(addr_type)', form)
+        order = [a or b for a, b in fields]
+        self.assertEqual(order[0], "mac")  # the one required setting comes first
+        # One ID (the API's board) stands in for id, name and board.
+        self.assertEqual(order[:4], ["mac", "addr_type", "board", "manifest_url"])
+        self.assertNotIn('field("name"', form)
+        self.assertNotIn('field("id"', form)
+        self.assertIn("interval_ms", order)
+        self.assertIn('"interval_ms"', re.search(r"const NUM = \[(.*?)\]", self.js).group(1))
+
+    def test_tuning_placeholders_are_the_firmware_defaults(self):
+        hdr = (ROOT / "components" / "dfu32_core" / "include" / "dfu32_core" / "target_config.hpp").read_text()
+        retry = (ROOT / "components" / "dfu_proto" / "include" / "dfu_proto" / "retry.hpp").read_text()
+
+        def const(text, name):
+            return int(re.search(r"inline constexpr uint16_t %s = (\d+);" % name, text).group(1))
+        want = {"interval_ms": const(retry, "kDefaultIntervalMs"), "prn": const(retry, "kDefaultPrn"),
+                "max_attempts": const(hdr, "kDefaultMaxAttempts"), "arm_timeout_s": const(hdr, "kDefaultArmTimeoutS"),
+                "start_settle_ms": const(hdr, "kDefaultStartSettleMs"),
+                "prn_timeout_ms": const(hdr, "kDefaultPrnTimeoutMs")}
+        self.assertEqual((want["prn"], want["interval_ms"]), (4, 30))
+        got = {k: int(v) for k, v in re.findall(r"(\w+): (\d+)", re.search(r"const kDef = \{(.*?)\}", self.js).group(1))}
+        self.assertEqual(got, want)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,7 +53,7 @@ inline constexpr uint32_t kFlashSector = 4096;
 /// Who the image is staged for, recorded in the header.
 struct StageMeta {
     std::string target_id;     // <= 31
-    std::string board;         // <= 31; must be in manifest.boards
+    std::string board;         // <= 31; when set, must be in manifest.boards (see staged_board)
     std::string manifest_url;  // <= 255
     Sha256 manifest_sha256{};
     uint64_t staged_at = 0;    // unix seconds, 0 if SNTP has no time yet
@@ -80,6 +80,12 @@ struct UploadInfo {
 /// against the target limit and the staging capacity. Fills `init`.
 Status precheck_upload(std::span<const uint8_t> dat, const UploadInfo& up, const StageMeta& meta,
                        uint32_t region_size, dfu::InitPacket& init);
+
+/// The board recorded in the staged header for a manifest image: the target's
+/// (meta.board), or, when the target has none and the manifest lists exactly
+/// one board, that one, so an ID given to the target later is still checked
+/// against this image at flash time.
+std::string staged_board(const Manifest& m, const StageMeta& meta);
 
 /// The staged header describes exactly this manifest's .bin and .dat.
 bool same_image(const Manifest& m, const dfu::StagingHeader& staged) noexcept;

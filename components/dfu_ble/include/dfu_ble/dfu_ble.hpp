@@ -64,7 +64,7 @@ struct LinkInfo {
     uint16_t conn_timeout = 0;       // 10 ms units
 };
 
-/// Connection interval request. 0 = default 20 ms; otherwise request
+/// Connection interval request. 0 = default (dfu::kDefaultIntervalMs, 30 ms); otherwise request
 /// exactly this many milliseconds (rounded down to 1.25 ms steps, min 7.5 ms).
 struct ConnParams {
     uint16_t interval_ms = 0;
@@ -94,7 +94,7 @@ struct FlashProgress {
 
 struct FlashOptions {
     uint32_t scan_ms = 600000;   // how long to wait for the target on attempt 1 (arm timeout)
-    uint16_t prn = 8;            // capped at dfu::kMaxSafePrn unless force_prn
+    uint16_t prn = dfu::kDefaultPrn;  // capped at dfu::kMaxSafePrn unless force_prn
     bool force_prn = false;
     uint32_t start_settle_ms = 500;
     uint32_t prn_timeout_ms = 5000;

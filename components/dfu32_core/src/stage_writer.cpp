@@ -71,10 +71,10 @@ Status check_bin_size(uint32_t size, const dfu::InitPacket& init, const StageMet
 
 Status precheck_image(const Manifest& m, std::span<const uint8_t> dat, const StageMeta& meta, uint32_t region_size,
                       ISha256& sha, dfu::InitPacket& init) {
-    if (!board_matches(m, meta.board)) {
+    if (!manifest_board_ok(m, meta.board)) {
         std::string listed;
         for (const auto& b : m.boards) listed += (listed.empty() ? "" : ", ") + b;
-        return Status::fail(Err::BoardMismatch, "target board '" + meta.board + "' not in manifest boards [" + listed + "]");
+        return Status::fail(Err::BoardMismatch, "target ID '" + meta.board + "' not in manifest boards [" + listed + "]");
     }
     if (Status s = check_meta(meta); !s.ok()) return s;
 
@@ -111,16 +111,21 @@ bool same_image(const Manifest& m, const dfu::StagingHeader& staged) noexcept {
            staged.dat_sha256 == m.dat.sha256;
 }
 
+std::string staged_board(const Manifest& m, const StageMeta& meta) {
+    return meta.board.empty() && m.boards.size() == 1 ? m.boards.front() : meta.board;
+}
+
 Status refresh_staged_header(IFlashRegion& region, const dfu::StagingHeader& current, const Manifest& m,
                              const StageMeta& meta, bool& rewritten) {
     rewritten = false;
-    if (current.target_id == meta.target_id && current.board == meta.board && current.version == m.version &&
+    const std::string board = staged_board(m, meta);
+    if (current.target_id == meta.target_id && current.board == board && current.version == m.version &&
         current.manifest_url == meta.manifest_url && current.manifest_sha256 == meta.manifest_sha256) {
         return {};
     }
     dfu::StagingHeader h = current;
     h.target_id = meta.target_id;
-    h.board = meta.board;
+    h.board = board;
     h.version = m.version;
     h.manifest_url = meta.manifest_url;
     h.manifest_sha256 = meta.manifest_sha256;
@@ -152,7 +157,7 @@ Status StagingWriter::begin(const Manifest& m, std::span<const uint8_t> dat, con
     header_.dat_sha256 = m.dat.sha256;
     header_.version = m.version;
     header_.target_id = meta.target_id;
-    header_.board = meta.board;
+    header_.board = staged_board(m, meta);
     header_.manifest_sha256 = meta.manifest_sha256;
     header_.staged_at = meta.staged_at;
     header_.manifest_url = meta.manifest_url;

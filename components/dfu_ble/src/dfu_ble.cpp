@@ -31,7 +31,7 @@ constexpr uint32_t kJumpDisconnectMs = 5000;
 constexpr uint32_t kMtuWaitMs = 1500;
 constexpr uint32_t kRetryScanMs = 30000;  // retry after START: the target waits in its bootloader
 constexpr uint32_t kAbortResetScanMs = 5000;  // find the bootloader to reset it after an abort mid-jump
-constexpr uint16_t kDefaultConnIntervalMs = 20;
+constexpr uint16_t kDefaultConnIntervalMs = dfu::kDefaultIntervalMs;
 
 constexpr uint16_t interval_units(uint16_t ms) {  // 1.25 ms units, BLE minimum 7.5 ms
     return ms * 4 / 5 < 6 ? 6 : static_cast<uint16_t>(ms * 4 / 5);
@@ -284,7 +284,7 @@ public:
             return false;
         }
         client_->setClientCallbacks(this, false);
-        // Default 20 ms (bench: 30 ms 9.2 kB/s, 20 ms 12.4, 15 ms 14.8; 11.25 ms and
+        // Default 30 ms (bench: 30 ms 9.2 kB/s, 20 ms 12.4, 15 ms 14.8; 11.25 ms and
         // faster overran OTAFIX's lazy-erase buffering). See docs/BENCH.md.
         const uint16_t itvl = interval_units(conn.interval_ms != 0 ? conn.interval_ms : kDefaultConnIntervalMs);
         client_->setConnectionParams(itvl, itvl, 0, 200);  // latency 0, 2 s supervision

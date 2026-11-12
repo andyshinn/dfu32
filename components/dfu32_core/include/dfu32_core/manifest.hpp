@@ -69,6 +69,11 @@ Status parse_manifest(std::string_view text, std::string_view manifest_url, Mani
 /// `board` is listed in manifest.boards (exact, ASCII case-insensitive).
 bool board_matches(const Manifest& m, std::string_view board) noexcept;
 
+/// A manifest may be staged for a target whose board (its ID in the web UI) is
+/// `target_board`: listed in manifest.boards, or not set, in which case nothing
+/// is compared and the operator's choice of manifest is the check.
+bool manifest_board_ok(const Manifest& m, std::string_view target_board) noexcept;
+
 /// A staged image whose header names `image_board` may be flashed to a target
 /// whose board is `target_board`. Checked only when both are set (ASCII
 /// case-insensitive): an image staged over USB from the installer page carries

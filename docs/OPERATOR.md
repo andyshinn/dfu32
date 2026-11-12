@@ -38,7 +38,7 @@ python3 tools/dfu32_pack.py RAK_4631_repeater-v1.18.0-81dbae5.zip --board rak463
 python3 -m http.server -d site 8000
 ```
 
-The `--board` name is yours to choose. It must match the board you give the target in the next step, and it stops a RAK image from ever going to a Heltec. Any plain-HTTP server works; HTTPS isn't supported in v1.
+The `--board` name is yours to choose. If you give the target an ID in the next step, it must match that ID, and it then stops a RAK image from ever going to a Heltec. Any plain-HTTP server works; HTTPS isn't supported in v1.
 
 ## 4. Set up the target
 
@@ -46,7 +46,7 @@ In the web UI, open **Target**:
 
 1. On the repeater, run `start ota` (over USB, or remotely: see §6). Its reply includes its MAC, and it starts advertising for a few minutes.
 2. In **Find the repeater**, press **Scan**. Your repeater shows as *app buttonless*. Press **Use as target**.
-3. Optionally fill in an id (for example `attic-repeater`; blank means `target`), a name, and the board name. With a server (§3), add the manifest URL (`http://<computer>:8000/rak4631/manifest.json`) and the board name from §3. Then **Save**. Only the MAC is needed to flash an uploaded image.
+3. Optionally fill in an ID: a name for the repeater's board, such as `rak4631`. When the image has an ID too, the two must match or DFU32 refuses to flash; if either is blank, nothing is compared. With a server (§3), add the manifest URL (`http://<computer>:8000/rak4631/manifest.json`) and use the board name from §3 as the ID. Then **Save**. Only the MAC is needed to flash an uploaded image. The **?** beside each option says what it is and where its value comes from.
 
 The scan put the repeater into OTA mode. Reboot it (or wait for it to time out) before you flash, so the flash below starts from a repeater in normal operation.
 

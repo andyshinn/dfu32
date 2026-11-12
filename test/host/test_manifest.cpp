@@ -57,6 +57,14 @@ TEST_CASE("Manifest: board matching is exact and case-insensitive", "[manifest]"
     CHECK_FALSE(dfu32::board_matches(m, ""));
 }
 
+TEST_CASE("Manifest: a target with no ID is not compared with the manifest's boards", "[manifest]") {
+    dfu32::Manifest m;
+    REQUIRE(dfu32::parse_manifest(manifest(), kUrl, m).ok());
+    CHECK(dfu32::manifest_board_ok(m, "RAK4631"));
+    CHECK_FALSE(dfu32::manifest_board_ok(m, "rak463"));
+    CHECK(dfu32::manifest_board_ok(m, ""));
+}
+
 TEST_CASE("Manifest: a staged image's board against the target's", "[manifest]") {
     using dfu32::staged_board_ok;
     CHECK(staged_board_ok("rak4631", "rak4631"));
