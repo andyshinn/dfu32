@@ -432,6 +432,7 @@ footer a { color: var(--muted); }
   const empty = document.getElementById('empty');
   document.getElementById('count').textContent = BOARDS.length + ' boards ▾';
   let selected = null, results = BOARDS, active = 0;
+  let lastX = -1, lastY = -1, moved = false, keyNav = false;  // pointer tracking, see the mousemove handlers
 
   const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
   const tokens = q => q.trim().split(/\s+/).filter(Boolean).map(norm).filter(Boolean);
@@ -453,7 +454,7 @@ footer a { color: var(--muted); }
     empty.textContent = results.length ? '' : `No boards match “${filter.value}”. Only boards with PSRAM are listed.`;
     markActive();
     // Scroll only as far as needed to bring the active option into view.
-    const el = listbox.querySelector('.active');
+    const el = listbox.children[active];
     if (el) {
       const l = listbox.getBoundingClientRect(), r = el.getBoundingClientRect();
       if (r.top < l.top) listbox.scrollTop -= l.top - r.top;
@@ -475,7 +476,8 @@ footer a { color: var(--muted); }
   function setOpen(open) {
     popover.hidden = !open;
     trigger.setAttribute('aria-expanded', open);
-    if (open) { filter.value = ''; active = Math.max(0, BOARDS.indexOf(selected)); render(); filter.focus(); }
+    // keyNav: the list may open under a parked pointer, which must not take the highlight from the selected board.
+    if (open) { keyNav = true; filter.value = ''; active = Math.max(0, BOARDS.indexOf(selected)); render(); filter.focus(); }
   }
   trigger.addEventListener('click', () => setOpen(popover.hidden));
   filter.addEventListener('input', () => { keyNav = true; active = 0; render(); });
@@ -491,7 +493,6 @@ footer a { color: var(--muted); }
   // Browsers synthesize a mousemove when the list scrolls under a still pointer. After a wheel scroll that
   // rightly moves the highlight to the option now under the pointer; after arrow keys or typing it would
   // steal the highlight back, so those set `keyNav` and it holds until the pointer really moves.
-  let lastX = -1, lastY = -1, moved = false, keyNav = false;
   document.addEventListener('mousemove', e => {
     moved = e.clientX !== lastX || e.clientY !== lastY;
     lastX = e.clientX; lastY = e.clientY;
