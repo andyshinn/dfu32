@@ -451,9 +451,26 @@ footer a { color: var(--muted); }
     listbox.hidden = !results.length;
     empty.hidden = !!results.length;
     empty.textContent = results.length ? '' : `No boards match “${filter.value}”. Only boards with PSRAM are listed.`;
+    markActive();
+    // Scroll only as far as needed to bring the active option into view.
+    const el = listbox.querySelector('.active');
+    if (el) {
+      const l = listbox.getBoundingClientRect(), r = el.getBoundingClientRect();
+      if (r.top < l.top) listbox.scrollTop -= l.top - r.top;
+      else if (r.bottom > l.bottom) listbox.scrollTop += r.bottom - l.bottom;
+    }
+  }
+  function markActive() {
     if (results[active]) filter.setAttribute('aria-activedescendant', 'opt-' + results[active].id);
     else filter.removeAttribute('aria-activedescendant');
-    const el = listbox.querySelector('.active'); if (el) listbox.scrollTop = Math.max(0, el.offsetTop - listbox.clientHeight + el.offsetHeight);
+  }
+  // Hover highlight: move the class only. Re-rendering here would scroll the list out from under the pointer.
+  function hover(i) {
+    if (i === active) return;
+    const old = listbox.querySelector('.active'); if (old) old.classList.remove('active');
+    active = i;
+    const el = listbox.children[i]; if (el) el.classList.add('active');
+    markActive();
   }
   function setOpen(open) {
     popover.hidden = !open;
@@ -470,7 +487,13 @@ footer a { color: var(--muted); }
   });
   // Keep focus in the filter while the mouse works the popover, so the focusout rule below doesn't close it mid-click.
   popover.addEventListener('mousedown', e => { if (e.target !== filter) e.preventDefault(); });
-  listbox.addEventListener('mousemove', e => { const li = e.target.closest('.option'); if (li && +li.dataset.i !== active) { active = +li.dataset.i; render(); } });
+  // Ignore the mousemove browsers synthesize when the list scrolls under a still pointer (wheel or arrow keys).
+  let lastX = -1, lastY = -1;
+  listbox.addEventListener('mousemove', e => {
+    if (e.clientX === lastX && e.clientY === lastY) return;
+    lastX = e.clientX; lastY = e.clientY;
+    const li = e.target.closest('.option'); if (li) hover(+li.dataset.i);
+  });
   listbox.addEventListener('click', e => { const li = e.target.closest('.option'); if (li) select(results[+li.dataset.i]); });
   document.addEventListener('click', e => { if (!popover.hidden && !e.target.closest('.picker')) setOpen(false); });
   picker.addEventListener('focusout', e => { if (!popover.hidden && !picker.contains(e.relatedTarget)) setOpen(false); });
