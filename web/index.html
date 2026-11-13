@@ -478,8 +478,9 @@ footer a { color: var(--muted); }
     if (open) { filter.value = ''; active = Math.max(0, BOARDS.indexOf(selected)); render(); filter.focus(); }
   }
   trigger.addEventListener('click', () => setOpen(popover.hidden));
-  filter.addEventListener('input', () => { active = 0; render(); });
+  filter.addEventListener('input', () => { keyNav = true; active = 0; render(); });
   filter.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') keyNav = true;
     if (e.key === 'ArrowDown') { e.preventDefault(); active = Math.min(active + 1, results.length - 1); render(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); active = Math.max(active - 1, 0); render(); }
     else if (e.key === 'Enter' && results[active]) { e.preventDefault(); select(results[active]); }
@@ -487,12 +488,25 @@ footer a { color: var(--muted); }
   });
   // Keep focus in the filter while the mouse works the popover, so the focusout rule below doesn't close it mid-click.
   popover.addEventListener('mousedown', e => { if (e.target !== filter) e.preventDefault(); });
-  // Ignore the mousemove browsers synthesize when the list scrolls under a still pointer (wheel or arrow keys).
-  let lastX = -1, lastY = -1;
-  listbox.addEventListener('mousemove', e => {
-    if (e.clientX === lastX && e.clientY === lastY) return;
+  // Browsers synthesize a mousemove when the list scrolls under a still pointer. After a wheel scroll that
+  // rightly moves the highlight to the option now under the pointer; after arrow keys or typing it would
+  // steal the highlight back, so those set `keyNav` and it holds until the pointer really moves.
+  let lastX = -1, lastY = -1, moved = false, keyNav = false;
+  document.addEventListener('mousemove', e => {
+    moved = e.clientX !== lastX || e.clientY !== lastY;
     lastX = e.clientX; lastY = e.clientY;
+  }, true);
+  listbox.addEventListener('mousemove', e => {
+    if (moved) keyNav = false;
+    if (keyNav) return;
     const li = e.target.closest('.option'); if (li) hover(+li.dataset.i);
+  });
+  // Not every browser synthesizes that move after a wheel scroll, so follow the pointer on scroll too.
+  listbox.addEventListener('wheel', () => { keyNav = false; }, { passive: true });
+  listbox.addEventListener('scroll', () => {
+    if (keyNav || lastX < 0) return;
+    const at = document.elementFromPoint(lastX, lastY), li = at && listbox.contains(at) && at.closest('.option');
+    if (li) hover(+li.dataset.i);
   });
   listbox.addEventListener('click', e => { const li = e.target.closest('.option'); if (li) select(results[+li.dataset.i]); });
   document.addEventListener('click', e => { if (!popover.hidden && !e.target.closest('.picker')) setOpen(false); });
