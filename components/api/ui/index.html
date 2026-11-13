@@ -220,7 +220,7 @@ function renderStatus() {
     if (j.state === "AWAITING_TARGET") sec.append(note("info", "Run ", h("code", "start ota"), " on the repeater now (USB, or remotely over LoRa from the companion app). Giving up in " + j.arm_remaining_s + " s."));
     if (j.wifi_off && busy && ["RADIO_HANDOVER", "DFU_RUNNING"].includes(j.state)) sec.append(note("info", "WiFi is off for the transfer; this page catches up when it is back."));
     if (j.error) sec.append(note("bad", j.error));
-    if (j.target_erased && j.state !== "SUCCEEDED") sec.append(note("warn", "The repeater's app was erased. It waits in its bootloader (usually at MAC+1): flash again with source \"staged\" to recover."));
+    if (j.target_erased && j.state === "FAILED") sec.append(note("warn", "The repeater's app was erased. It waits in its bootloader (usually at MAC+1): flash again with source \"staged\" to recover."));
     if (j.version) sec.append(dl([["Image", j.version], ["Bootloader", j.bootloader], ["Run", j.run ? h("a", { href: "#runs/" + j.run }, "#" + j.run) : ""]]));
   }
   out.push(sec);
