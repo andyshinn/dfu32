@@ -311,7 +311,7 @@ std::pair<uint8_t, std::vector<std::string>> decode(const std::vector<uint8_t>& 
 
 }  // namespace
 
-TEST_CASE("Improv Serial core: current state, offline and online", "[improv][serial]") {
+TEST_CASE("Improv Serial core: current state, unprovisioned and joined", "[improv][serial]") {
     SerialHost h;
     Core c(h, Transport::Serial);
     c.start();
@@ -330,6 +330,18 @@ TEST_CASE("Improv Serial core: current state, offline and online", "[improv][ser
     const auto [cmd, strs] = decode(h.results[0]);
     CHECK(cmd == kCmdGetCurrentState);
     CHECK(strs == std::vector<std::string>{"http://192.168.1.50/"});
+
+    // Router gone: the network is still stored, so still provisioned, but
+    // with no URL (no "Visit Device" link to a device that won't answer).
+    h.url.clear();
+    c.handle_rpc(rpc(kCmdGetCurrentState));
+    CHECK(h.states.back() == State::Provisioned);
+    REQUIRE(h.results.size() == 2);
+    {
+        const auto [cmd2, strs2] = decode(h.results[1]);
+        CHECK(cmd2 == kCmdGetCurrentState);
+        CHECK(strs2.empty());
+    }
 
     // Network forgotten: ready for new settings again.
     h.stored = false;

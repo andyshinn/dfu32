@@ -126,7 +126,9 @@ void Core::report_current_state() {
         set_state(State::Provisioned);
         // The client waits for this result whenever the state is provisioned,
         // so it goes out even without a URL (the client then shows no link).
-        publish(kCmdGetCurrentState, url.empty() ? std::vector<std::string>{} : std::vector<std::string>{url});
+        std::vector<std::string> strs;
+        if (!url.empty()) strs.push_back(url);
+        publish(kCmdGetCurrentState, strs);
     } else {
         set_state(State::Authorized);
     }
