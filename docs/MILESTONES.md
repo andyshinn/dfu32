@@ -153,7 +153,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
   - pushes and manual runs deploy from `main`, so the page serves the latest `main` build before v1.0. This is the path to bench M5;
   - generates the manifests and copies `web/`, the parts and the manifests into one directory;
   - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
-  - it also attaches the merged `.bin` files to the release for esptool users;
+  - it also attaches the merged `.bin` files to the release for esptool users, and the app-only `dfu32-<board>.bin` files for updating from the device's web UI;
   - one-time repo settings: Pages → Source → "GitHub Actions", and a `v*` tag rule in the `github-pages` environment's deployment branches and tags (by default it rejects tag refs).
 - `THIRD_PARTY_NOTICES`, generated from `dependencies.lock`, ships on the page and with each release (moved here from M6, because this is the first milestone that publishes binaries). **Implemented:** `tools/dfu32_notices.py` (with tests) writes it from the lock files, the vendored Improv SDK and the pinned ESP Web Tools version, plus ESP-IDF's copyright list for the locked release. It is committed; CI fails when it is stale or a dependency has no license entry. The page links `THIRD_PARTY_NOTICES.txt`, and releases carry it.
 - README: an "Install from your browser" link, and a note that the merged `.bin` is for fresh installs and resets settings.
