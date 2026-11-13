@@ -432,6 +432,7 @@ footer a { color: var(--muted); }
   const empty = document.getElementById('empty');
   document.getElementById('count').textContent = BOARDS.length + ' boards ▾';
   let selected = null, results = BOARDS, active = 0;
+  let lastX = -1, lastY = -1, moved = false, keyNav = false;  // pointer tracking, see the mousemove handlers
 
   const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
   const tokens = q => q.trim().split(/\s+/).filter(Boolean).map(norm).filter(Boolean);
@@ -451,18 +452,37 @@ footer a { color: var(--muted); }
     listbox.hidden = !results.length;
     empty.hidden = !!results.length;
     empty.textContent = results.length ? '' : `No boards match “${filter.value}”. Only boards with PSRAM are listed.`;
+    markActive();
+    // Scroll only as far as needed to bring the active option into view.
+    const el = listbox.children[active];
+    if (el) {
+      const l = listbox.getBoundingClientRect(), r = el.getBoundingClientRect();
+      if (r.top < l.top) listbox.scrollTop -= l.top - r.top;
+      else if (r.bottom > l.bottom) listbox.scrollTop += r.bottom - l.bottom;
+    }
+  }
+  function markActive() {
     if (results[active]) filter.setAttribute('aria-activedescendant', 'opt-' + results[active].id);
     else filter.removeAttribute('aria-activedescendant');
-    const el = listbox.querySelector('.active'); if (el) listbox.scrollTop = Math.max(0, el.offsetTop - listbox.clientHeight + el.offsetHeight);
+  }
+  // Hover highlight: move the class only. Re-rendering here would scroll the list out from under the pointer.
+  function hover(i) {
+    if (i === active) return;
+    const old = listbox.querySelector('.active'); if (old) old.classList.remove('active');
+    active = i;
+    const el = listbox.children[i]; if (el) el.classList.add('active');
+    markActive();
   }
   function setOpen(open) {
     popover.hidden = !open;
     trigger.setAttribute('aria-expanded', open);
-    if (open) { filter.value = ''; active = Math.max(0, BOARDS.indexOf(selected)); render(); filter.focus(); }
+    // keyNav: the list may open under a parked pointer, which must not take the highlight from the selected board.
+    if (open) { keyNav = true; filter.value = ''; active = Math.max(0, BOARDS.indexOf(selected)); render(); filter.focus(); }
   }
   trigger.addEventListener('click', () => setOpen(popover.hidden));
-  filter.addEventListener('input', () => { active = 0; render(); });
+  filter.addEventListener('input', () => { keyNav = true; active = 0; render(); });
   filter.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') keyNav = true;
     if (e.key === 'ArrowDown') { e.preventDefault(); active = Math.min(active + 1, results.length - 1); render(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); active = Math.max(active - 1, 0); render(); }
     else if (e.key === 'Enter' && results[active]) { e.preventDefault(); select(results[active]); }
@@ -470,7 +490,25 @@ footer a { color: var(--muted); }
   });
   // Keep focus in the filter while the mouse works the popover, so the focusout rule below doesn't close it mid-click.
   popover.addEventListener('mousedown', e => { if (e.target !== filter) e.preventDefault(); });
-  listbox.addEventListener('mousemove', e => { const li = e.target.closest('.option'); if (li && +li.dataset.i !== active) { active = +li.dataset.i; render(); } });
+  // Browsers synthesize a mousemove when the list scrolls under a still pointer. After a wheel scroll that
+  // rightly moves the highlight to the option now under the pointer; after arrow keys or typing it would
+  // steal the highlight back, so those set `keyNav` and it holds until the pointer really moves.
+  document.addEventListener('mousemove', e => {
+    moved = e.clientX !== lastX || e.clientY !== lastY;
+    lastX = e.clientX; lastY = e.clientY;
+  }, true);
+  listbox.addEventListener('mousemove', e => {
+    if (moved) keyNav = false;
+    if (keyNav) return;
+    const li = e.target.closest('.option'); if (li) hover(+li.dataset.i);
+  });
+  // Not every browser synthesizes that move after a wheel scroll, so follow the pointer on scroll too.
+  listbox.addEventListener('wheel', () => { keyNav = false; }, { passive: true });
+  listbox.addEventListener('scroll', () => {
+    if (keyNav || lastX < 0) return;
+    const at = document.elementFromPoint(lastX, lastY), li = at && listbox.contains(at) && at.closest('.option');
+    if (li) hover(+li.dataset.i);
+  });
   listbox.addEventListener('click', e => { const li = e.target.closest('.option'); if (li) select(results[+li.dataset.i]); });
   document.addEventListener('click', e => { if (!popover.hidden && !e.target.closest('.picker')) setOpen(false); });
   picker.addEventListener('focusout', e => { if (!popover.hidden && !picker.contains(e.relatedTarget)) setOpen(false); });
