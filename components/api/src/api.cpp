@@ -801,6 +801,26 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
             expect.board = std::string_view(dfu32_board_tag.board, strnlen(dfu32_board_tag.board, sizeof(dfu32_board_tag.board)));
             expect.allow_other_board = force;
             if (auto why = ota::check_image_start({buf.data(), want}, expect, info); !why.empty()) {
+                // Not an app at all: the usual mistake is the release's merged
+                // image. The body would be drained anyway, so read on to the
+                // partition table at 0x8000 to say so, on every chip.
+                if (!info.is_app) {
+                    ota::MergedProbe probe;
+                    size_t off = 0;
+                    probe.feed(off, {buf.data(), want});
+                    off += want;
+                    while (off < ota::kMergedProbeBytes && remaining > 0) {
+                        const size_t n = remaining < buf.size() ? remaining : buf.size();
+                        if (!recv_exact(req, buf.data(), n, err)) {
+                            client_gone = true;
+                            break;
+                        }
+                        remaining -= n;
+                        probe.feed(off, {buf.data(), n});
+                        off += n;
+                    }
+                    if (probe.merged()) why = ota::merged_image_refusal(expect.board);
+                }
                 return fail("422 Unprocessable Content", "IMAGE_REJECTED", why);
             }
             const esp_err_t e = esp_ota_begin(next, OTA_WITH_SEQUENTIAL_WRITES, &h);

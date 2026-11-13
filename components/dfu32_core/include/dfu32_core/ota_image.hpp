@@ -43,6 +43,7 @@ struct ImageInfo {
     std::string version;
     std::string project;
     std::string board;      // empty when the image has no DFU32 board tag
+    bool is_app = false;    // it has an ESP-IDF app header and esp_app_desc_t
 };
 
 struct Expect {
@@ -55,5 +56,36 @@ struct Expect {
 /// Parses the first kInspectBytes of an image. Returns "" when it may be
 /// written, else why not. `out` is filled as far as parsing got.
 std::string check_image_start(std::span<const uint8_t> head, const Expect& expect, ImageInfo& out);
+
+// A merged flash image (idf.py merge-bin, the release's -merged.bin) starts
+// with the bootloader at the chip's offset, 0x0, 0x1000 (ESP32, S2) or
+// 0x2000 (C5), with 0xFF before it, and has the partition table at 0x8000.
+inline constexpr size_t kPartitionTableOffset = 0x8000;
+inline constexpr uint8_t kPartitionMagic[2] = {0xAA, 0x50};  // ESP_PARTITION_MAGIC, little-endian
+/// Bytes MergedProbe needs to see.
+inline constexpr size_t kMergedProbeBytes = kPartitionTableOffset + sizeof(kPartitionMagic);
+
+/// Tells a merged flash image from other non-app uploads, from the bytes at
+/// a few offsets, so the caller can stream the body through it in chunks
+/// without holding 32 KB.
+class MergedProbe {
+public:
+    /// `chunk` holds the image's bytes from `offset` on. Chunks may come in
+    /// any size, in order.
+    void feed(size_t offset, std::span<const uint8_t> chunk);
+    /// A bootloader at one of the bootloader offsets (and only 0xFF before
+    /// it), and a partition table at 0x8000.
+    bool merged() const;
+
+private:
+    uint8_t at_0_ = 0, at_1000_ = 0, at_2000_ = 0;
+    uint8_t pt_[2] = {0, 0};
+    bool ff_to_1000_ = true;  // bytes 0x1..0xFFF are all 0xFF
+    bool ff_to_2000_ = true;  // bytes 0x1..0x1FFF, except 0x1000, are all 0xFF
+    size_t seen_ = 0;         // bytes fed so far, from 0
+};
+
+/// The refusal for a merged image, naming the file to upload instead.
+std::string merged_image_refusal(std::string_view board);
 
 }  // namespace dfu32::ota

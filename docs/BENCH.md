@@ -430,7 +430,7 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
 6. **Runs:** the list shows the flashes; a run's page has the attempts and the log. **Logs** tails live while a flash runs.
 7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
-8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards, and the page shows that error (not a connection reset). The merged `.bin`: refused as "not an ESP-IDF app image".
+8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards, and the page shows that error (not a connection reset). The merged `.bin`, on any chip: refused as "this is the merged image, for a fresh install over USB", naming `dfu32-<board>.bin` to upload instead.
 9. **Rollback rules:**
    - With the access point on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
    - Switch the access point off as soon as the upload finishes. After 90 s the console says "confirmed: WiFi works but … isn't reachable" (a router outage is not the firmware's fault), and it stays on the new version once the access point is back.
