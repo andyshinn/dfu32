@@ -388,7 +388,10 @@ jobs:
 
   # Fresh-install images for esptool users, on every published release
   # (pre-releases included), with THIRD_PARTY_NOTICES. They reset settings;
-  # the page never uses them.
+  # the page never uses them. Next to each one goes the app-only image,
+  # dfu32-<board>.bin, for System -> Firmware update in the device's web UI,
+  # which refuses the merged image. The board is in the name because every
+  # board's app is dfu32.bin in its build directory.
   # They appear once the firmware matrix finishes, a few minutes after the
   # release is published; until then releases/latest/download/... 404s.
   # --clobber lets a re-run of this job (after a failed upload) replace a
@@ -412,15 +415,18 @@ jobs:
           pattern: dfu32-*
           path: artifacts
 
-      - name: Attach merged images and notices
+      - name: Attach merged and app images, and notices
         env:
           GH_TOKEN: ${{ github.token }}
           BOARDS: ${{ needs.boards.outputs.boards }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          mkdir -p app
           files=()
           for b in $(jq -r '.[]' <<<"$BOARDS"); do
             files+=("artifacts/dfu32-$b/build/$b/dfu32-$b-merged.bin")
+            cp "artifacts/dfu32-$b/build/$b/dfu32.bin" "app/dfu32-$b.bin"
+            files+=("app/dfu32-$b.bin")
           done
           files+=(THIRD_PARTY_NOTICES)
           gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

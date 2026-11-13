@@ -78,7 +78,7 @@ The repeater doesn't need to be on your desk. From the MeshCore companion app, l
 
 ## 7. Update DFU32 itself
 
-**System → Firmware update**: choose `dfu32.bin` for your board (from a CI build or release, not the `-merged.bin`) and **Install**. DFU32 checks that the file is DFU32 for the same chip and board, writes it to its spare slot, and reboots into it.
+**System → Firmware update**: choose the app image for your board and **Install**. From a release that's `dfu32-<board>.bin` (for example `dfu32-feather_esp32s3.bin`); from a CI build it's `dfu32.bin` in the `dfu32-<board>` artifact. Not the `-merged.bin`: that's for a fresh install over USB and is refused here as "not an ESP-IDF app image". DFU32 checks that the file is DFU32 for the same chip and board, writes it to its spare slot, and reboots into it.
 
 If the new firmware can't bring WiFi and the web UI back within 90 seconds, DFU32 goes back to the previous firmware by itself. The page tells you which version came back.
 

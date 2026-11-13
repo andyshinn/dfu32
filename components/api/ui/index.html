@@ -504,7 +504,7 @@ async function viewSystem() {
   const prog = h("div");
   const upload = h("button.pri", { onclick: () => {
     const f = file.files[0];
-    if (!f) return toast("Choose dfu32.bin first (the app image, not the merged one)");
+    if (!f) return toast("Choose dfu32-<board>.bin first (the app image, not the -merged one)");
     if (!confirm("Install " + f.name + " (" + kB(f.size) + ") and reboot?")) return;
     upload.disabled = true;
     const bar = h("i", { style: "width:0" });
@@ -553,7 +553,7 @@ async function viewSystem() {
         opt("NTP server", "The time server DFU32 asks for the clock that dates run records. Blank uses pool.ntp.org; give a server on your network if it has no internet. Takes effect after a reboot.", ntp),
         opt("Run deadline cap (s)", "The longest a flash may run once the repeater is found, 120–7200 s; default 1200. DFU32 works out a deadline from the image size and the number of attempts, and this caps it: when it passes, DFU32 drops the link and brings WiFi back.", deadline)),
       h("div.row", { style: "margin-top:.7rem" }, opt("Stop WiFi during transfers by default", "Whether Flash starts with \"WiFi off during the transfer\" ticked. With WiFi off, DFU32's radio serves Bluetooth alone, and this page is unreachable until the transfer ends. The Status page can still change it for one flash.", wifiOff, true), save)),
-    h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload dfu32.bin from a CI build or release for this board. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),
+    h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload the app image for this board: dfu32-<board>.bin from a release (dfu32.bin from a CI build), not the -merged.bin. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),
       h("div.row", file, opt("allow another board's build", "Skips the check that the file was built for this DFU32's board (shown under Device above). Leave it off unless you are moving to a different build on purpose: firmware for other hardware may not boot, and DFU32 then rolls back.", force, true), upload), prog),
     h("section", h("h2", "Access"), ...access,
       newToken ? [note("info", "New token (saved in this browser; copy it for scripts or Home Assistant: once dismissed it is never shown again):"), h("pre", newToken),
