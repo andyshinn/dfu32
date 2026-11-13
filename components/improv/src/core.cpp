@@ -117,10 +117,18 @@ void Core::report_current_state() {
         host_.publish_state(state_);
         return;
     }
+    // Provisioned means a network is stored, not that it is joined: right
+    // after a flash or a reset the device is still connecting, and the
+    // installer would otherwise offer "Connect to Wi-Fi" for a device that
+    // already has it.
     std::string url;
-    if (host_.online_url(url)) {
+    if (host_.provisioned(url)) {
         set_state(State::Provisioned);
-        publish(kCmdGetCurrentState, {url});
+        // The client waits for this result whenever the state is provisioned,
+        // so it goes out even without a URL (the client then shows no link).
+        std::vector<std::string> strs;
+        if (!url.empty()) strs.push_back(url);
+        publish(kCmdGetCurrentState, strs);
     } else {
         set_state(State::Authorized);
     }
