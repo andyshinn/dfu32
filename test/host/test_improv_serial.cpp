@@ -269,7 +269,8 @@ struct SerialHost : IHost {
     std::vector<State> states;
     std::vector<Error> errors;
     std::vector<std::vector<uint8_t>> results;
-    std::string url;  // empty: offline
+    bool stored = false;  // a network is stored
+    std::string url;      // where to reach it; may be empty
     std::vector<Network> networks;
     int connects = 0, identifies = 0, scans = 0;
 
@@ -282,9 +283,9 @@ struct SerialHost : IHost {
     }
     void identify() override { ++identifies; }
     DeviceInfo device_info() override { return {"DFU32", "v0.5.0", "ESP32-S3", "dfu32-ab12", "esp32s3_n16r8"}; }
-    bool online_url(std::string& out) override {
+    bool provisioned(std::string& out) override {
         out = url;
-        return !url.empty();
+        return stored;
     }
     std::vector<Network> scan_networks() override {
         ++scans;
@@ -321,6 +322,7 @@ TEST_CASE("Improv Serial core: current state, offline and online", "[improv][ser
     CHECK(h.results.empty());
     CHECK(h.identifies == 0);  // 0x02 is not identify on Serial
 
+    h.stored = true;
     h.url = "http://192.168.1.50/";
     c.handle_rpc(rpc(kCmdGetCurrentState));
     CHECK(h.states.back() == State::Provisioned);
@@ -329,10 +331,41 @@ TEST_CASE("Improv Serial core: current state, offline and online", "[improv][ser
     CHECK(cmd == kCmdGetCurrentState);
     CHECK(strs == std::vector<std::string>{"http://192.168.1.50/"});
 
-    // Back offline (router gone): ready for new settings again.
+    // Network forgotten: ready for new settings again.
+    h.stored = false;
     h.url.clear();
     c.handle_rpc(rpc(kCmdGetCurrentState));
     CHECK(h.states.back() == State::Authorized);
+}
+
+TEST_CASE("Improv Serial core: current state with a network stored but not joined yet", "[improv][serial]") {
+    // Just after a flash or reset the device is still joining its stored
+    // network: it already counts as provisioned, so the installer offers
+    // "Change Wi-Fi" rather than "Connect to Wi-Fi". No URL yet, so no
+    // "Visit Device" link; the result still goes out, because the client
+    // waits for one whenever the state is provisioned.
+    SerialHost h;
+    Core c(h, Transport::Serial);
+    c.start();
+    h.states.clear();
+    h.stored = true;
+    c.handle_rpc(rpc(kCmdGetCurrentState));
+    REQUIRE(h.states == std::vector<State>{State::Provisioned});
+    REQUIRE(h.results.size() == 1);
+    {
+        const auto [cmd, strs] = decode(h.results[0]);
+        CHECK(cmd == kCmdGetCurrentState);
+        CHECK(strs.empty());
+    }
+
+    // Joined: the next query carries the URL.
+    h.url = "http://192.168.1.50/";
+    c.handle_rpc(rpc(kCmdGetCurrentState));
+    CHECK(h.states.back() == State::Provisioned);
+    REQUIRE(h.results.size() == 2);
+    const auto [cmd, strs] = decode(h.results[1]);
+    CHECK(cmd == kCmdGetCurrentState);
+    CHECK(strs == std::vector<std::string>{"http://192.168.1.50/"});
 }
 
 TEST_CASE("Improv Serial core: current state while connecting", "[improv][serial]") {
@@ -341,6 +374,7 @@ TEST_CASE("Improv Serial core: current state while connecting", "[improv][serial
     c.start();
     c.handle_rpc(wifi_rpc("attic", "hunter2hunter2"));
     REQUIRE(c.state() == State::Provisioning);
+    h.stored = true;
     h.url = "http://192.168.1.50/";  // still the old network's address
     h.states.clear();
     c.handle_rpc(rpc(kCmdGetCurrentState));

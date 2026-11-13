@@ -64,10 +64,13 @@ public:
         return {"DFU32", esp_app_get_description()->version, chip_name(CONFIG_IDF_TARGET), net::status().hostname,
             CONFIG_DFU32_BOARD_NAME};
     }
-    bool online_url(std::string& url) override {
+    bool provisioned(std::string& url) override {
         const net::Status st = net::status();
-        if (!st.connected || st.ip.empty()) return false;
-        url = "http://" + st.ip + "/";
+        if (!st.provisioned) return false;
+        // The URL only once it is on the network: the installer shows its
+        // "Visit Device" link exactly when one is given, so a device still
+        // joining gets "Change Wi-Fi" without a link that wouldn't answer.
+        if (st.connected && !st.ip.empty()) url = "http://" + st.ip + "/";
         return true;
     }
     std::vector<Network> scan_networks() override;

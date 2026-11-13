@@ -77,9 +77,11 @@ public:
     virtual bool begin_connect(const std::string& ssid, const std::string& password) = 0;
     virtual void identify() = 0;
     virtual DeviceInfo device_info() = 0;
-    /// Serial "get current state": true with the device's URL while it is on
-    /// a network (it then reports provisioned).
-    virtual bool online_url(std::string& url) {
+    /// Serial "get current state": true while a network is stored, even if
+    /// the device hasn't joined it yet (it then reports provisioned), with
+    /// the device's URL in `url` once it is on the network, else left empty.
+    /// The installer shows "Visit Device" only when there is a URL.
+    virtual bool provisioned(std::string& url) {
         (void)url;
         return false;
     }
