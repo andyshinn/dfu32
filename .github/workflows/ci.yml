@@ -200,6 +200,22 @@ jobs:
       - name: Board tag in dfu32.bin
         run: python3 tools/check_board_tag.py "$BUILD_DIR/dfu32.bin" "${{ matrix.board }}"
 
+      # A release's images must report its tag: the installer page and
+      # /api/v1/status show this string. tools/dfu32_version.cmake picks the
+      # highest of several tags on one commit; this proves it did.
+      - name: Version is the release tag
+        if: matrix.variant == 'release' && github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(python3 -c 'import sys; sys.path.insert(0, "tools")
+          from dfu32_web_versions import app_info
+          print(app_info(open(sys.argv[1], "rb").read())["version"])' "$BUILD_DIR/dfu32.bin")
+          if [ "$version" != "$TAG" ]; then
+            echo "::error::dfu32.bin reports $version, not the release tag $TAG"
+            exit 1
+          fi
+
       - name: Merged image (single file, flash at 0x0)
         if: matrix.variant == 'release'
         run: |

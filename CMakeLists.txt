@@ -61,6 +61,15 @@ if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM AND NOT DEFINED ENV{CMAKE_POLICY_VER
     set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 endif()
 
+# The firmware version (esp_app_desc_t, /api/v1/status, the installer page).
+# ESP-IDF's own `git describe` takes the first of several tags on one commit by
+# name, so a release tagged where its release candidates are would report the
+# oldest candidate; this picks the highest. -DPROJECT_VER=... still wins.
+if(NOT DEFINED PROJECT_VER)
+    include("${CMAKE_CURRENT_LIST_DIR}/tools/dfu32_version.cmake")
+    dfu32_git_version(PROJECT_VER "${CMAKE_CURRENT_LIST_DIR}")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # One Component Manager lock per chip. A single dependencies.lock records the
