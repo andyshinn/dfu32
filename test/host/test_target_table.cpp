@@ -306,4 +306,9 @@ TEST_CASE("Target table: \"default\" in a PUT body", "[target_table]") {
     r = t.put_json("a", R"({"default":"yes"})");
     CHECK(r.status == TargetTable::PutStatus::Invalid);
     CHECK(to_json(t.find("a")->cfg).find("\"default\"") == std::string::npos);
+
+    // A GET /targets/{id} answer (with "default" and "last_run") can be sent back.
+    r = t.put_json("a", R"({"id":"a","default":true,"last_run":{"seq":3},"last_ok_version":"x"})");
+    CHECK(r.status == TargetTable::PutStatus::Updated);
+    CHECK(t.find("a")->cfg.last_ok_version.empty());  // read-only
 }

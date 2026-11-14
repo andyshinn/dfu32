@@ -186,11 +186,22 @@ Specified in [SPEC §10.4](../SPEC.md#104-live-ble-signal-monitor-specified-not-
 - `docs/OPERATOR.md` (using it to place the box, and a Home Assistant `rest` sensor on `?once=1` polling every 10 s) and a bench check in `docs/BENCH.md`.
 - **Done when:** with a repeater in `start ota` mode, the UI, `curl -N` and the console all show it with live RSSI; moving it shows in the smoothed value within a few seconds; starting a flash from another tab takes the radio at once, and the monitor shows the job's scan, then resumes after the run.
 
+## Multiple targets (implemented, awaiting bench)
+
+Moved up from the post-v1 list: DFU32 remembers several repeaters, so their MACs don't have to be copied from `start ota` each time. SPEC §9.1, §10.1, §10.2.
+
+- `DFU32_MAX_TARGETS` defaults to 5 (1–10). Each target is one JSON record in its own NVS slot (`tgt0`..`tgt9`), so a save is still one atomic write; `tgt_def` names the default. A single-target build's `tgt0` (or an M1 target) loads as slot 0 unchanged.
+- `dfu32_core/target_table.hpp`, pure and host-tested: slots, the cap, the default (the first target, or the one named; deleting it moves it to the first remaining one) and the NVS writes each change needs.
+- One shared staging slot, not one per target. Staging for one target replaces another's image; the staged image is re-checked (size, board) against whichever target flashes it.
+- API: `GET /targets` lists all with the default and `max_targets`; `PUT` to a new id creates a target (`409 TARGET_LIMIT` when full) and takes `"default": true`; `POST /targets/{id}/default`; `/status` lists every target with `default` and `default_target`; `POST /staging` takes `target=<id>`; `matches_target` names any matching target. The old rule that an id-less console target adopts the first id it is `PUT` under is gone: it is just the target `target`.
+- Console: commands act on the default target; `target list`, `target use <id>`, `target add <id> [<MAC>]`, `target delete <id>`.
+- UI: a selected target (remembered per browser, else the default), a picker on Status and Runs, and on Target a list with **Edit**, **Make default** and **Add target**.
+- Bench tools: `fake_dfu32` models several targets; `runner.ensure_target` treats `TARGET_LIMIT` as "full".
+
 ## Later (post-v1, in rough priority order)
 
 1. MQTT + Home Assistant discovery (`update` entity, progress, Flash button), with `espressif/mqtt`.
 2. Ed25519-signed manifests (backward-compatible `sig` field), verified with `espressif/libsodium`.
-3. More than one target per device (raise `DFU32_MAX_TARGETS`, add a per-target staging slot or a shared slot with re-fetch).
-4. On-device raw DFU `.zip` ingestion with miniz on 8 MB+ profiles.
-5. Optional wired trigger plugin (UART / USB host) for unattended updates.
-6. Optional HTTPS fetch (`DFU32_HTTPS`) with the IDF cert bundle.
+3. On-device raw DFU `.zip` ingestion with miniz on 8 MB+ profiles.
+4. Optional wired trigger plugin (UART / USB host) for unattended updates.
+5. Optional HTTPS fetch (`DFU32_HTTPS`) with the IDF cert bundle.

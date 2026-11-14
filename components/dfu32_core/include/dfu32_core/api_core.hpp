@@ -12,6 +12,11 @@
 #include <string_view>
 #include <vector>
 
+namespace dfu32 {
+class TargetTable;
+struct StoredTarget;
+}  // namespace dfu32
+
 namespace dfu32::json {
 class ObjectWriter;
 }
@@ -32,6 +37,7 @@ enum class Route : uint8_t {
     TargetStage,   // POST /api/v1/targets/{id}/stage
     TargetFlash,   // POST /api/v1/targets/{id}/flash
     TargetRuns,    // GET  /api/v1/targets/{id}/runs
+    TargetDefault, // POST /api/v1/targets/{id}/default (make it the default target)
     JobAbort,      // POST /api/v1/jobs/current/abort
     Run,           // GET  /api/v1/runs/{seq}
     Staging,       // GET/POST/DELETE /api/v1/staging (POST: upload an image)
@@ -64,7 +70,7 @@ std::string_view query_param(std::string_view uri, std::string_view key);
 /// escape; a missing key is "" and true.
 bool query_text(std::string_view uri, std::string_view key, std::string& out);
 
-/// POST /api/v1/staging?dat=<hex>&version=<text>[&board=<text>][&sha256=<hex>][&name=<text>]
+/// POST /api/v1/staging?dat=<hex>&version=<text>[&board=<text>][&sha256=<hex>][&name=<text>][&target=<id>]
 /// with the application .bin as the raw body (SPEC.md §8, §10.1). The .dat
 /// (at most 64 bytes) rides in the query, so the body streams straight into
 /// the staging partition.
@@ -75,9 +81,16 @@ struct StagingUpload {
     bool has_sha256 = false;   // optional end-to-end check of the .bin
     std::array<uint8_t, 32> sha256{};
     std::string source;        // "upload:<name>" for the header's manifest_url
+    std::string target;        // optional target id: check the image against this target ("" = pick one)
 };
 /// "" or the reason the query was refused (400).
 std::string parse_staging_upload(std::string_view uri, StagingUpload& out);
+
+/// POST /api/v1/staging without target=: the target an upload is checked
+/// against (its board and max_app_size). The default target if its board
+/// accepts the image's (staged_board_ok), else the first target in slot order
+/// whose board does; nullptr if none does or there are no targets.
+const StoredTarget* staging_target_for(const TargetTable& table, std::string_view image_board);
 
 // ---- auth --------------------------------------------------------------------------
 
@@ -168,5 +181,9 @@ std::string mac_plus_one(const std::string& mac);
 
 /// `addr` is the target's app MAC or MAC+1 (case-insensitive).
 bool matches_target(const std::string& addr, const std::string& target_mac);
+
+/// The id of the first target (slot order) that `addr` matches
+/// (matches_target), or "" if none does.
+std::string matching_target_id(const TargetTable& table, const std::string& addr);
 
 }  // namespace dfu32::api

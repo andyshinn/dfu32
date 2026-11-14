@@ -416,7 +416,13 @@ class Ctx:
             return None
         if r.status != 200:
             return None
-        return any(d.get("matches_target") == self.tid for d in (r.get("devices") or []))
+        return any(d.get("matches_target") == self.tid or self.is_repeater_addr(d.get("addr") or "")
+                   for d in (r.get("devices") or []))
+
+    def is_repeater_addr(self, addr: str) -> bool:
+        """The repeater's MAC, or MAC+1 (its bootloader). Another target with the same MAC can come
+        first in matches_target, so the address is the surer test."""
+        return bool(self.mac) and mac_matches(addr, self.mac)
 
     def ensure_repeater_idle(self) -> None:
         """Checks that expect DFU32 *not* to find the repeater need it out of OTA mode."""
@@ -539,6 +545,11 @@ class Ctx:
         return self.site.url(self.host_ip, variant)
 
     def need_mac(self) -> str:
+        """--mac, else the MAC stored for the bench target, else the default target's."""
+        if not self.mac:
+            rows = self.console_targets() or []
+            mine = next((r for r in rows if r["id"] == self.tid), None)
+            self.mac = mine["mac"] if mine else ""
         if not self.mac:
             t = parse_target(self.con.cmd("target", 10))
             self.mac = t.get("mac", "")
@@ -546,12 +557,51 @@ class Ctx:
             raise TestSkipped("no repeater MAC: pass --mac XX:XX:XX:XX:XX:XX (from `start ota`'s reply)")
         return self.mac
 
-    def ensure_target_console(self, *, url: bool = True) -> None:
-        """Target set from the console (sections 1-2; also what the API sees)."""
-        mac = self.need_mac()
+    def console_targets(self) -> Optional[list[dict]]:
+        """`target list` as rows {id, mac, board, last_ok, default}; None if the firmware has no `target list`."""
+        out = self.con.cmd("target list", 10)
+        if "No targets yet" in out:
+            return []
+        if " of " not in out or "* = default" not in out:
+            return None
+        return parse_target_list(out)
+
+    def use_bench_target_console(self) -> None:
+        """Makes the bench target (--target-id) the default, so the console's commands act on it.
+
+        A missing one is added (other targets are kept); when DFU32 is full, one other target is
+        deleted to make room. On firmware with a single target, that target is renamed instead.
+        """
         cur = parse_target(self.con.cmd("target", 10))
-        if cur.get("id") != self.tid:
+        if cur.get("id") == self.tid:
+            return
+        out = self.con.cmd(f"target use {self.tid}", 10)
+        if "Default target:" in out:
+            self.say(f"made '{self.tid}' the default target (it was '{cur.get('id', '')}'); console commands act on it")
+            return
+        if f"No target '{self.tid}'" not in out:  # firmware with one target: no `target use`
             self.con.cmd(f"target id {self.tid}", 10)
+            return
+        add = f"target add {self.tid} {self.need_mac()} {self.args.addr_type}"
+        out = self.con.cmd(add, 10)
+        if "Not saved" in out and "at most" in out:
+            rows = self.console_targets() or []
+            victim = pick_target_to_delete(rows, self.tid)
+            if victim is None:
+                raise TestFailed(f"DFU32 is full and has no target to make room with: {out.strip()}")
+            self.say(f"DFU32 is full ({len(rows)} targets): deleting target '{victim}' to make room for "
+                     f"'{self.tid}'")
+            self.con.cmd(f"target delete {victim}", 10)
+            out = self.con.cmd(add, 10)
+        if "added" not in out:
+            raise TestFailed(f"could not add the bench target '{self.tid}': {out.strip().splitlines()[:1]}")
+        self.say(f"added target '{self.tid}' on the console; it is now the default target")
+
+    def ensure_target_console(self, *, url: bool = True) -> None:
+        """The bench target set from the console and made the default (sections 1-2; also what the API sees)."""
+        mac = self.need_mac()
+        self.use_bench_target_console()
+        cur = parse_target(self.con.cmd("target", 10))
         if cur.get("mac") != mac:
             self.con.cmd(f"target {mac} {self.args.addr_type}", 10)
         if cur.get("board") != self.args.board:
@@ -572,10 +622,17 @@ class Ctx:
         body = self.target_body(**over)
         r = api.put(f"/targets/{self.tid}", body)
         if r.status == 409 and r.error == "TARGET_LIMIT":
-            for t in (api.get("/targets").get("targets") or []):
-                if t.get("id") and t["id"] != self.tid:
-                    self.say(f"deleting the other target '{t['id']}' (v1 allows one)")
-                    api.delete(f"/targets/{t['id']}")
+            # DFU32 is full: delete one other target (never the bench one), then try again.
+            lst = api.get("/targets")
+            rows = [{"id": t.get("id", ""), "default": bool(t.get("default"))} for t in (lst.get("targets") or [])]
+            victim = pick_target_to_delete(rows, self.tid)
+            if victim is None:
+                raise TestFailed(f"PUT /targets/{self.tid} -> TARGET_LIMIT and no other target to delete: {r.short()}")
+            self.say(f"DFU32 is full ({len(rows)} of {lst.get('max_targets', '?')} targets): deleting target "
+                     f"'{victim}' to make room for '{self.tid}'")
+            d = api.delete(f"/targets/{victim}")
+            if d.status != 204:
+                raise TestFailed(f"DELETE /targets/{victim} failed: {d.short()}")
             r = api.put(f"/targets/{self.tid}", body)
         if r.status not in (200, 201):
             raise TestFailed(f"PUT /targets/{self.tid} failed: {r.short()}")
@@ -874,6 +931,42 @@ class Ctx:
         th.start()
         th.join(timeout)
         return box.get("ip")
+
+
+# ---- targets ------------------------------------------------------------------------------
+
+_TARGET_ROW = re.compile(r"^([* ]) (\S+)\s+(\S+)\s+(\S+)\s+(.*)$")
+_MAC = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+
+
+def parse_target_list(out: str) -> list[dict]:
+    """`target list` rows: `* <id> <mac|-> <board|-> <last ok|->`, `*` marking the default."""
+    rows = []
+    for line in out.splitlines():
+        m = _TARGET_ROW.match(line)
+        if not m or not (m.group(3) == "-" or _MAC.match(m.group(3))):
+            continue  # the header, the summary line, logs
+        dash = lambda v: "" if v == "-" else v  # noqa: E731
+        rows.append({"id": m.group(2), "mac": dash(m.group(3)).upper(), "board": dash(m.group(4)),
+                     "last_ok": dash(m.group(5).strip()), "default": m.group(1) == "*"})
+    return rows
+
+
+def pick_target_to_delete(rows: list[dict], keep: str) -> Optional[str]:
+    """Which target to delete to make room for `keep`: the last non-default one, else any other."""
+    others = [r for r in rows if r.get("id") and r["id"] != keep]
+    if not others:
+        return None
+    plain = [r for r in others if not r.get("default")]
+    return (plain or others)[-1]["id"]
+
+
+def mac_matches(addr: str, mac: str) -> bool:
+    """addr is `mac` or `mac`+1 (the last byte wraps), as DFU32's matches_target compares them."""
+    a, m = addr.upper(), mac.upper()
+    if not (_MAC.match(a) and _MAC.match(m)):
+        return False
+    return a == m or a == f"{m[:15]}{(int(m[15:], 16) + 1) & 0xFF:02X}"
 
 
 # ---- report -----------------------------------------------------------------------------

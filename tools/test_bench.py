@@ -29,7 +29,7 @@ from bench import checks, parse  # noqa: E402
 from bench.api import retry_after  # noqa: E402
 from bench.console import Redactor, SerialConsole, quote_arg, split_incomplete_escape, strip_ansi  # noqa: E402
 from bench.fake_dfu32 import FakeDfu32  # noqa: E402
-from bench.runner import Ctx, Repeater, crash_excerpt  # noqa: E402
+from bench.runner import Ctx, Repeater, crash_excerpt, mac_matches, parse_target_list, pick_target_to_delete  # noqa: E402,E501
 from bench.site import FirmwareSite, flip_hex_digit  # noqa: E402
 from test_dfu32_pack import write_zip  # noqa: E402
 from test_stage_image import synthetic_package  # noqa: E402
@@ -111,7 +111,132 @@ class Parsers(unittest.TestCase):
         t = parse.parse_target("  id         t096\n  mac        f4:1c:36:a7:33:95 (random), bootloader after reset at x\n"
                                "  board      heltec_t096\n  manifest   http://h/m.json\n")
         self.assertEqual((t["id"], t["mac"], t["manifest"]), ("t096", "F4:1C:36:A7:33:95", "http://h/m.json"))
+        t = parse.parse_target("  id         attic (default target)\n  mac        (not set)\n  board      x\n"
+                               "  manifest   (not set)\n  max app    default (798720 B for nRF52, none for nRF54)\n"
+                               "  default    yes (2 of 3 targets; max 5): `target list` shows all\n")
+        self.assertEqual((t["id"], t["mac"], t["board"]), ("attic", "", "x"))
         self.assertEqual(parse.parse_token("New API token (the old one stops working):\nabc_DEF-123\n"), "abc_DEF-123")
+
+
+class Targets(unittest.TestCase):
+    """Several targets, one the default: the runner's helpers and the simulator's model of them."""
+
+    LIST = ("  ID                    MAC                BOARD             LAST OK\n"
+            "  home                  F4:1C:36:A7:33:95  heltec_t096       v1.18.0-81dbae5\n"
+            "* attic                 -                  -                 -\n"
+            "2 of 5 targets. * = default: check, stage, probe, flash and blreset use it (`target use <id>`).\n")
+
+    def test_parse_target_list(self):
+        rows = parse_target_list(self.LIST)
+        self.assertEqual([(r["id"], r["mac"], r["board"], r["last_ok"], r["default"]) for r in rows],
+                         [("home", "F4:1C:36:A7:33:95", "heltec_t096", "v1.18.0-81dbae5", False),
+                          ("attic", "", "", "", True)])
+
+    def test_pick_target_to_delete(self):
+        rows = [{"id": "a", "default": True}, {"id": "b"}, {"id": "t096"}, {"id": "c"}]
+        self.assertEqual(pick_target_to_delete(rows, "t096"), "c")  # the last one that isn't the default
+        self.assertEqual(pick_target_to_delete([{"id": "a", "default": True}, {"id": "t096"}], "t096"), "a")
+        self.assertIsNone(pick_target_to_delete([{"id": "t096", "default": True}], "t096"))
+
+    def test_mac_matches(self):
+        self.assertTrue(mac_matches("f4:1c:36:a7:33:95", "F4:1C:36:A7:33:95"))
+        self.assertTrue(mac_matches("F4:1C:36:A7:33:96", "F4:1C:36:A7:33:95"))  # its bootloader at MAC+1
+        self.assertTrue(mac_matches("F4:1C:36:A7:33:00", "F4:1C:36:A7:33:FF"))  # the last byte wraps
+        self.assertFalse(mac_matches("F4:1C:36:A7:33:94", "F4:1C:36:A7:33:95"))
+        self.assertFalse(mac_matches("", "F4:1C:36:A7:33:95"))
+
+    def call(self, fake, method, path, body=None):
+        status, obj, _ = fake.handle(method, "/api/v1" + path, json.dumps(body) if body is not None else "", "")
+        return status, obj
+
+    def test_fake_api(self):
+        fake = FakeDfu32(max_targets=3)
+        self.assertEqual(self.call(fake, "GET", "/targets"), (200, {"targets": [], "default": None, "max_targets": 3}))
+        self.assertIsNone(fake.status_obj()["default_target"])
+        st, obj = self.call(fake, "PUT", "/targets/home", {"mac": "f4:1c:36:a7:33:95", "board": "heltec_t096"})
+        self.assertEqual((st, obj["default"], obj["mac"]), (201, True, "F4:1C:36:A7:33:95"))  # the first is the default
+        st, obj = self.call(fake, "PUT", "/targets/attic", {"name": "Attic"})
+        self.assertEqual((st, obj["default"]), (201, False))
+        st, obj = self.call(fake, "PUT", "/targets/shed", {"default": True})
+        self.assertEqual((st, obj["default"]), (201, True))
+        st, obj = self.call(fake, "PUT", "/targets/garage", {})
+        self.assertEqual((st, obj["error"]), (409, "TARGET_LIMIT"))
+        self.assertIn("at most 3 targets", obj["detail"])
+        self.assertEqual(self.call(fake, "PUT", "/targets/home", {"board": "rak4631"})[0], 200)  # an update still works
+        self.assertEqual(self.call(fake, "POST", "/targets/attic/default"), (200, {"default": "attic"}))
+        self.assertEqual(self.call(fake, "POST", "/targets/nope/default")[0], 404)
+        status = fake.status_obj()
+        self.assertEqual(status["default_target"], "attic")
+        self.assertEqual([(t["id"], t["default"]) for t in status["targets"]],
+                         [("home", False), ("attic", True), ("shed", False)])
+        self.assertNotIn("mac", status["targets"][0])  # /status is public
+        st, obj = self.call(fake, "GET", "/targets/attic")
+        self.assertEqual((st, obj["default"], obj["last_run"]), (200, True, None))
+        self.assertEqual(self.call(fake, "DELETE", "/targets/attic")[0], 204)
+        self.assertEqual(self.call(fake, "GET", "/targets")[1]["default"], "home")  # the first remaining one
+        st, obj = self.call(fake, "POST", "/targets/attic/check")
+        self.assertEqual((st, obj["detail"]), (404, "no target 'attic'"))
+        self.assertEqual(self.call(fake, "DELETE", "/targets/attic")[0], 404)
+
+    def test_fake_scan_matches_the_first_target_with_the_mac(self):
+        fake = FakeDfu32()
+        self.call(fake, "PUT", "/targets/other", {"mac": "00:11:22:33:44:55"})
+        self.call(fake, "PUT", "/targets/boot", {"mac": "F4:1C:36:A7:33:94"})  # fake.mac is this one's MAC+1
+        self.call(fake, "PUT", "/targets/t096", {"mac": fake.mac})
+        fake.start_ota()
+        st, obj = self.call(fake, "POST", "/ble/scan", {"duration_s": 1})
+        self.assertEqual((st, obj["devices"][0]["matches_target"]), (200, "boot"))
+
+    def test_fake_staging_upload_picks_a_target(self):
+        fake = FakeDfu32()
+
+        def upload(query):
+            st, obj, _ = fake.handle("POST", "/api/v1/staging?" + query, b"\x00" * 64, "")
+            return st, obj
+
+        self.assertEqual(upload("board=rak4631&version=v1")[0], 200)  # no targets: nothing to compare with
+        self.assertEqual(upload("board=rak4631&target=nope")[0], 404)
+        self.call(fake, "PUT", "/targets/home", {"board": "heltec_t096"})
+        self.call(fake, "PUT", "/targets/attic", {"board": "rak4631"})
+        self.assertEqual(upload("board=rak4631")[0], 200)  # not the default's board, but attic's
+        st, obj = upload("board=xiao")
+        self.assertEqual((st, obj["error"]), (422, "BOARD_MISMATCH"))
+        self.assertIn("no stored target", obj["detail"])
+        st, obj = upload("board=rak4631&target=home")
+        self.assertEqual((st, obj["error"]), (422, "BOARD_MISMATCH"))
+        self.assertEqual(upload("board=heltec_t096&target=home")[0], 200)
+
+    def test_fake_console(self):
+        fake = FakeDfu32(max_targets=2)
+
+        def cmd(line):
+            while not fake.out.empty():
+                fake.out.get()
+            fake.write(line.encode() + b"\r")
+            out = b""
+            while not fake.out.empty():
+                out += fake.out.get()
+            return out.decode()
+
+        self.assertIn("No target yet", cmd("target"))
+        out = cmd("target F4:1C:36:A7:33:95")  # with none, `target <MAC>` creates the target `target`
+        self.assertEqual(parse.parse_target(out)["id"], "target")
+        self.assertIn("(default target)", out)
+        self.assertIn("default    yes (1 of 1 target; max 2)", out)
+        out = cmd("target add t096 F4:1C:36:A7:33:95 random")
+        self.assertIn("Target 't096' added; it is now the default target.", out)
+        self.assertEqual(fake.default_id, "t096")
+        self.assertIn("Not saved: this DFU32 holds at most 2 targets", cmd("target add third"))
+        rows = parse_target_list(cmd("target list"))
+        self.assertEqual([(r["id"], r["default"]) for r in rows], [("target", False), ("t096", True)])
+        self.assertIn("Default target: 'target'", cmd("target use target"))
+        self.assertIn("No target 'nope'", cmd("target use nope"))
+        cmd("target board heltec_t096")
+        self.assertEqual(fake.targets["target"]["board"], "heltec_t096")  # edits the default
+        self.assertEqual(parse.parse_target(cmd("target id home"))["id"], "home")
+        self.assertEqual(list(fake.targets), ["home", "t096"])
+        self.assertIn("The default target is now 't096'", cmd("target clear"))
+        self.assertIn("No targets left", cmd("target delete t096"))
 
 
 class FakePort:
@@ -414,6 +539,80 @@ class SoakPlan(unittest.TestCase):
 SUBSET = "1.3,2.3,2.5b,2.5d,3.2,3.6,3.9,3.11,4.1,5.1"
 
 
+def owner_targets(fake, n, *, default="home"):
+    """Targets the bench didn't make, as an owner would have them: `n` of them, `default` the default."""
+    ids = ["home", "attic", "shed", "garage", "barn", "mast", "roof", "hill", "lake", "pier"][:n]
+    for i, tid in enumerate(ids):
+        fake.add_target({**fake.blank_target(tid), "mac": f"00:11:22:33:44:{i:02X}", "board": "rak4631"},
+                        make_default=tid == default)
+    return ids
+
+
+def run_bench(test, fake, only):
+    """dfu32_bench.main against `fake` with --only `only`; returns (rc, report, stdout)."""
+    tmp = tempfile.TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    d = Path(tmp.name)
+    z = d / "Heltec_T096_repeater-v1.18.0.zip"
+    write_zip(z, *synthetic_package(4096))
+    port = fake.start_http()
+    test.addCleanup(fake.stop)
+    argv = ["--port", "sim", "--zip", str(z), "--board", "heltec_t096", "--mac", fake.mac,
+            "--device-ip", f"127.0.0.1:{port}", "--host-ip", "127.0.0.1", "--site-port", "0",
+            "--start-ota-timeout", "60", "--out", str(d / "out"), "--only", only]
+    real_console = dfu32_bench.SerialConsole
+    with mock.patch.object(dfu32_bench, "SerialConsole", lambda *a, **kw: real_console(*a, opener=fake.opener, **kw)), \
+            mock.patch.object(Ctx, "start_ota", lambda self, **kw: fake.start_ota()), \
+            mock.patch.object(Ctx, "countdown", lambda self, s, w: None), \
+            mock.patch.object(Ctx, "resolve", staticmethod(lambda name, timeout=8: None)), \
+            contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = dfu32_bench.main(argv)
+    return rc, json.loads((d / "out" / "report.json").read_text()), out.getvalue()
+
+
+class EndToEndTargets(unittest.TestCase):
+    """The bench on a DFU32 that already holds the owner's targets."""
+
+    def assert_passed(self, rc, report, out):
+        bad = {r["id"]: r["notes"][-3:] for r in report["results"] if r["status"] not in ("PASS", "WARN")}
+        self.assertEqual(bad, {}, out[-3000:])
+        self.assertEqual(rc, 0)
+
+    def test_full_device_api(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 5, default="attic")
+        rc, report, out = run_bench(self, fake, "3.2")
+        self.assert_passed(rc, report, out)
+        # One owner target made room (the last that isn't the default); the owner's default stays.
+        self.assertEqual(list(fake.targets), ["home", "attic", "shed", "garage", "t096"])
+        self.assertEqual(fake.default_id, "attic")
+        self.assertIn("deleting target 'barn' to make room for 't096'", out)
+        self.assertNotIn("v1 allows one", out)
+        self.assertIn("was full: the default switch wasn't tested", "\n".join(report["results"][0]["notes"]))
+
+    def test_room_left_api(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 2, default="attic")
+        rc, report, out = run_bench(self, fake, "3.2")
+        self.assert_passed(rc, report, out)
+        notes = "\n".join(report["results"][0]["notes"])
+        self.assertIn("409 TARGET_LIMIT", notes)
+        self.assertIn("POST /targets/bench-extra-1/default -> 200", notes)
+        self.assertEqual(list(fake.targets), ["home", "attic", "t096"])  # the throwaway targets are gone
+        self.assertEqual(fake.default_id, "attic")  # and the owner's default is back
+
+    def test_full_device_console(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 5)
+        rc, report, out = run_bench(self, fake, "2.3")
+        self.assert_passed(rc, report, out)
+        self.assertEqual(list(fake.targets), ["home", "attic", "shed", "garage", "t096"])
+        self.assertEqual(fake.default_id, "t096")  # console commands act on the default
+        self.assertEqual((fake.targets["t096"]["mac"], fake.targets["t096"]["board"]), (fake.mac, "heltec_t096"))
+        self.assertEqual(fake.targets["home"]["board"], "rak4631")  # the owner's targets weren't edited
+        self.assertIn("deleting target 'barn' to make room for 't096'", out)
+
+
 class EndToEnd(unittest.TestCase):
     """The runner against the simulator: catches runner bugs, not firmware bugs."""
 
@@ -425,6 +624,7 @@ class EndToEnd(unittest.TestCase):
         z = d / "Heltec_T096_repeater-v1.18.0.zip"
         write_zip(z, bin_data, dat)
         fake = FakeDfu32()
+        owner_targets(fake, 2)  # the bench adds its own target next to these and leaves them alone
         port = fake.start_http()
         self.addCleanup(fake.stop)
 
@@ -455,6 +655,8 @@ class EndToEnd(unittest.TestCase):
         for r in report["results"]:
             self.assertNotIn("Traceback", "\n".join(r["notes"]))
         self.assertNotIn(fake.token_hash, logs)
+        self.assertEqual(list(fake.targets), ["home", "attic", "t096"])
+        self.assertEqual(fake.targets["home"]["board"], "rak4631")
 
 
 

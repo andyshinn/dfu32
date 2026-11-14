@@ -162,6 +162,8 @@ class FakeDfu32:
                                       "auth": self.headers.get("Authorization")})
                 if token is not None and self.headers.get("Authorization") != "Bearer " + token:
                     return self.reply(401, {"error": "UNAUTHORIZED"})
+                if q.get("target", "t096") != "t096":  # the one stored target
+                    return self.reply(404, {"error": "NOT_FOUND", "detail": f"no target '{q['target']}'"})
                 pkt = si.parse_dat(bytes.fromhex(q["dat"]))
                 if si.crc16_ccitt(body) != pkt.crc16:
                     return self.reply(422, {"error": "DAT_CRC_MISMATCH", "detail": "CRC16 of the .bin does not match the .dat"})
@@ -225,6 +227,17 @@ class Upload(unittest.TestCase):
         self.assertEqual(r["query"]["sha256"], hashlib.sha256(bin_data).hexdigest())
         self.assertEqual(r["query"]["name"], "RAK_4631_repeater-v1.18.0-81dbae5.zip")
         self.assertIn("staged   v1.18.0-81dbae5", out)
+        self.assertNotIn("target", r["query"])  # DFU32 picks the target to check against
+
+    def test_target_to_check_against(self):
+        bin_data, dat = synthetic_package(1024)
+        z = self.zip_of(bin_data, dat, "pkg.zip")
+        rc, _, err = self.run_cli(str(z), "--upload", self.dfu32.url, "--token", "tok", "--target", "t096")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.dfu32.requests[-1]["query"]["target"], "t096")
+        rc, _, err = self.run_cli(str(z), "--upload", self.dfu32.url, "--token", "tok", "--target-id", "attic")
+        self.assertEqual(rc, 1)
+        self.assertIn("HTTP 404): NOT_FOUND no target 'attic'", err)
 
     def test_token_from_the_environment_and_host_without_scheme(self):
         bin_data, dat = synthetic_package(1024)

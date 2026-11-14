@@ -257,7 +257,7 @@ TOKEN=<token from the reply>
 
 Every other call sends `-H "Authorization: Bearer $TOKEN"`. `GET /status` works without it.
 
-**Set up the target** (one target in v1; a target made on the console takes the first id you PUT):
+**Set up the target** (a `PUT` to a new id creates a target, up to `DFU32_MAX_TARGETS`; add `"default":true` to make it the default):
 
 ```bash
 curl -s -X PUT $DFU/targets/t096 -H "Authorization: Bearer $TOKEN" -d '{"name":"Bench T096","board":"heltec_t096","mac":"F4:1C:36:A7:33:95","manifest_url":"http://<pc-ip>:8000/t096/manifest.json"}'
