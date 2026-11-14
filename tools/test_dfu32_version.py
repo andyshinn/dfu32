@@ -79,6 +79,33 @@ class TestVersion(unittest.TestCase):
         (self.repo / "f").write_text("y")
         self.assertEqual(self.version(), "v0.4.0-dirty")
 
+    def test_non_version_tag_is_ignored(self):
+        # x-nightly sorts after every v...: it must not become the version.
+        for t in ("v0.5.0", "v0.5.1-rc.1", "x-nightly"):
+            self.git("tag", t)
+        self.assertEqual(self.version(), "v0.5.1-rc.1")
+
+    def test_only_non_version_tags_keeps_describe(self):
+        self.git("tag", "nightly")
+        self.assertEqual(self.version(), "nightly")
+
+    def test_incremental_build_reconfigures_after_a_commit(self):
+        # As in the top-level CMakeLists.txt: version first, then project().
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as build:
+            Path(src, "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.16)\n"
+                f'include("{SCRIPT.as_posix()}")\n'
+                f'dfu32_git_version(V "{self.repo.as_posix()}")\n'
+                "project(t NONE)\n"
+                'file(WRITE "${CMAKE_BINARY_DIR}/version.txt" "${V}")\n')
+            self.git("tag", "v0.5.0")
+            run = dict(env=ENV, check=True, capture_output=True)
+            subprocess.run(["cmake", "-S", src, "-B", build], **run)
+            self.assertEqual(Path(build, "version.txt").read_text(), "v0.5.0")
+            self.commit()
+            subprocess.run(["cmake", "--build", build], **run)
+            self.assertEqual(Path(build, "version.txt").read_text(), f"v0.5.0-1-g{self.short()}")
+
     def test_not_a_checkout_prints_nothing(self):
         with tempfile.TemporaryDirectory() as d:
             r = subprocess.run(["cmake", f"-DREPO={d}", "-P", str(SCRIPT)], env={**ENV, "GIT_CEILING_DIRECTORIES": d},

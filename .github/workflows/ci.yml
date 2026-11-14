@@ -134,13 +134,20 @@ jobs:
           restore-keys: |
             ${{ steps.ccache-config.outputs.key-prefix }}-
 
+      # A release builds with its tag as the version, which /api/v1/status
+      # and the installer page show. Elsewhere tools/dfu32_version.cmake
+      # derives it from git describe; on a commit with several tags it picks
+      # the highest, which isn't always the one being released (a v0.5.1
+      # hotfix where v0.6.0-rc.1 already sits).
       - name: Build
         if: matrix.variant == 'release'
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
           ccache --zero-stats
-          idf.py --preset "${{ matrix.board }}" build
+          idf.py --preset "${{ matrix.board }}" ${TAG:+"-DPROJECT_VER=$TAG"} build
 
       - name: Build (debug, bench only)
         if: matrix.variant == 'debug'
@@ -196,25 +203,12 @@ jobs:
         run: python3 tools/check_app_size.py "$BUILD_DIR"
 
       # The firmware upload checks this tag at a fixed offset; prove the
-      # linker put it there in the real image.
+      # linker put it there in the real image. A release image must also
+      # report its tag (the Build step passes it as PROJECT_VER).
       - name: Board tag in dfu32.bin
-        run: python3 tools/check_board_tag.py "$BUILD_DIR/dfu32.bin" "${{ matrix.board }}"
-
-      # A release's images must report its tag: the installer page and
-      # /api/v1/status show this string. tools/dfu32_version.cmake picks the
-      # highest of several tags on one commit; this proves it did.
-      - name: Version is the release tag
-        if: matrix.variant == 'release' && github.event_name == 'release'
         env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          version=$(python3 -c 'import sys; sys.path.insert(0, "tools")
-          from dfu32_web_versions import app_info
-          print(app_info(open(sys.argv[1], "rb").read())["version"])' "$BUILD_DIR/dfu32.bin")
-          if [ "$version" != "$TAG" ]; then
-            echo "::error::dfu32.bin reports $version, not the release tag $TAG"
-            exit 1
-          fi
+          TAG: ${{ matrix.variant == 'release' && github.event_name == 'release' && github.event.release.tag_name || '' }}
+        run: python3 tools/check_board_tag.py "$BUILD_DIR/dfu32.bin" "${{ matrix.board }}" ${TAG:+--version "$TAG"}
 
       - name: Merged image (single file, flash at 0x0)
         if: matrix.variant == 'release'

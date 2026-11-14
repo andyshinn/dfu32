@@ -34,14 +34,42 @@ function(dfu32_git_version out_var repo_dir)
     endif()
     set(version "${desc}")
 
+    # Reconfigure when HEAD, the branch it names, the index or the packed refs
+    # change, so an incremental build after a commit picks up the new version.
+    # ESP-IDF does this for its own describe, which a set PROJECT_VER skips.
+    # A new tag on an unchanged HEAD doesn't trigger it (nor does it in IDF).
+    # --git-path resolves each file in a linked worktree too.
+    if(NOT CMAKE_SCRIPT_MODE_FILE)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${repo_dir}" symbolic-ref -q HEAD
+                        OUTPUT_VARIABLE head_ref OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        set(paths --git-path HEAD --git-path index --git-path packed-refs)
+        if(NOT head_ref STREQUAL "")
+            list(APPEND paths --git-path "${head_ref}")
+        endif()
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${repo_dir}" rev-parse --path-format=absolute ${paths}
+                        OUTPUT_VARIABLE files RESULT_VARIABLE rc
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(rc EQUAL 0)
+            string(REPLACE "\n" ";" files "${files}")
+            foreach(f IN LISTS files)
+                # A missing file would make every build reconfigure.
+                if(EXISTS "${f}")
+                    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${f}")
+                endif()
+            endforeach()
+        endif()
+    endif()
+
     # The tag describe started from; fails when there are no tags (desc is a hash).
     execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${repo_dir}" describe --tags --abbrev=0
                     OUTPUT_VARIABLE base RESULT_VARIABLE rc
                     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(rc EQUAL 0 AND NOT base STREQUAL "")
         # versionsort.suffix=- sorts any "-..." suffix before the bare version.
+        # Only version tags compete: any other name (x-nightly) would sort
+        # after every v... and become the version.
         execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${repo_dir}" -c versionsort.suffix=-
-                                tag --points-at "${base}^{commit}" --sort=-v:refname
+                                tag --points-at "${base}^{commit}" --sort=-v:refname --list "v[0-9]*"
                         OUTPUT_VARIABLE tags RESULT_VARIABLE rc
                         OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
         if(rc EQUAL 0 AND NOT tags STREQUAL "")

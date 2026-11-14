@@ -26,12 +26,12 @@ def image(board=b"feather_esp32s3", project=b"dfu32", magic=b"DF32BRD1", first=0
 
 
 class TestBoardTag(unittest.TestCase):
-    def run_main(self, data, board):
+    def run_main(self, data, board, *extra):
         with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
             f.write(data)
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = cbt.main([f.name, board])
+            rc = cbt.main([f.name, board, *extra])
         Path(f.name).unlink()
         return rc, out.getvalue() + err.getvalue()
 
@@ -61,6 +61,15 @@ class TestBoardTag(unittest.TestCase):
             rc, text = self.run_main(data, board)
             self.assertEqual(rc, 1, needle)
             self.assertIn(needle, text)
+
+    def test_version(self):
+        rc, text = self.run_main(image(), "feather_esp32s3", "--version", "v0.4.0")
+        self.assertEqual(rc, 0, text)
+        rc, text = self.run_main(image(), "feather_esp32s3", "--version", "v0.5.0")
+        self.assertEqual(rc, 1)
+        self.assertIn("version 'v0.4.0'; expected 'v0.5.0'", text)
+        rc, _ = self.run_main(image(), "feather_esp32s3", "--version")
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":
