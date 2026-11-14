@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Checks that a built dfu32.bin carries the board tag the firmware upload expects.
 
-    check_board_tag.py build/feather_esp32s3/dfu32.bin feather_esp32s3
+    check_board_tag.py build/feather_esp32s3/dfu32.bin feather_esp32s3 [--version v0.5.0]
 
 POST /api/v1/system/ota (SPEC.md §10.1) reads DFU32's board tag at a fixed
 offset: right after esp_app_desc_t, where ESP-IDF's linker script places
@@ -10,6 +10,10 @@ offset: right after esp_app_desc_t, where ESP-IDF's linker script places
 legitimate upload would be refused as "untagged". Running this on the real
 image in CI turns that into a build failure instead. The offsets mirror
 components/dfu32_core/include/dfu32_core/ota_image.hpp.
+
+With --version, the version in esp_app_desc_t must match too: a release build
+checks that its image reports the release tag, which /api/v1/status and the
+installer page show.
 """
 import struct
 import sys
@@ -48,7 +52,10 @@ def read_tag(image: bytes) -> dict:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 2:
+    version = None
+    if len(argv) == 4 and argv[2] == "--version":
+        version = argv[3]
+    elif len(argv) != 2:
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         return 2
     image, board = Path(argv[0]).read_bytes(), argv[1]
@@ -60,6 +67,9 @@ def main(argv=None) -> int:
     if info["project"] != "dfu32" or info["board"] != board:
         print("error: %s: project %r, board %r; expected 'dfu32', %r" % (argv[0], info["project"], info["board"], board),
               file=sys.stderr)
+        return 1
+    if version is not None and info["version"] != version:
+        print("error: %s: version %r; expected %r" % (argv[0], info["version"], version), file=sys.stderr)
         return 1
     print("%s: dfu32 %s for %s (chip id %d)" % (argv[0], info["version"], info["board"], info["chip_id"]))
     return 0
