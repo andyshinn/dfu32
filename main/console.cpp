@@ -24,6 +24,7 @@
 #include "api/api.hpp"
 #include "console_io.hpp"
 #include "config/config.hpp"
+#include "dfu32_core/manifest.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "fetch/fetch.hpp"
 #include "improv/improv.hpp"
@@ -659,11 +660,22 @@ int cmd_flash(int argc, char** argv) {
     }
     job::Lease lease("console");
     if (!acquire(lease)) return 1;
+    // Read the target again under the lease: target changes take it too, so
+    // this is the target the flash really goes to.
+    if (!require_target(mac, &tc)) return 1;
     StagedImage img;
     if (!img.open()) return 1;
-    const auto v = img.verify();
+    // The staged image is shared by every target, so check it against this
+    // one (size limit and ID), as an API flash does (SPEC.md §8).
+    const auto v = img.verify(tc.max_app_size);
     if (!v.ok) {
         std::printf("Staged image failed checks: %s. Nothing was touched.\n", v.error.c_str());
+        return 1;
+    }
+    if (!staged_board_ok(img.header().board, tc.board)) {
+        std::printf("BOARD_MISMATCH: the staged image is for ID \"%s\", target '%s' is \"%s\". Nothing was touched.\n"
+                    "Stage an image for this target, or `target use <id>` to flash another target.\n",
+                    img.header().board.c_str(), tc.effective_id().c_str(), tc.board.c_str());
         return 1;
     }
     ble::FlashOptions o;

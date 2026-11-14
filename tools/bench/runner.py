@@ -853,12 +853,16 @@ class Ctx:
     def console_flash(self, extra: str = "", *, wait: Optional[int] = None, start_ota: bool = True,
                       lora: bool = False, hint: str = "", until: Optional[Callable[[int], bool]] = None) -> dict:
         wait = wait or self.args.start_ota_timeout
+        # The console flashes its default target. A target made over the API (sections 3-4)
+        # doesn't become the default when the owner already has one, so make it so first.
+        self.use_bench_target_console()
         if start_ota:
             self.prime_repeater(lora=lora)
         mark = self.con.mark()
         line = f"flash --yes --wait {wait} {extra}".strip()
         start = self.con.send(line)
-        hit = self.con.wait_line(r"Waiting up to \d+ s for|failed checks|No target MAC|Busy:", 60, since=mark)
+        hit = self.con.wait_line(r"Waiting up to \d+ s for|failed checks|BOARD_MISMATCH|No target MAC|Busy:", 60,
+                                 since=mark)
         if hit and "Waiting up to" in hit[1].text:
             if start_ota:
                 self.start_ota(lora=lora, hint=hint,

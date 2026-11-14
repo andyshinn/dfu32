@@ -226,6 +226,8 @@ async function viewStatus() {
   // Drop the previous target's settings at once: a status refresh during the
   // GET would otherwise offer its source choices (manifest) for this target.
   tcfg = null;
+  // Redraw now, so Check/Stage/Flash act on the new selection while the GET runs.
+  renderStatus();
   const got = tid ? await api("GET", tpath(tid)).catch(() => null) : null;
   if (tcfgFor !== tid) return;  // the selection moved again; that call renders
   tcfg = got;
@@ -459,6 +461,7 @@ async function viewTarget(arg) {
     // A cleared knob goes back to its default (the placeholder it then shows); max app size to 0.
     for (const [k, el] of Object.entries(f)) { const v = el.value.trim(); body[k] = !NUM.includes(k) ? v : v === "" ? kDef[k] ?? 0 : Number(v); }
     if (mkDef.checked && !t.default) body.default = true;
+    if (new TextEncoder().encode(body.name).length > 63) return toast("The name must be at most 63 bytes (letters with accents take 2, many other scripts 3)");
     await api("PUT", tpath(id), body);
     selectTarget(id);
     toast(tid ? "Saved" : "Saved as " + id); await refresh(); goTo("#target");
@@ -474,7 +477,7 @@ async function viewTarget(arg) {
       opt("Address type", "The kind of Bluetooth address the MAC is. nRF52 boards, MeshCore repeaters among them, use random. Scan below shows the type for each device and Use as target fills it in.", f.addr_type),
       field("board", "ID (optional)", "A name for what this repeater is, such as its board: rak4631. Choose it yourself. When the staged image has an ID too (the one typed when staging it on the Image page, or the boards a manifest lists), the two must match (capitals don't matter) or DFU32 refuses to flash, which keeps another board's image off this repeater. If either is blank, nothing is compared. Up to 31 characters, no spaces.", { placeholder: "rak4631" }),
       field("manifest_url", "Manifest URL (optional)", ["Only for fetching images from a server: the http:// address of the manifest.json that ", h("code", "tools/dfu32_pack.py"), " writes next to the image, on a web server DFU32 can reach. HTTPS isn't supported. Leave it blank to upload images on the Image page instead."], { placeholder: "http://server/rak4631/manifest.json" }),
-      field("name", "Name (optional)", "What this page calls the target, such as attic or roof; up to 63 characters. " + (tid ? "The API and the console know it by its id, " + tid + ", which stays as it is." : "The API and the console know it by an id made from the name (or else the ID): a-z, 0-9 and '-'."), { placeholder: "attic", maxlength: 63 })),
+      field("name", "Name (optional)", "What this page calls the target, such as attic or roof; up to 63 bytes (63 plain letters, fewer with accents or other scripts). " + (tid ? "The API and the console know it by its id, " + tid + ", which stays as it is." : "The API and the console know it by an id made from the name (or else the ID): a-z, 0-9 and '-'."), { placeholder: "attic", maxlength: 63 })),
     h("div.row", { style: "margin-top:.7rem" }, opt("Make this the default", "The target the console's check, stage, probe and flash commands act on, and the one this page picks until a browser chooses another. The first target is always the default; deleting the default makes the first remaining target the default.", mkDef, true)),
     h("details", h("summary", "Tuning"), h("p.mute.small", "The defaults suit most repeaters. Clear a field and save to go back to its default."), h("div.form",
       knob("interval_ms", "Interval (ms)", kDef.interval_ms, 15, 100, "The BLE connection interval DFU32 asks for during the transfer, 15–100 ms, rounded down to a multiple of 1.25; default 30. Shorter is faster (about one packet per interval): on the bench 15, 20 and 30 worked, and the OTAFIX bootloader lost the link at 11.25 and below, so 15 is the floor. A run's page shows the interval each attempt used."),

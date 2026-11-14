@@ -465,6 +465,11 @@ class FakeDfu32:
         if not self.staged:
             self.emit("Staged image failed checks: nothing staged. Nothing was touched.\n")
             return
+        t = self.target
+        if self.staged["board"] and t["board"] and self.staged["board"].lower() != t["board"].lower():
+            self.emit(f"BOARD_MISMATCH: the staged image is for ID \"{self.staged['board']}\", target "
+                      f"'{t['id'] or 'target'}' is \"{t['board']}\". Nothing was touched.\n")
+            return
         interval = int(argv[argv.index("--interval") + 1]) if "--interval" in argv else 30
         wifi_on = not ("--wifi" in argv and argv[argv.index("--wifi") + 1] == "off")  # on by default
         self.lease = "console"
