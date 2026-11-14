@@ -17,6 +17,7 @@
 #include "dfu32_core/json.hpp"
 #include "dfu32_core/manifest.hpp"
 #include "dfu32_core/ota_image.hpp"
+#include "dfu32_core/target_table.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
@@ -233,21 +234,35 @@ std::string busy_detail() {
     return std::string("busy: ") + (h != nullptr ? h : "another operation") + " is using BLE/staging";
 }
 
-bool target_exists(const TargetConfig& t) {
-    return !(t.id.empty() && t.mac.empty() && t.board.empty() && t.manifest_url.empty());
+esp_err_t send_no_target(httpd_req_t* req, const std::string& id) {
+    return send_error(req, "404 Not Found", "NOT_FOUND", "no target '" + id + "'");
 }
 
-/// Loads the target and checks it matches {id}; sends 404 otherwise.
+esp_err_t send_settings_unreadable(httpd_req_t* req) {
+    return send_error(req, "500 Internal Server Error", "INTERNAL", "cannot read settings");
+}
+
+/// Loads target {id}; sends 404 (or 500) itself otherwise.
 bool load_target_for(httpd_req_t* req, const std::string& id, TargetConfig& t, esp_err_t& sent) {
-    if (!config::load_target(t)) {
-        sent = send_error(req, "500 Internal Server Error", "INTERNAL", "cannot read settings");
+    bool found = false;
+    if (!config::load_target(id, t, found)) {
+        sent = send_settings_unreadable(req);
         return false;
     }
-    if (!target_exists(t) || t.effective_id() != id) {
-        sent = send_error(req, "404 Not Found", "NOT_FOUND", "no target '" + id + "'");
+    if (!found) {
+        sent = send_no_target(req, id);
         return false;
     }
     return true;
+}
+
+/// A stored target as the API shows it: the record (with its effective id)
+/// and whether it is the default.
+void write_target(json::ObjectWriter& w, const TargetTable& table, const StoredTarget& st) {
+    TargetConfig c = st.cfg;
+    c.id = st.id();  // an id-less legacy record is the target "target"
+    write_json(w, c);
+    w.add_bool("default", table.is_default(c.id));
 }
 
 void write_staged(json::ObjectWriter& w) {
@@ -302,18 +317,28 @@ esp_err_t h_status(httpd_req_t* req) {
     write_json(jb, job::snapshot(), uptime_s());
     w.add("job", std::move(jb));
 
+    // Public: never the MACs, only what the status view needs.
     json::ArrayWriter targets;
-    TargetConfig t;
-    if (config::load_target(t) && target_exists(t)) {
-        json::ObjectWriter o;
-        o.add("id", t.effective_id())
-            .add("name", t.name)
-            .add("board", t.board)
-            .add("last_ok_version", t.last_ok_version)
-            .add("last_ok_at", static_cast<int64_t>(t.last_ok_at));
-        targets.push(std::move(o));
+    TargetTable table;
+    const bool loaded = config::load_targets(table);
+    if (loaded) {
+        for (const StoredTarget& st : table.targets()) {
+            json::ObjectWriter o;
+            o.add("id", st.id())
+                .add("name", st.cfg.name)
+                .add("board", st.cfg.board)
+                .add("last_ok_version", st.cfg.last_ok_version)
+                .add("last_ok_at", static_cast<int64_t>(st.cfg.last_ok_at))
+                .add_bool("default", table.is_default(st.id()));
+            targets.push(std::move(o));
+        }
     }
     w.add("targets", std::move(targets));
+    if (loaded && !table.empty()) {
+        w.add("default_target", table.default_id());
+    } else {
+        w.add_null("default_target");
+    }
     write_staged(w);
     return send_obj(req, "200 OK", w);
 }
@@ -335,33 +360,38 @@ esp_err_t h_claim(httpd_req_t* req) {
 }
 
 esp_err_t h_targets(httpd_req_t* req) {
-    TargetConfig t;
-    if (!config::load_target(t)) return send_error(req, "500 Internal Server Error", "INTERNAL");
+    TargetTable table;
+    if (!config::load_targets(table)) return send_settings_unreadable(req);
     json::ArrayWriter arr;
-    if (target_exists(t)) {
+    for (const StoredTarget& st : table.targets()) {
         json::ObjectWriter o;
-        write_json(o, t);
-        o.add("id", t.effective_id());
+        write_target(o, table, st);
         arr.push(std::move(o));
     }
     json::ObjectWriter w;
     w.add("targets", std::move(arr));
+    if (table.empty()) {
+        w.add_null("default");
+    } else {
+        w.add("default", table.default_id());
+    }
+    w.add("max_targets", static_cast<int64_t>(table.max_targets()));
     return send_obj(req, "200 OK", w);
 }
 
 esp_err_t h_target(httpd_req_t* req, const RouteMatch& m) {
-    esp_err_t sent = ESP_OK;
     if (req->method == HTTP_GET) {
-        TargetConfig t;
-        if (!load_target_for(req, m.id, t, sent)) return sent;
+        TargetTable table;
+        if (!config::load_targets(table)) return send_settings_unreadable(req);
+        const StoredTarget* st = table.find(m.id);
+        if (st == nullptr) return send_no_target(req, m.id);
         json::ObjectWriter w;
-        write_json(w, t);
-        w.add("id", t.effective_id());
+        write_target(w, table, *st);
         runlog::RunLog* rl = runlog::idf::open_run_log();
         bool found = false;
         if (rl != nullptr) {
             for (const auto& slot : rl->list()) {
-                if (run_matches(slot.json, t)) {
+                if (run_matches(slot.json, st->cfg)) {
                     w.add_json("last_run", slot.json);
                     found = true;
                     break;
@@ -377,31 +407,57 @@ esp_err_t h_target(httpd_req_t* req, const RouteMatch& m) {
     // between this check and the save).
     job::Lease lease("config");
     if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
-    TargetConfig t;
-    if (!config::load_target(t)) return send_error(req, "500 Internal Server Error", "INTERNAL");
-    const bool exists = target_exists(t);
+    TargetTable table;
+    if (!config::load_targets(table)) return send_settings_unreadable(req);
 
     if (req->method == HTTP_DELETE) {
-        if (!exists || t.effective_id() != m.id) return send_error(req, "404 Not Found", "NOT_FOUND");
-        if (!config::erase_target()) return send_error(req, "500 Internal Server Error", "INTERNAL");
+        TargetWrites w;
+        if (!table.remove(m.id, w)) return send_no_target(req, m.id);
+        if (!config::commit_targets(table, w)) {
+            return send_error(req, "500 Internal Server Error", "INTERNAL", "NVS write failed");
+        }
+        ESP_LOGI(TAG, "target '%s' deleted; default target: %s", m.id.c_str(),
+                 table.empty() ? "none" : table.default_id().c_str());
         return send_no_content(req);
     }
 
-    // PUT: create or update. v1 has one target; an unnamed (console-made)
-    // target adopts the first id it is PUT under.
-    if (exists && !t.id.empty() && t.id != m.id) {
-        return send_error(req, "409 Conflict", "TARGET_LIMIT",
-                          "v1 supports one target ('" + t.id + "'); DELETE it first or PUT to its id");
-    }
+    // PUT: create (a new id is always a new target) or update.
     std::string body;
     esp_err_t body_err = ESP_OK;
     if (!read_body(req, body, body_err)) return body_err;
-    if (!exists) t = TargetConfig{};
-    if (auto e = apply_json(body, m.id, t); !e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
-    if (!config::save_target(t)) return send_error(req, "500 Internal Server Error", "INTERNAL", "NVS write failed");
+    const TargetTable::PutResult r = table.put_json(m.id, body);
+    switch (r.status) {
+        case TargetTable::PutStatus::Created:
+        case TargetTable::PutStatus::Updated: break;
+        case TargetTable::PutStatus::Full: return send_error(req, "409 Conflict", "TARGET_LIMIT", r.error);
+        case TargetTable::PutStatus::Invalid: return send_error(req, "400 Bad Request", "BAD_REQUEST", r.error);
+    }
+    if (!config::commit_targets(table, r.writes)) {
+        return send_error(req, "500 Internal Server Error", "INTERNAL", "NVS write failed");
+    }
+    const StoredTarget* st = table.find(m.id);
+    if (st == nullptr) return send_error(req, "500 Internal Server Error", "INTERNAL", "target not stored");
     json::ObjectWriter w;
-    write_json(w, t);
-    return send_obj(req, exists ? "200 OK" : "201 Created", w);
+    write_target(w, table, *st);
+    return send_obj(req, r.status == TargetTable::PutStatus::Created ? "201 Created" : "200 OK", w);
+}
+
+esp_err_t h_target_default(httpd_req_t* req, const RouteMatch& m) {
+    // The same lease as PUT: a job or a console command must not see the
+    // default change under it.
+    job::Lease lease("config");
+    if (!lease.ok()) return send_error(req, "409 Conflict", "BUSY", busy_detail());
+    TargetTable table;
+    if (!config::load_targets(table)) return send_settings_unreadable(req);
+    TargetWrites w;
+    if (!table.set_default(m.id, w)) return send_no_target(req, m.id);
+    if (!config::commit_targets(table, w)) {
+        return send_error(req, "500 Internal Server Error", "INTERNAL", "NVS write failed");
+    }
+    ESP_LOGI(TAG, "default target: '%s'", m.id.c_str());
+    json::ObjectWriter o;
+    o.add("default", table.default_id());
+    return send_obj(req, "200 OK", o);
 }
 
 esp_err_t h_check(httpd_req_t* req, const RouteMatch& m) {
@@ -561,8 +617,8 @@ esp_err_t h_staging(httpd_req_t* req) {
 }
 
 esp_err_t h_scan(httpd_req_t* req, const ScanRequest& sr) {
-    TargetConfig t;
-    config::load_target(t);
+    TargetTable table;
+    config::load_targets(table);  // unreadable: nothing matches
     std::vector<ble::Advert> list;
     {
         job::Lease lease("scan");
@@ -585,8 +641,8 @@ esp_err_t h_scan(httpd_req_t* req, const ScanRequest& sr) {
         } else {
             o.add_null("dfu");
         }
-        if (target_exists(t) && matches_target(addr, t.mac)) {
-            o.add("matches_target", t.effective_id());
+        if (const std::string tid = matching_target_id(table, addr); !tid.empty()) {
+            o.add("matches_target", tid);
         } else {
             o.add_null("matches_target");
         }
@@ -905,20 +961,40 @@ esp_err_t h_stage_upload(httpd_req_t* req) {
         return send_error(req, "409 Conflict", "BUSY", busy_detail());
     }
 
-    // The image isn't bound to the target (any target may flash it), but the
+    // The image isn't bound to a target (any target may flash it), but the
     // flash will re-check its size against the target's limit and its board
     // against the target's board (when both are set), so check both now,
-    // before anything is erased, rather than fail later at the repeater.
-    TargetConfig t;
-    StageMeta meta;
-    if (config::load_target(t) && target_exists(t)) {
-        meta.max_app_size = t.max_app_size;
-        if (!staged_board_ok(q.board, t.board)) {
+    // before anything is erased, rather than fail later at the repeater:
+    // against target= when given, else the default target or the first one
+    // whose board accepts the image. With no targets there is nothing to check.
+    TargetTable table;
+    if (!config::load_targets(table)) {
+        drain(req, remaining);
+        return send_settings_unreadable(req);
+    }
+    const StoredTarget* against = nullptr;
+    if (!q.target.empty()) {
+        against = table.find(q.target);
+        if (against == nullptr) {
+            drain(req, remaining);
+            return send_no_target(req, q.target);
+        }
+        if (!staged_board_ok(q.board, against->cfg.board)) {
             drain(req, remaining);
             return send_error(req, "422 Unprocessable Content", "BOARD_MISMATCH",
-                              "the image is for ID \"" + q.board + "\", the target is \"" + t.board + "\"");
+                              "the image is for ID \"" + q.board + "\", target '" + against->id() + "' is \"" +
+                                  against->cfg.board + "\"");
+        }
+    } else if (!table.empty()) {
+        against = staging_target_for(table, q.board);
+        if (against == nullptr) {
+            drain(req, remaining);
+            return send_error(req, "422 Unprocessable Content", "BOARD_MISMATCH",
+                              "the image is for ID \"" + q.board + "\", and no stored target has that ID");
         }
     }
+    StageMeta meta;
+    if (against != nullptr) meta.max_app_size = against->cfg.max_app_size;
     meta.board = q.board;
     meta.manifest_url = q.source;
     meta.staged_at = net::unix_time();
@@ -941,8 +1017,8 @@ esp_err_t h_stage_upload(httpd_req_t* req) {
         return send_error(req, http, to_string(st.code), detail);
     };
     if (Status st = w.begin_upload(q.dat, up, meta); !st.ok()) return fail(st);
-    ESP_LOGI(TAG, "image upload: \"%s\" (%s), %u B", q.version.c_str(), q.source.c_str(),
-             static_cast<unsigned>(req->content_len));
+    ESP_LOGI(TAG, "image upload: \"%s\" (%s), %u B, checked against %s", q.version.c_str(), q.source.c_str(),
+             static_cast<unsigned>(req->content_len), against != nullptr ? against->id().c_str() : "no target");
 
     std::vector<uint8_t> buf(kOtaChunk);
     std::string err;
@@ -1097,6 +1173,7 @@ esp_err_t dispatch(httpd_req_t* req) {
         case Route::TargetStage: return h_stage(req, m);
         case Route::TargetFlash: return h_flash(req, m);
         case Route::TargetRuns: return h_target_runs(req, m);
+        case Route::TargetDefault: return h_target_default(req, m);
         case Route::JobAbort: return h_abort(req);
         case Route::Run: return h_run(req, m);
         case Route::Staging: return req->method == HTTP_POST ? queue_stage_upload(req) : h_staging(req);

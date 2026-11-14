@@ -100,7 +100,9 @@ bool from_json(std::string_view json, TargetConfig& out);
 /// PUT /api/v1/targets/{id}: merges the fields present in `body` into `t`
 /// (a new target starts from defaults) and validates the result. `id` comes
 /// from the path; a body "id" must match it. last_ok_* are read-only and
-/// ignored, so a GET result can be sent back. Unknown fields are refused.
+/// ignored, and so is "last_run", so a GET result can be sent back; so is
+/// "default" (a boolean, which TargetTable::put_json acts on). Unknown fields
+/// are refused.
 /// Returns "" on success, otherwise the reason (and `t` is unchanged).
 std::string apply_json(std::string_view body, const std::string& id, TargetConfig& t);
 

@@ -7,6 +7,7 @@
 
 #include "dfu32_core/api_core.hpp"
 #include "dfu32_core/json.hpp"
+#include "dfu32_core/target_table.hpp"
 
 using namespace dfu32::api;
 
@@ -42,6 +43,15 @@ TEST_CASE("API: route matching", "[api]") {
     t = match_route("/api/v1/targets/attic/runs");
     CHECK(t.route == Route::TargetRuns);
     CHECK(t.id == "attic");
+    t = match_route("/api/v1/targets/garage-2/default");
+    CHECK(t.route == Route::TargetDefault);
+    CHECK(t.id == "garage-2");
+    CHECK(match_route("/api/v1/targets/attic/default/").route == Route::TargetDefault);
+    CHECK(match_route("/api/v1/targets/attic/default?x=1").route == Route::TargetDefault);
+    // A target may itself be called "default".
+    t = match_route("/api/v1/targets/default");
+    CHECK(t.route == Route::Target);
+    CHECK(t.id == "default");
 
     auto r = match_route("/api/v1/runs/17");
     CHECK(r.route == Route::Run);
@@ -50,7 +60,9 @@ TEST_CASE("API: route matching", "[api]") {
     for (const char* bad : {"/", "/api/v1/", "/api/v1", "/api/v2/status", "/api/v1/statuses", "/api/v1//status",
                             "/api/v1/targets/attic/erase", "/api/v1/targets/attic/check/x", "/api/v1/runs/0",
                             "/api/v1/runs/x", "/api/v1/runs/007", "/api/v1/runs/0x10", "/api/v1/runs/99999999999",
-                            "/api/v1/jobs/1/abort", "/api/v1/targets//check", "/api/v1/a/b/c/d/e"}) {
+                            "/api/v1/jobs/1/abort", "/api/v1/targets//check", "/api/v1/a/b/c/d/e",
+                            "/api/v1/targets//default", "/api/v1/targets/attic/default/x",
+                            "/api/v1/default"}) {
         INFO(bad);
         CHECK(match_route(bad).route == Route::NotFound);
         CHECK(match_route(bad).id.empty());
@@ -65,6 +77,11 @@ TEST_CASE("API: methods and public routes", "[api]") {
     CHECK_FALSE(method_allowed(Route::Target, Method::Post));
     CHECK(method_allowed(Route::TargetFlash, Method::Post));
     CHECK_FALSE(method_allowed(Route::TargetFlash, Method::Get));
+    CHECK(method_allowed(Route::TargetDefault, Method::Post));
+    CHECK_FALSE(method_allowed(Route::TargetDefault, Method::Get));
+    CHECK_FALSE(method_allowed(Route::TargetDefault, Method::Put));
+    CHECK_FALSE(method_allowed(Route::TargetDefault, Method::Delete));
+    CHECK_FALSE(is_public(Route::TargetDefault));
     CHECK(method_allowed(Route::Staging, Method::Delete));
     CHECK_FALSE(method_allowed(Route::Staging, Method::Put));
     CHECK(method_allowed(Route::Staging, Method::Post));  // upload
@@ -115,6 +132,12 @@ TEST_CASE("API: staging upload query", "[api][upload]") {
     CHECK(u.board.empty());
     CHECK_FALSE(u.has_sha256);
     CHECK(u.source == "upload");
+    CHECK(u.target.empty());
+
+    REQUIRE(parse_staging_upload("/api/v1/staging?dat=00&version=v1&target=garage-2", u).empty());
+    CHECK(u.target == "garage-2");
+    REQUIRE(parse_staging_upload("/api/v1/staging?dat=00&version=v1&target=", u).empty());
+    CHECK(u.target.empty());
 
     const std::string sha(64, 'a');
     REQUIRE(parse_staging_upload("/api/v1/staging?version=v1&dat=00AA&board=rak4631&sha256=" + sha +
@@ -152,6 +175,58 @@ TEST_CASE("API: staging upload query", "[api][upload]") {
     refused("?dat=00&version=v1&sha256=abc", "sha256");
     refused("?dat=00&version=v1&name=a%00b", "control");
     refused("?dat=00&version=v%zz", "%-escape");
+    refused("?dat=00&version=v1&target=Attic", "target: id may contain only");
+    refused("?dat=00&version=v1&target=a%2Fb", "target: id may contain only");
+    refused("?dat=00&version=v1&target=" + std::string(32, 't'), "target: id longer");
+    refused("?dat=00&version=v1&target=a%zz", "target: malformed");
+}
+
+TEST_CASE("API: which target an upload is checked against", "[api][upload]") {
+    using dfu32::TargetConfig;
+    using dfu32::TargetTable;
+    const auto make = [](const std::string& id, const std::string& board) {
+        TargetConfig t;
+        t.id = id;
+        t.board = board;
+        return t;
+    };
+
+    TargetTable none(5);
+    CHECK(staging_target_for(none, "rak4631") == nullptr);
+    CHECK(staging_target_for(none, "") == nullptr);
+
+    TargetTable table(5);
+    REQUIRE(table.put(make("attic", "heltec_t114")).status == TargetTable::PutStatus::Created);
+    REQUIRE(table.put(make("garage", "rak4631")).status == TargetTable::PutStatus::Created);
+    REQUIRE(table.put(make("shed", "RAK4631")).status == TargetTable::PutStatus::Created);
+    REQUIRE(table.default_id() == "attic");
+
+    // The default target when its board accepts the image.
+    const auto* st = staging_target_for(table, "heltec_t114");
+    REQUIRE(st != nullptr);
+    CHECK(st->id() == "attic");
+    // An image without a board, or any image when the default has none: the default.
+    st = staging_target_for(table, "");
+    REQUIRE(st != nullptr);
+    CHECK(st->id() == "attic");
+    // Otherwise the first target in slot order whose board accepts it.
+    st = staging_target_for(table, "rak4631");
+    REQUIRE(st != nullptr);
+    CHECK(st->id() == "garage");
+    // The default wins over an earlier slot.
+    dfu32::TargetWrites w;
+    REQUIRE(table.set_default("shed", w));
+    st = staging_target_for(table, "rak4631");
+    REQUIRE(st != nullptr);
+    CHECK(st->id() == "shed");
+    // No target takes it.
+    CHECK(staging_target_for(table, "xiao_nrf52") == nullptr);
+
+    // A target with no board accepts any image.
+    REQUIRE(table.put(make("bench", "")).status == TargetTable::PutStatus::Created);
+    st = staging_target_for(table, "xiao_nrf52");
+    REQUIRE(st != nullptr);
+    CHECK(st->id() == "bench");
 }
 
 TEST_CASE("API: base64url (RFC 4648 test vectors, url alphabet, no padding)", "[api]") {
@@ -268,6 +343,29 @@ TEST_CASE("API: BLE scan view", "[api]") {
     CHECK(matches_target("F4:1C:36:A7:33:96", "F4:1C:36:A7:33:95"));
     CHECK_FALSE(matches_target("F4:1C:36:A7:33:97", "F4:1C:36:A7:33:95"));
     CHECK_FALSE(matches_target("F4:1C:36:A7:33:95", ""));
+
+    dfu32::TargetTable table(5);
+    CHECK(matching_target_id(table, "F4:1C:36:A7:33:95").empty());
+    dfu32::TargetConfig a;
+    a.id = "attic";
+    a.mac = "F4:1C:36:A7:33:95";
+    dfu32::TargetConfig b;
+    b.id = "garage";
+    b.mac = "F4:1C:36:A7:33:96";  // attic's MAC+1: attic still matches first
+    dfu32::TargetConfig c;  // id-less legacy target, effective id "target"
+    c.mac = "C2:4E:11:9A:03:7F";
+    dfu32::TargetConfig d;
+    d.id = "nomac";
+    REQUIRE(table.put(d).status == dfu32::TargetTable::PutStatus::Created);
+    REQUIRE(table.put(a).status == dfu32::TargetTable::PutStatus::Created);
+    REQUIRE(table.put(b).status == dfu32::TargetTable::PutStatus::Created);
+    REQUIRE(table.put(c).status == dfu32::TargetTable::PutStatus::Created);
+    CHECK(matching_target_id(table, "f4:1c:36:a7:33:95") == "attic");
+    CHECK(matching_target_id(table, "F4:1C:36:A7:33:96") == "attic");
+    CHECK(matching_target_id(table, "F4:1C:36:A7:33:97") == "garage");
+    CHECK(matching_target_id(table, "C2:4E:11:9A:03:80") == "target");
+    CHECK(matching_target_id(table, "00:11:22:33:44:55").empty());
+    CHECK(matching_target_id(table, "nope").empty());
 }
 
 TEST_CASE("API: scan and fault request bodies", "[api]") {
