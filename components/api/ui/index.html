@@ -223,7 +223,12 @@ let checkResult = null, tcfg = null, tcfgFor = null;
 // The selected target's own settings (authenticated): whether it has a manifest URL to fetch from.
 async function viewStatus() {
   const tid = tcfgFor = targetId();
-  tcfg = tid ? await api("GET", tpath(tid)).catch(() => null) : null;
+  // Drop the previous target's settings at once: a status refresh during the
+  // GET would otherwise offer its source choices (manifest) for this target.
+  tcfg = null;
+  const got = tid ? await api("GET", tpath(tid)).catch(() => null) : null;
+  if (tcfgFor !== tid) return;  // the selection moved again; that call renders
+  tcfg = got;
   renderStatus();
 }
 function renderStatus() {

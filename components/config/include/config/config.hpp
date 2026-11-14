@@ -30,8 +30,8 @@ size_t max_targets();
 bool load_targets(TargetTable& out);
 
 /// Persists the writes a TargetTable mutation returned, in order: the record
-/// in `w.save_slot` (from `table`), the erase of `w.erase_slot`, then the
-/// default. Stops at the first failure and returns false; a failed write
+/// in `w.save_slot` (from `table`), the erase of `w.erase_slot`, the
+/// default, then the skipped records in `w.purge_slots`. Stops at the first failure and returns false; a failed write
 /// leaves that key as it was.
 bool commit_targets(const TargetTable& table, const TargetWrites& w);
 

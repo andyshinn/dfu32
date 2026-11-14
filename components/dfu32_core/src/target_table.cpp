@@ -19,6 +19,13 @@ bool TargetTable::add_loaded(uint8_t slot, TargetConfig t) {
     return true;
 }
 
+void TargetTable::add_skipped(uint8_t slot) {
+    if (slot < kMaxTargetSlots && at_slot(slot) == nullptr &&
+        std::find(skipped_.begin(), skipped_.end(), slot) == skipped_.end()) {
+        skipped_.push_back(slot);
+    }
+}
+
 void TargetTable::set_loaded_default(std::string id) { stored_default_ = std::move(id); }
 
 const StoredTarget* TargetTable::find(std::string_view id) const {
@@ -64,10 +71,15 @@ std::optional<uint8_t> TargetTable::free_slot() const {
     // Any slot NVS can hold, not just those below max_: a table loaded from a
     // build with a larger cap may already use higher slots. size() < max_ is
     // what enforces the cap.
+    // A skipped slot still holds a key until it is purged; prefer real gaps.
+    std::optional<uint8_t> skipped;
     for (size_t s = 0; s < kMaxTargetSlots; ++s) {
-        if (at_slot(static_cast<uint8_t>(s)) == nullptr) return static_cast<uint8_t>(s);
+        const auto slot = static_cast<uint8_t>(s);
+        if (at_slot(slot) != nullptr) continue;
+        if (std::find(skipped_.begin(), skipped_.end(), slot) == skipped_.end()) return slot;
+        if (!skipped) skipped = slot;
     }
-    return std::nullopt;
+    return skipped;
 }
 
 void TargetTable::insert_sorted(StoredTarget st) {
@@ -82,6 +94,20 @@ void TargetTable::sync_default(TargetWrites& w) {
         w.default_id = resolved;
         stored_default_ = resolved;
     }
+}
+
+void TargetTable::pin_stale_default(TargetWrites& w) {
+    if (stored_default_.empty() || find(stored_default_) != nullptr) return;
+    stored_default_ = default_id();
+    w.default_id = stored_default_;
+}
+
+void TargetTable::purge_skipped(TargetWrites& w) {
+    for (const uint8_t slot : skipped_) {
+        // A create may have just reused it (only when no other slot was free).
+        if (at_slot(slot) == nullptr) w.purge_slots.push_back(slot);
+    }
+    skipped_.clear();
 }
 
 namespace {
@@ -99,6 +125,7 @@ TargetTable::PutResult TargetTable::put_json(const std::string& id, std::string_
         // apply_json() accepted the body, so "default", if present, is a boolean.
         json::Doc doc;
         if (doc.parse(body) && doc.root().get("default").boolean(false)) set_default(id, r.writes);
+        purge_skipped(r.writes);
     }
     return r;
 }
@@ -128,6 +155,7 @@ TargetTable::PutResult TargetTable::put_json_record(const std::string& id, std::
         r.error = full_reason(max_);
         return r;
     }
+    pin_stale_default(r.writes);
     insert_sorted(StoredTarget{*slot, std::move(t)});
     r.status = PutStatus::Created;
     r.slot = *slot;
@@ -137,6 +165,12 @@ TargetTable::PutResult TargetTable::put_json_record(const std::string& id, std::
 }
 
 TargetTable::PutResult TargetTable::put(TargetConfig t) {
+    PutResult r = put_record(std::move(t));
+    if (r.status == PutStatus::Created || r.status == PutStatus::Updated) purge_skipped(r.writes);
+    return r;
+}
+
+TargetTable::PutResult TargetTable::put_record(TargetConfig t) {
     PutResult r;
     if (!t.mac.empty()) {
         if (std::string m = normalize_mac(t.mac); !m.empty()) t.mac = std::move(m);
@@ -159,6 +193,7 @@ TargetTable::PutResult TargetTable::put(TargetConfig t) {
         r.error = full_reason(max_);
         return r;
     }
+    pin_stale_default(r.writes);
     insert_sorted(StoredTarget{*slot, std::move(t)});
     r.status = PutStatus::Created;
     r.slot = *slot;
@@ -173,6 +208,7 @@ bool TargetTable::remove(std::string_view id, TargetWrites& w) {
     w.erase_slot = it->slot;
     targets_.erase(it);
     sync_default(w);
+    purge_skipped(w);
     return true;
 }
 
@@ -183,6 +219,7 @@ bool TargetTable::set_default(std::string_view id, TargetWrites& w) {
         stored_default_ = st->id();
         w.default_id = stored_default_;
     }
+    purge_skipped(w);
     return true;
 }
 
@@ -193,6 +230,7 @@ std::string TargetTable::rename(std::string_view from, const std::string& to, Ta
     if (auto e = validate_target_id(to); !e.empty()) return e;
     if (st->id() == to) return {};
     if (find(to) != nullptr) return "a target with id '" + to + "' already exists";
+    pin_stale_default(w);
     const bool was_default = is_default(from);
     st->cfg.id = to;
     w.save_slot = st->slot;
@@ -200,6 +238,7 @@ std::string TargetTable::rename(std::string_view from, const std::string& to, Ta
         stored_default_ = to;
         w.default_id = to;
     }
+    purge_skipped(w);
     return {};
 }
 

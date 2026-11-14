@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -288,18 +289,26 @@ bool set_mac(TargetConfig& t, const char* mac_arg, const char* type_arg) {
 }
 
 int cmd_target(int argc, char** argv) {
+    const std::string field = argc >= 2 ? argv[1] : "";
+    const std::string value = argc >= 3 ? argv[2] : "";
+    const bool read_only = field.empty() || field == "list";
+    // Changes hold the device-wide lease like the API's target PUT/DELETE, and
+    // load the table under it: otherwise a console `target add` and an API
+    // PUT could both pick the same free slot and one target would be lost.
+    std::optional<job::Lease> lease;
+    if (!read_only) {
+        lease.emplace("config");
+        if (!acquire(*lease)) return 1;
+    }
     TargetTable table;
     if (!config::load_targets(table)) {
         std::printf("Failed to read settings from NVS\n");
         return 1;
     }
-    if (argc < 2) {
+    if (field.empty()) {
         show_default(table);
         return 0;
     }
-    const std::string field = argv[1];
-    const std::string value = argc >= 3 ? argv[2] : "";
-
     if (field == "list") {
         list_targets(table);
         return 0;

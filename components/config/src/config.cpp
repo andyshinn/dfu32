@@ -63,7 +63,9 @@ bool load_targets(TargetTable& out) {
         std::string json;
         if (get_str(h, slot_key(slot).c_str(), json)) {
             if (!from_json(json, t)) {
-                ESP_LOGE(TAG, "stored target record %s is corrupt; ignoring it", slot_key(slot).c_str());
+                ESP_LOGE(TAG, "stored target record %s is corrupt; ignoring it (erased with the next target change)",
+                         slot_key(slot).c_str());
+                out.add_skipped(slot);
                 continue;
             }
         } else if (slot == 0) {
@@ -80,7 +82,9 @@ bool load_targets(TargetTable& out) {
         }
         if (blank(t)) continue;
         if (!out.add_loaded(slot, std::move(t))) {
-            ESP_LOGW(TAG, "stored target %s duplicates another target's id; ignoring it", slot_key(slot).c_str());
+            ESP_LOGW(TAG, "stored target %s duplicates another target's id; ignoring it (erased with the next target change)",
+                     slot_key(slot).c_str());
+            out.add_skipped(slot);
         }
     }
     std::string def;
@@ -112,6 +116,12 @@ bool commit_targets(const TargetTable& table, const TargetWrites& w) {
     if (ok && w.default_id) {
         ok = (w.default_id->empty() ? erase_key(h, kDefault) : nvs_set_str(h, kDefault, w.default_id->c_str()) == ESP_OK) &&
              nvs_commit(h) == ESP_OK;
+    }
+    for (const uint8_t slot : w.purge_slots) {
+        if (!ok) break;
+        ok = erase_key(h, slot_key(slot).c_str()) && nvs_commit(h) == ESP_OK;
+        if (ok) ESP_LOGI(TAG, "erased skipped target record %s", slot_key(slot).c_str());
+        legacy = legacy || slot == 0;
     }
     if (ok && legacy) {
         // Best-effort: the slot-0 record supersedes the M1 keys.

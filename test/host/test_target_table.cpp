@@ -312,3 +312,85 @@ TEST_CASE("Target table: \"default\" in a PUT body", "[target_table]") {
     CHECK(r.status == TargetTable::PutStatus::Updated);
     CHECK(t.find("a")->cfg.last_ok_version.empty());  // read-only
 }
+
+TEST_CASE("Target table: a stale stored default isn't adopted by a new target", "[target_table]") {
+    // Power cut after a delete (or rename) wrote the record but not tgt_def.
+    TargetTable t(3);
+    REQUIRE(t.add_loaded(1, make("a")));
+    t.set_loaded_default("b");
+    CHECK(t.default_id() == "a");
+    // "b" lands in slot 0, ahead of "a", and its id matches the stale key.
+    auto r = t.put_json("b", "{}");
+    REQUIRE(r.status == TargetTable::PutStatus::Created);
+    CHECK(r.slot == 0);
+    CHECK(t.default_id() == "a");
+    REQUIRE(r.writes.default_id);
+    CHECK(*r.writes.default_id == "a");  // the key is repaired
+
+    // The same through rename(), and through put().
+    TargetTable u(3);
+    REQUIRE(u.add_loaded(0, make("a")));
+    REQUIRE(u.add_loaded(1, make("x")));
+    u.set_loaded_default("b");
+    TargetWrites w;
+    CHECK(u.rename("x", "b", w).empty());
+    CHECK(u.default_id() == "a");
+    REQUIRE(w.default_id);
+    CHECK(*w.default_id == "a");
+
+    TargetTable v(3);
+    REQUIRE(v.add_loaded(2, make("a")));
+    v.set_loaded_default("b");
+    r = v.put(make("b"));
+    REQUIRE(r.status == TargetTable::PutStatus::Created);
+    CHECK(v.default_id() == "a");
+
+    // Stale with no targets at all: the first target created is the default.
+    TargetTable e(3);
+    e.set_loaded_default("b");
+    r = e.put_json("b", "{}");
+    CHECK(e.default_id() == "b");
+    REQUIRE(r.writes.default_id);
+    CHECK(*r.writes.default_id == "b");
+}
+
+TEST_CASE("Target table: skipped slots are avoided and purged", "[target_table]") {
+    // Slot 0 is an id-less record ("target"); slot 1 holds a duplicate "target"
+    // and slot 2 a corrupt record. Neither may come back or be reused silently.
+    TargetTable t(5);
+    REQUIRE(t.add_loaded(0, make("")));
+    CHECK_FALSE(t.add_loaded(1, make("target")));
+    t.add_skipped(1);
+    t.add_skipped(2);
+    t.add_skipped(0);  // loaded: ignored
+
+    // A new target takes a real gap, not a skipped slot.
+    auto r = t.put_json("roof", "{}");
+    REQUIRE(r.status == TargetTable::PutStatus::Created);
+    CHECK(r.slot == 3);
+    CHECK(r.writes.purge_slots == std::vector<uint8_t>{1, 2});
+    // Purged once.
+    r = t.put_json("roof", R"({"name":"Roof"})");
+    CHECK(r.writes.purge_slots.empty());
+
+    // Deleting also purges, so the duplicate can't reappear after a reload.
+    TargetTable d(5);
+    REQUIRE(d.add_loaded(0, make("")));
+    d.add_skipped(3);
+    TargetWrites w;
+    REQUIRE(d.remove("target", w));
+    CHECK(w.erase_slot == uint8_t{0});
+    CHECK(w.purge_slots == std::vector<uint8_t>{3});
+
+    // When only skipped slots are free, one is reused (its write replaces the
+    // bad record) and it isn't also purged.
+    TargetTable f(kMaxTargetSlots);
+    for (size_t s = 0; s + 1 < kMaxTargetSlots; ++s) {
+        REQUIRE(f.add_loaded(static_cast<uint8_t>(s), make("t" + std::to_string(s))));
+    }
+    f.add_skipped(static_cast<uint8_t>(kMaxTargetSlots - 1));
+    r = f.put_json("last", "{}");
+    REQUIRE(r.status == TargetTable::PutStatus::Created);
+    CHECK(r.slot == kMaxTargetSlots - 1);
+    CHECK(r.writes.purge_slots.empty());
+}

@@ -38,12 +38,15 @@ struct StoredTarget {
 };
 
 /// What a mutation needs written to NVS, in this order: save_slot, then
-/// erase_slot, then default_id. Empty optionals mean "nothing to do".
+/// erase_slot, then default_id, then purge_slots. Empty means "nothing to do".
 struct TargetWrites {
     std::optional<uint8_t> save_slot;      // write the table's record in this slot
     std::optional<uint8_t> erase_slot;     // remove this slot's record
     std::optional<std::string> default_id;  // write `tgt_def` ("" = erase the key)
-    bool empty() const { return !save_slot && !erase_slot && !default_id; }
+    /// Slots whose stored record was skipped on load (corrupt, or a duplicate
+    /// id): erased with the first change, so they can't come back later.
+    std::vector<uint8_t> purge_slots;
+    bool empty() const { return !save_slot && !erase_slot && !default_id && purge_slots.empty(); }
 };
 
 class TargetTable {
@@ -56,6 +59,9 @@ public:
     /// the slot is out of range or already loaded, or its effective id is
     /// already taken by an earlier slot.
     bool add_loaded(uint8_t slot, TargetConfig t);
+    /// A slot whose record exists but was not loaded (corrupt, or its id is
+    /// a duplicate). New targets avoid it, and the next change erases it.
+    void add_skipped(uint8_t slot);
     /// The raw `tgt_def` value ("" when the key is missing).
     void set_loaded_default(std::string id);
 
@@ -121,16 +127,25 @@ public:
 
 private:
     PutResult put_json_record(const std::string& id, std::string_view body);
+    PutResult put_record(TargetConfig t);
     StoredTarget* find_mut(std::string_view id);
     std::optional<uint8_t> free_slot() const;
     void insert_sorted(StoredTarget st);
     /// Emits a `tgt_def` write when the stored key differs from what the
     /// default resolves to (after a create, delete or rename).
     void sync_default(TargetWrites& w);
+    /// A stored `tgt_def` naming no target (a power cut between a delete or
+    /// rename and its default write) is pinned to the default it resolves to
+    /// now, before a create or rename could reuse that id and silently make
+    /// the new target the default.
+    void pin_stale_default(TargetWrites& w);
+    /// Moves the skipped slots into `w.purge_slots` (once).
+    void purge_skipped(TargetWrites& w);
 
     size_t max_;
     std::vector<StoredTarget> targets_;  // slot order
     std::string stored_default_;         // raw `tgt_def`
+    std::vector<uint8_t> skipped_;       // slots with a record that wasn't loaded
 };
 
 }  // namespace dfu32
