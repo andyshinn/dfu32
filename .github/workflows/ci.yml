@@ -244,13 +244,15 @@ jobs:
           path: ${{ env.BUILD_DIR }}/dfu32-${{ matrix.board }}-debug.bin
           if-no-files-found: error
 
-  # Whether this run updates the installer page. Pushes to main deploy, so the
-  # page always offers the latest main build while DFU32 is pre-release. A
-  # release deploys only if it is the latest stable one, so a pre-release or a
-  # patch to an older line never replaces the page.
+  # Whether this run updates the installer page: only for the latest stable
+  # release, so a pre-release or a patch to an older line never replaces it.
+  # Pushes to main and manual runs build and test but leave the page alone.
+  # They used to deploy, and a deployment is named after its commit: a release
+  # of the commit main had just deployed (merge, then release) got the same
+  # name, so Pages kept main's site and the release never went live.
   pages-gate:
     name: Installer page (deploy?)
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'release'
     runs-on: ubuntu-24.04
     outputs:
       deploy: ${{ steps.check.outputs.deploy }}
@@ -258,36 +260,26 @@ jobs:
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
           TAG: ${{ github.event.release.tag_name }}
           PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           deploy=false
-          if [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; then
-            if [ "$REF" = refs/heads/main ]; then
+          # A SemVer pre-release tag (v0.4.0-rc.1) counts even when the
+          # release wasn't ticked as a pre-release: the flag is read at
+          # publish time, and ticking it afterwards doesn't stop this run.
+          # The regex lives in a variable because bash would take a quoted
+          # one literally.
+          semver_pre='^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'
+          if [ "$PRERELEASE" = true ]; then
+            echo "$TAG is a pre-release: page left alone"
+          elif [[ "$TAG" =~ $semver_pre ]]; then
+            echo "$TAG has a SemVer pre-release suffix: page left alone"
+          else
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+            if [ "$latest" = "$TAG" ]; then
               deploy=true
             else
-              echo "$REF is not main: page left alone"
-            fi
-          elif [ "$EVENT" = release ]; then
-            # A SemVer pre-release tag (v0.4.0-rc.1) counts even when the
-            # release wasn't ticked as a pre-release: the flag is read at
-            # publish time, and ticking it afterwards doesn't stop this run.
-            # The regex lives in a variable because bash would take a quoted
-            # one literally.
-            semver_pre='^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'
-            if [ "$PRERELEASE" = true ]; then
-              echo "$TAG is a pre-release: page left alone"
-            elif [[ "$TAG" =~ $semver_pre ]]; then
-              echo "$TAG has a SemVer pre-release suffix: page left alone"
-            else
-              latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
-              if [ "$latest" = "$TAG" ]; then
-                deploy=true
-              else
-                echo "$TAG is not the latest release ($latest): page left alone"
-              fi
+              echo "$TAG is not the latest release ($latest): page left alone"
             fi
           fi
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
@@ -352,7 +344,6 @@ jobs:
       - name: Earlier releases
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
           TAG: ${{ github.event.release.tag_name }}
           # How many releases the page offers: both the list and the script use it.
           RELEASES: 20
@@ -364,17 +355,15 @@ jobs:
           jq -r '.[].tagName' releases.json | xargs -r -P 4 -I{} sh -c \
             'gh release download "$1" --repo "$GITHUB_REPOSITORY" -p "dfu32-*-merged.bin" -D "releases/$1" \
                || echo "::warning::$1: no merged images to offer"' _ {}
-          if [ "$EVENT" = release ]; then set -- --channel release --tag "$TAG"; else set -- --channel main; fi
           echo '### Versions offered' >> "$GITHUB_STEP_SUMMARY"
           python3 tools/dfu32_web_versions.py --site _site --releases releases.json --assets releases \
-            --limit "$RELEASES" "$@" \
+            --limit "$RELEASES" --channel release --tag "$TAG" \
             | sed 's/^/    /' | tee -a "$GITHUB_STEP_SUMMARY"
 
       # pages-gate ran before this job waited for the pages concurrency group,
       # so a newer release may have been published (and deployed) meanwhile.
       - name: Still the latest release?
         id: recheck
-        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
@@ -388,13 +377,37 @@ jobs:
           fi
 
       - uses: actions/upload-pages-artifact@v5
-        if: steps.recheck.outputs.deploy != 'false'
+        if: steps.recheck.outputs.deploy == 'true'
         with:
           path: _site
 
       - id: deploy
-        if: steps.recheck.outputs.deploy != 'false'
+        if: steps.recheck.outputs.deploy == 'true'
         uses: actions/deploy-pages@v5
+
+      # deploy-pages reports success even when Pages keeps the old site: a
+      # deployment is named after its commit, and v0.5.1, released on the
+      # commit main had just deployed, never went live (SPEC §9.4). So read
+      # the live versions.json back until it lists this release first. The
+      # query string gets past the CDN's cached copy.
+      - name: Live page lists this release
+        if: steps.recheck.outputs.deploy == 'true'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          set -o pipefail
+          for i in $(seq 1 18); do
+            got=$(curl -fsS "${URL%/}/versions.json?run=$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT.$i" \
+                  | jq -r '.versions[0] | "\(.tag) \(.version)"' 2>/dev/null) || got="(no versions.json)"
+            if [ "$got" = "$TAG $TAG" ]; then
+              echo "${URL%/}/ lists $TAG first"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::${URL%/}/versions.json still lists \"$got\" first, not $TAG $TAG, 3 minutes after the deploy. Pages most likely kept the previous site; see SPEC §9.4."
+          exit 1
 
   # Fresh-install images for esptool users, on every published release
   # (pre-releases included), with THIRD_PARTY_NOTICES. They reset settings;

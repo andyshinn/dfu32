@@ -568,6 +568,8 @@ footer a { color: var(--muted); }
   function versionLabel(e, i) {
     const v = fmtVersion(e.version);
     if (!v) return 'Latest';
+    // 'main' is a build that isn't a release: a site assembled locally (README).
+    // dfu32.app itself only deploys releases (SPEC §9.4).
     const what = i === 0 ? (e.channel === 'main' ? 'latest, from main' : 'latest') : [e.channel, shortDate(e.published_at)].filter(Boolean).join(', ');
     const missing = selected && !e.manifests[selected.id] ? ` · no ${selected.short} build` : '';
     return (what ? `${v} (${what})` : v) + missing;

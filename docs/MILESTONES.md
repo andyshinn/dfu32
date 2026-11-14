@@ -148,9 +148,9 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
   - `version` is the M4 firmware version string.
 - **Partition baseline:** `tools/check_partitions.py` checks `nvs`, `runlog` and `staging` against a committed baseline, so a layout change that would break keep-settings updates can't land by accident (SPEC §9.4).
 - **CI**: a `pages` job in `ci.yml` (details in SPEC §9.4):
-  - triggers on `push` to `main` (until v1.0), `release: published` and `workflow_dispatch`. Each run builds the firmware (a release run from the tag) and uses that run's artifacts;
+  - runs on `push` to `main`, `release: published` and `workflow_dispatch`. Each run builds the firmware (a release run from the tag) and uses that run's artifacts;
   - deploys only for the latest stable release, never a pre-release or a patch to an older line, under a `pages` concurrency group;
-  - pushes and manual runs deploy from `main`, so the page serves the latest `main` build before v1.0. This is the path to bench M5;
+  - pushes and manual runs don't deploy: after v0.5.1 the page serves releases only (a `main` deploy and a release of the same commit shared one Pages deployment name, so the release never went live; SPEC §9.4);
   - generates the manifests and copies `web/`, the parts and the manifests into one directory;
   - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
   - it also attaches the merged `.bin` files to the release for esptool users, and the app-only `dfu32-<board>.bin` files for updating from the device's web UI;
@@ -170,7 +170,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 - Soak test: 20 consecutive flashes with alternating versions, mixed with injected faults. Zero unrecovered failures on OTAFIX. **Runner ready:** `tools/dfu32_bench.py --soak 20` (check 6.1, [BENCH.md §7](BENCH.md#soak-m6)), tested against the simulator; awaiting the bench.
 - Validate on the Feather V2 (classic ESP32, BLE 4.2) and an N16R8 DevKit.
 - `tools/dfu32-meshcore-fetch` (release asset resolution through the GitHub API). **Implemented** as `tools/dfu32_meshcore_fetch.py`, with tests against a fake GitHub API.
-- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Remove the `pages` job's push-to-`main` trigger, so the installer page serves releases only. Tag v1.0, which also publishes the installer page.
+- Fix defaults from the measurements (PRN, `wifi_off_dfu`, timeouts). Release builds with debug endpoints compiled out. Tag v1.0, which also publishes the installer page.
 
 ## Live BLE signal monitor (specified, scheduling open)
 

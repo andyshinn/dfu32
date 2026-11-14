@@ -40,7 +40,12 @@ deploy.
 Example (the CI pages job, after dfu32_web_manifest.py):
   gh release list --json tagName,isPrerelease,isDraft,publishedAt > releases.json
   gh release download <tag> -p 'dfu32-*-merged.bin' -D releases/<tag>    # for each tag
-  dfu32_web_versions.py --site _site --releases releases.json --assets releases --channel main
+  dfu32_web_versions.py --site _site --releases releases.json --assets releases --channel release --tag v0.5.2
+
+Only releases deploy dfu32.app (SPEC.md §9.4). --channel main (the default)
+labels a build that isn't a release, such as a site assembled locally from
+your own build (README, "Preview the installer page"); the page shows it as
+"latest, from main".
 """
 from __future__ import annotations
 
@@ -299,7 +304,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--releases", required=True, type=Path,
                     help="JSON from gh release list --json tagName,isPrerelease,isDraft,publishedAt")
     ap.add_argument("--assets", required=True, type=Path, help="directory of <tag>/dfu32-<board>-merged.bin")
-    ap.add_argument("--channel", choices=("main", "release"), default="main", help="what this run's build is")
+    ap.add_argument("--channel", choices=("main", "release"), default="main", help="what this site's build is: a release, or any other build (main)")
     ap.add_argument("--tag", help="this run's release tag, if it is one")
     ap.add_argument("--limit", type=int, default=20, help="newest releases to offer (default 20)")
     a = ap.parse_args(argv)
