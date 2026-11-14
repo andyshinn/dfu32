@@ -348,7 +348,10 @@ A full run flashes the repeater about 20 times and takes roughly an hour, most o
 ### What it changes on DFU32
 
 - It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also turns the token off and on again (with `token clear` and `POST /system/token/clear`).
-- It creates or overwrites the target (`--target-id`, default `t096`). If another target id exists, it is deleted, because v1 allows only one.
+- It creates or overwrites its own target (`--target-id`, default `t096`) next to yours. It leaves it there when the run ends.
+- The console checks act on the default target, so they make the bench target the default. When the run ends, your default is the default again. This also happens after Ctrl+C.
+- When DFU32 is full, the checks that need the bench target are skipped. Free a slot, or pass `--allow-delete-target`. With it, the script saves one of your targets (not the default, if it can help it), deletes it, and puts it back with the same settings when the run ends. Saving it needs the API, so without WiFi the check is skipped anyway. If DFU32 is full then, it deletes the bench target first to make room. The target's last good flash (`last_ok_version`) is not kept.
+- Putting things back is best effort. The report lists what was done under "After the run", and anything that failed, with the settings to restore by hand.
 - 3.13 renames DFU32 to `bench-dfu`, reboots, then renames it back and reboots again (`--keep-hostname` skips the rename back).
 - The staged image ends up as the image under test.
 

@@ -29,7 +29,8 @@ from bench import checks, parse  # noqa: E402
 from bench.api import retry_after  # noqa: E402
 from bench.console import Redactor, SerialConsole, quote_arg, split_incomplete_escape, strip_ansi  # noqa: E402
 from bench.fake_dfu32 import FakeDfu32  # noqa: E402
-from bench.runner import Ctx, Repeater, crash_excerpt, mac_matches, parse_target_list, pick_target_to_delete  # noqa: E402,E501
+from bench.runner import (Ctx, Repeater, crash_excerpt, mac_matches, parse_target_list,  # noqa: E402
+                          pick_target_to_delete, restore_body)
 from bench.site import FirmwareSite, flip_hex_digit  # noqa: E402
 from test_dfu32_pack import write_zip  # noqa: E402
 from test_stage_image import synthetic_package  # noqa: E402
@@ -137,6 +138,11 @@ class Targets(unittest.TestCase):
         self.assertEqual(pick_target_to_delete(rows, "t096"), "c")  # the last one that isn't the default
         self.assertEqual(pick_target_to_delete([{"id": "a", "default": True}, {"id": "t096"}], "t096"), "a")
         self.assertIsNone(pick_target_to_delete([{"id": "t096", "default": True}], "t096"))
+
+    def test_restore_body(self):
+        saved = {"id": "barn", "name": "Barn", "mac": "00:11:22:33:44:04", "prn": 8, "last_ok_version": "v1",
+                 "last_ok_at": 12, "last_run": {"seq": 3}, "default": False}
+        self.assertEqual(restore_body(saved), {"id": "barn", "name": "Barn", "mac": "00:11:22:33:44:04", "prn": 8})
 
     def test_mac_matches(self):
         self.assertTrue(mac_matches("f4:1c:36:a7:33:95", "F4:1C:36:A7:33:95"))
@@ -548,8 +554,8 @@ def owner_targets(fake, n, *, default="home"):
     return ids
 
 
-def run_bench(test, fake, only):
-    """dfu32_bench.main against `fake` with --only `only`; returns (rc, report, stdout)."""
+def run_bench(test, fake, only, *extra):
+    """dfu32_bench.main against `fake` with --only `only` (and `extra` args); returns (rc, report, stdout)."""
     tmp = tempfile.TemporaryDirectory()
     test.addCleanup(tmp.cleanup)
     d = Path(tmp.name)
@@ -559,7 +565,7 @@ def run_bench(test, fake, only):
     test.addCleanup(fake.stop)
     argv = ["--port", "sim", "--zip", str(z), "--board", "heltec_t096", "--mac", fake.mac,
             "--device-ip", f"127.0.0.1:{port}", "--host-ip", "127.0.0.1", "--site-port", "0",
-            "--start-ota-timeout", "60", "--out", str(d / "out"), "--only", only]
+            "--start-ota-timeout", "60", "--out", str(d / "out"), "--only", only, *extra]
     real_console = dfu32_bench.SerialConsole
     with mock.patch.object(dfu32_bench, "SerialConsole", lambda *a, **kw: real_console(*a, opener=fake.opener, **kw)), \
             mock.patch.object(Ctx, "start_ota", lambda self, **kw: fake.start_ota()), \
@@ -578,17 +584,40 @@ class EndToEndTargets(unittest.TestCase):
         self.assertEqual(bad, {}, out[-3000:])
         self.assertEqual(rc, 0)
 
+    def snapshot(self, fake):
+        return [dict(t) for t in fake.targets.values()], fake.default_id
+
+    def assert_skipped_full(self, rc, report, out, tid):
+        res = {r["id"]: r for r in report["results"]}[tid]
+        self.assertEqual(res["status"], "SKIP", out[-3000:])
+        self.assertIn("DFU32 is full (5 of 5 targets): free a slot, or pass --allow-delete-target", res["notes"][-1])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("deleting target", out)
+        self.assertEqual(report["meta"]["after_run"], [])
+
+    def test_full_device_api_refuses(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 5, default="attic")
+        before = self.snapshot(fake)
+        rc, report, out = run_bench(self, fake, "3.2")
+        self.assert_skipped_full(rc, report, out, "3.2")
+        self.assertEqual(self.snapshot(fake), before)  # nothing of the owner's was touched
+
     def test_full_device_api(self):
         fake = FakeDfu32()
         owner_targets(fake, 5, default="attic")
-        rc, report, out = run_bench(self, fake, "3.2")
+        before = self.snapshot(fake)
+        rc, report, out = run_bench(self, fake, "3.2", "--allow-delete-target")
         self.assert_passed(rc, report, out)
-        # One owner target made room (the last that isn't the default); the owner's default stays.
-        self.assertEqual(list(fake.targets), ["home", "attic", "shed", "garage", "t096"])
-        self.assertEqual(fake.default_id, "attic")
+        # One owner target made room (the last that isn't the default) and is back when the run ends,
+        # in place of the bench's own target, which had to go to make room for it.
         self.assertIn("deleting target 'barn' to make room for 't096'", out)
-        self.assertNotIn("v1 allows one", out)
         self.assertIn("was full: the default switch wasn't tested", "\n".join(report["results"][0]["notes"]))
+        self.assertEqual(self.snapshot(fake), before)
+        after = "\n".join(report["meta"]["after_run"])
+        self.assertIn("deleted the bench target 't096' to make room for 'barn'", after)
+        self.assertIn("put target 'barn' back with its saved settings", after)
+        self.assertIn("'attic' is the default target, as before the run", after)
 
     def test_room_left_api(self):
         fake = FakeDfu32()
@@ -601,16 +630,54 @@ class EndToEndTargets(unittest.TestCase):
         self.assertEqual(list(fake.targets), ["home", "attic", "t096"])  # the throwaway targets are gone
         self.assertEqual(fake.default_id, "attic")  # and the owner's default is back
 
-    def test_full_device_console(self):
+    def test_full_device_console_refuses(self):
         fake = FakeDfu32()
         owner_targets(fake, 5)
+        before = self.snapshot(fake)
+        rc, report, out = run_bench(self, fake, "2.3")
+        self.assert_skipped_full(rc, report, out, "2.3")
+        self.assertEqual(self.snapshot(fake), before)
+
+    def test_full_device_console(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 5, default="attic")
+        before = self.snapshot(fake)
+        rc, report, out = run_bench(self, fake, "2.3", "--allow-delete-target")
+        self.assert_passed(rc, report, out)
+        self.assertIn("deleting target 'barn' to make room for 't096'", out)
+        self.assertIn("added target 't096' on the console; it is now the default target", out)
+        # Afterwards: barn is back with the same settings, the bench target made room for it,
+        # and the owner's default is the default again.
+        self.assertEqual(self.snapshot(fake), before)
+        after = "\n".join(report["meta"]["after_run"])
+        self.assertIn("put target 'barn' back with its saved settings", after)
+        self.assertIn("made 'attic' the default target again", after)
+
+    def test_room_left_console(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 2, default="attic")
         rc, report, out = run_bench(self, fake, "2.3")
         self.assert_passed(rc, report, out)
-        self.assertEqual(list(fake.targets), ["home", "attic", "shed", "garage", "t096"])
-        self.assertEqual(fake.default_id, "t096")  # console commands act on the default
+        self.assertEqual(list(fake.targets), ["home", "attic", "t096"])  # the bench target stays
         self.assertEqual((fake.targets["t096"]["mac"], fake.targets["t096"]["board"]), (fake.mac, "heltec_t096"))
         self.assertEqual(fake.targets["home"]["board"], "rak4631")  # the owner's targets weren't edited
+        self.assertEqual(fake.default_id, "attic")  # console checks made t096 the default; attic is back
+        self.assertEqual(report["meta"]["after_run"], ["made 'attic' the default target again"])
+
+    def test_ctrl_c_still_restores(self):
+        fake = FakeDfu32()
+        owner_targets(fake, 5, default="attic")
+        before = self.snapshot(fake)
+
+        def ctrl_c(ctx, args=""):
+            raise KeyboardInterrupt
+
+        with mock.patch.object(checks, "stage_cmd", ctrl_c):  # 2.3 has added its target when it stages
+            rc, report, out = run_bench(self, fake, "2.3", "--allow-delete-target")
+        self.assertEqual((rc, report["results"][0]["status"], report["meta"]["finished"]), (1, "ABORTED", False))
         self.assertIn("deleting target 'barn' to make room for 't096'", out)
+        self.assertEqual(self.snapshot(fake), before)
+        self.assertIn("made 'attic' the default target again", report["meta"]["after_run"])
 
 
 class EndToEnd(unittest.TestCase):
@@ -657,6 +724,7 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn(fake.token_hash, logs)
         self.assertEqual(list(fake.targets), ["home", "attic", "t096"])
         self.assertEqual(fake.targets["home"]["board"], "rak4631")
+        self.assertEqual(fake.default_id, "home")  # the owner's default is back after the console checks
 
 
 
