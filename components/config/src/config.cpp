@@ -1,22 +1,32 @@
 // SPDX-License-Identifier: MIT
 #include "config/config.hpp"
 
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "nvs.h"
 
 namespace dfu32::config {
 namespace {
 
+static_assert(CONFIG_DFU32_MAX_TARGETS >= 1 && CONFIG_DFU32_MAX_TARGETS <= kMaxTargetSlots,
+              "CONFIG_DFU32_MAX_TARGETS must be 1..kMaxTargetSlots");
+
 constexpr const char* TAG = "config";
 constexpr const char* kNs = "dfu32";
-// Target 0 is one JSON record, so a save is a single NVS entry write: either
-// the old or the new record survives a failure or power cut, never a mix.
-constexpr const char* kTarget = "tgt0";
-// M1 builds stored only these two; read them when no record exists yet.
+// Each target is one JSON record in its own slot ("tgt0".."tgt9"), so saving a
+// target is a single NVS entry write: either the old or the new record
+// survives a failure or power cut, never a mix. Slot 0 is the key single-
+// target builds used, so their target loads as slot 0 unchanged.
+constexpr const char* kDefault = "tgt_def";  // id of the default target
+// M1 builds stored only these two; read them as slot 0 when no record exists yet.
 constexpr const char* kLegacyMac = "tgt0_mac";
 constexpr const char* kLegacyType = "tgt0_type";
+
+std::string slot_key(uint8_t slot) { return "tgt" + std::to_string(slot); }
 
 bool get_str(nvs_handle_t h, const char* key, std::string& out) {
     size_t len = 0;
@@ -32,36 +42,79 @@ bool erase_key(nvs_handle_t h, const char* key) {
     return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;
 }
 
+// Nothing set at all: what a cleared single-target build could leave behind.
+bool blank(const TargetConfig& t) {
+    return t.id.empty() && t.mac.empty() && t.board.empty() && t.manifest_url.empty();
+}
+
 }  // namespace
 
-bool load_target(TargetConfig& out) {
-    out = TargetConfig{};
+size_t max_targets() { return CONFIG_DFU32_MAX_TARGETS; }
+
+bool load_targets(TargetTable& out) {
+    out = TargetTable(max_targets());
     nvs_handle_t h;
     const esp_err_t err = nvs_open(kNs, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) return true;  // nothing saved yet
     if (err != ESP_OK) return false;
-    std::string json;
-    if (get_str(h, kTarget, json)) {
-        if (!from_json(json, out)) ESP_LOGE(TAG, "stored target record is corrupt; ignoring it");
-    } else {
-        get_str(h, kLegacyMac, out.mac);
-        uint8_t type = 1;
-        if (nvs_get_u8(h, kLegacyType, &type) == ESP_OK && type <= 1) out.addr_type = type;
+    for (size_t i = 0; i < kMaxTargetSlots; ++i) {
+        const auto slot = static_cast<uint8_t>(i);
+        TargetConfig t;
+        std::string json;
+        if (get_str(h, slot_key(slot).c_str(), json)) {
+            if (!from_json(json, t)) {
+                ESP_LOGE(TAG, "stored target record %s is corrupt; ignoring it", slot_key(slot).c_str());
+                continue;
+            }
+        } else if (slot == 0) {
+            get_str(h, kLegacyMac, t.mac);
+            uint8_t type = 1;
+            if (nvs_get_u8(h, kLegacyType, &type) == ESP_OK && type <= 1) t.addr_type = type;
+        } else {
+            continue;
+        }
+        t.mac = normalize_mac(t.mac);
+        if (const unsigned n = sanitize(t); n != 0) {
+            ESP_LOGW(TAG, "stored target %s had %u invalid field(s); using defaults for them", slot_key(slot).c_str(),
+                     n);
+        }
+        if (blank(t)) continue;
+        if (!out.add_loaded(slot, std::move(t))) {
+            ESP_LOGW(TAG, "stored target %s duplicates another target's id; ignoring it", slot_key(slot).c_str());
+        }
     }
+    std::string def;
+    get_str(h, kDefault, def);
+    out.set_loaded_default(std::move(def));
     nvs_close(h);
-    out.mac = normalize_mac(out.mac);
-    if (const unsigned n = sanitize(out); n != 0) {
-        ESP_LOGW(TAG, "stored target had %u invalid field(s); using defaults for them", n);
-    }
     return true;
 }
 
-bool save_target(const TargetConfig& t) {
+bool commit_targets(const TargetTable& table, const TargetWrites& w) {
+    if (w.empty()) return true;
     nvs_handle_t h;
     if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return false;
-    const bool ok = nvs_set_str(h, kTarget, to_json(t).c_str()) == ESP_OK && nvs_commit(h) == ESP_OK;
-    if (ok) {
-        // The record supersedes the M1 keys; dropping them is best-effort.
+    bool ok = true;
+    bool legacy = false;  // slot 0 written or erased: the M1 keys are superseded
+    if (w.save_slot) {
+        const StoredTarget* st = table.at_slot(*w.save_slot);
+        ok = st != nullptr && nvs_set_str(h, slot_key(*w.save_slot).c_str(), to_json(st->cfg).c_str()) == ESP_OK &&
+             nvs_commit(h) == ESP_OK;
+        legacy = legacy || *w.save_slot == 0;
+    }
+    if (ok && w.erase_slot) {
+        ok = erase_key(h, slot_key(*w.erase_slot).c_str()) && nvs_commit(h) == ESP_OK;
+        if (ok && *w.erase_slot == 0) {
+            // Otherwise an M1 target would reappear as slot 0 on the next load.
+            ok = erase_key(h, kLegacyMac) && erase_key(h, kLegacyType) && nvs_commit(h) == ESP_OK;
+        }
+    }
+    if (ok && w.default_id) {
+        ok = (w.default_id->empty() ? erase_key(h, kDefault) : nvs_set_str(h, kDefault, w.default_id->c_str()) == ESP_OK) &&
+             nvs_commit(h) == ESP_OK;
+    }
+    if (ok && legacy) {
+        // Best-effort: the slot-0 record supersedes the M1 keys.
         erase_key(h, kLegacyMac);
         erase_key(h, kLegacyType);
         nvs_commit(h);
@@ -70,13 +123,28 @@ bool save_target(const TargetConfig& t) {
     return ok;
 }
 
-bool erase_target() {
-    nvs_handle_t h;
-    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return false;
-    const bool ok = erase_key(h, kTarget) && erase_key(h, kLegacyMac) && erase_key(h, kLegacyType) &&
-                    nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    return ok;
+bool load_target(const std::string& id, TargetConfig& out, bool& found) {
+    out = TargetConfig{};
+    found = false;
+    TargetTable table;
+    if (!load_targets(table)) return false;
+    if (const StoredTarget* st = table.find(id)) {
+        out = st->cfg;
+        found = true;
+    }
+    return true;
+}
+
+bool load_default_target(TargetConfig& out, bool& found) {
+    out = TargetConfig{};
+    found = false;
+    TargetTable table;
+    if (!load_targets(table)) return false;
+    if (const StoredTarget* st = table.default_target()) {
+        out = st->cfg;
+        found = true;
+    }
+    return true;
 }
 
 namespace {

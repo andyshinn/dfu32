@@ -12,6 +12,7 @@ set(DFU32_CORE_SRCS
     src/ota_image.cpp
     src/stage_writer.cpp
     src/target_config.cpp
+    src/target_table.cpp
     src/url.cpp
 )
 
