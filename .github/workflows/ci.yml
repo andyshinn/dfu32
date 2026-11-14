@@ -244,10 +244,12 @@ jobs:
           path: ${{ env.BUILD_DIR }}/dfu32-${{ matrix.board }}-debug.bin
           if-no-files-found: error
 
-  # Whether this run updates the installer page. Pushes to main deploy, so the
-  # page always offers the latest main build while DFU32 is pre-release. A
-  # release deploys only if it is the latest stable one, so a pre-release or a
-  # patch to an older line never replaces the page.
+  # Whether this run updates the installer page: only for the latest stable
+  # release, so a pre-release or a patch to an older line never replaces it.
+  # Pushes to main and manual runs build and test but leave the page alone.
+  # They used to deploy, and a deployment is named after its commit: a release
+  # of the commit main had just deployed (merge, then release) got the same
+  # name, so Pages kept main's site and the release never went live.
   pages-gate:
     name: Installer page (deploy?)
     if: github.event_name != 'pull_request'
@@ -264,13 +266,9 @@ jobs:
           PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           deploy=false
-          if [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; then
-            if [ "$REF" = refs/heads/main ]; then
-              deploy=true
-            else
-              echo "$REF is not main: page left alone"
-            fi
-          elif [ "$EVENT" = release ]; then
+          if [ "$EVENT" != release ]; then
+            echo "$EVENT on $REF: the page tracks releases only, left alone"
+          else
             # A SemVer pre-release tag (v0.4.0-rc.1) counts even when the
             # release wasn't ticked as a pre-release: the flag is read at
             # publish time, and ticking it afterwards doesn't stop this run.
