@@ -20,10 +20,22 @@ esptool.py --chip auto -p PORT write_flash 0x0 dfu32-feather_esp32s3-merged.bin
 
 The merged image is for a fresh install and resets settings (WiFi, token, target). To update a running DFU32 from its web UI (**System → Firmware update**), use the app-only `dfu32-<board>.bin` from the same release instead (releases up to v0.4.0-rc.10 don't carry it: take `dfu32.bin` from the `dfu32-<board>` artifact of the release's Actions run).
 
-To preview the page locally, copy in ESP Web Tools and esptool-js (from hash-pinned npm tarballs; `web/vendor/` is git-ignored) and serve `web/`.:
+### Preview the installer page
+
+dfu32.app only changes when a stable release is published (SPEC §9.4). To look at the page itself, copy in ESP Web Tools and esptool-js (from hash-pinned npm tarballs; `web/vendor/` is git-ignored) and serve `web/`. There is no firmware to install this way:
 
 ```bash
 python3 tools/fetch_esp_web_tools.py --site web && python3 -m http.server -d web 8000
+```
+
+To install your own build from the page, assemble a site under `build/site` (git-ignored) the way the CI `pages` job does. Run `dfu32_web_manifest.py` once per board you built, then list the build in `versions.json`; with no releases it is the only version, labelled "latest, from main":
+
+```bash
+mkdir -p build/site && cp -R web/. build/site/
+python3 tools/dfu32_web_manifest.py build/feather_esp32s3 --board feather_esp32s3 --site build/site --baseline partitions/baseline.json
+echo '[]' > build/releases.json
+python3 tools/dfu32_web_versions.py --site build/site --releases build/releases.json --assets build/releases
+python3 tools/fetch_esp_web_tools.py --site build/site && python3 -m http.server -d build/site 8000
 ```
 
 ## Building
