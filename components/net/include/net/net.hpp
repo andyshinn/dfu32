@@ -131,8 +131,8 @@ bool is_ap_socket(int sockfd);
 enum class ApEvent : uint8_t { Up, Down, ClientJoined };
 using ApObserver = void (*)(ApEvent);
 /// One observer (main: the open-AP warning, closing Improv's boot window).
-/// Called on the esp_timer task, outside net's locks; must not block (may
-/// call status()).
+/// Called on the esp_timer task (Down also on stop()'s caller), outside net's
+/// locks; must not block (may call status()).
 void set_ap_observer(ApObserver fn);
 
 /// Unix seconds once SNTP has synced, else 0.

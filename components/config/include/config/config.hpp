@@ -53,7 +53,9 @@ bool save_device(const api::DeviceConfig& c);
 /// Read-modify-write of the device settings under one mutex (console `ap` and
 /// PUT /config can't lose each other's change). edit returns "" or a reason;
 /// then validate(); then save. Returns "" or the reason ("NVS write failed").
-/// Nothing is saved on a reason. *out gets the saved settings.
+/// Nothing is saved on a reason. *out gets the saved settings. While the stored
+/// AP password is invalid, an edit that doesn't set it keeps it in NVS and may
+/// not turn AP mode on (§9.5); the edit then sees a stand-in password.
 std::string update_device(const std::function<std::string(api::DeviceConfig&)>& edit,
                           api::DeviceConfig* out = nullptr);
 

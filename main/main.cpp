@@ -3,6 +3,7 @@
 // DFU32: boot banner, layout self-check, run-log recovery, NimBLE central,
 // WiFi (net), the job orchestrator, the HTTP API and the USB-serial bench
 // console.
+#include <atomic>
 #include <cinttypes>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include "console_io.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "dfu_proto/image.hpp"
+#include "dfu32_core/ap.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_log.h"
@@ -101,13 +103,16 @@ static void record_aborted_run() {
 // After POST /api/v1/system/ota the bootloader starts the new image as
 // "pending verify". A failed self-check, or an HTTP API that doesn't start,
 // rolls back at once. WiFi is then the deciding signal, but only for faults
-// the new image could have caused:
-//  - an address within 90 s: confirmed;
+// the new image could have caused (job::ota_verdict, host-tested):
+//  - a station address within 90 s: confirmed;
+//  - DFU32's access point started since boot: confirmed, the radio works
+//    (§9.5; an unprovisioned board with AP mode on gets here at once);
 //  - no network stored: confirmed (there is nothing to test against);
 //  - the radio is demonstrably working but the network isn't reachable (the
 //    driver reported a disconnect: AP not found, wrong passphrase, ...):
 //    confirmed with a warning, so a router that is down during the update
-//    doesn't throw away a good image;
+//    doesn't throw away a good image. A provisioned board gets this verdict
+//    from its disconnect reason long before its access point is due;
 //  - no sign of life from WiFi at all: rolled back.
 
 namespace {
@@ -135,24 +140,65 @@ void boot_failed(const char* why) {
 void ota_confirm_task(void*) {
     const bool up = dfu32::net::status().provisioned && dfu32::net::wait_connected(kOtaConfirmMs);
     const dfu32::net::Status ns = dfu32::net::status();
-    if (up) {
-        esp_ota_mark_app_valid_cancel_rollback();
-        ESP_LOGI(TAG, "new firmware confirmed: WiFi and the HTTP API are up");
-    } else if (!ns.provisioned) {
-        esp_ota_mark_app_valid_cancel_rollback();
-        ESP_LOGW(TAG, "new firmware confirmed without a network test: no WiFi network is stored");
-    } else if (ns.last_disconnect_reason != 0) {
-        esp_ota_mark_app_valid_cancel_rollback();
-        ESP_LOGW(TAG, "new firmware confirmed: WiFi works but \"%s\" isn't reachable (reason %u); not the "
-                      "firmware's fault",
-                 ns.ssid.c_str(), ns.last_disconnect_reason);
-    } else {
-        ESP_LOGE(TAG, "new firmware shows no WiFi activity after %u s: rolling back to the previous image",
-                 static_cast<unsigned>(kOtaConfirmMs / 1000));
-        vTaskDelay(pdMS_TO_TICKS(300));
-        esp_ota_mark_app_invalid_rollback_and_reboot();
+    using dfu32::job::OtaVerdict;
+    switch (dfu32::job::ota_verdict(up, ns.ap.ever_started, ns.provisioned, ns.last_disconnect_reason)) {
+        case OtaVerdict::Confirm:
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGI(TAG, "new firmware confirmed: WiFi and the HTTP API are up");
+            break;
+        case OtaVerdict::ConfirmAccessPoint:
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGI(TAG, "new firmware confirmed: WiFi works (access point up)");
+            break;
+        case OtaVerdict::ConfirmNoNetwork:
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGW(TAG, "new firmware confirmed without a network test: no WiFi network is stored");
+            break;
+        case OtaVerdict::ConfirmRadioWorks:
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGW(TAG, "new firmware confirmed: WiFi works but \"%s\" isn't reachable (reason %u); not the "
+                          "firmware's fault",
+                     ns.ssid.c_str(), ns.last_disconnect_reason);
+            break;
+        case OtaVerdict::Rollback:
+            ESP_LOGE(TAG, "new firmware shows no WiFi activity after %u s: rolling back to the previous image",
+                     static_cast<unsigned>(kOtaConfirmMs / 1000));
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+            break;
     }
     vTaskDelete(nullptr);
+}
+
+// ---- access-point fallback (SPEC.md §9.5) -------------------------------------------
+
+// Set when main opened Improv BLE because no network is stored: only that
+// window closes when a phone joins the AP. Its lease (holder "improv") would
+// otherwise refuse every scan, flash and upload from an operator who has no
+// console to run `improv stop`. A window opened on purpose (button, `improv
+// start`) stays open.
+std::atomic<bool> g_improv_auto_opened{false};
+
+/// The open-AP-without-token warning, logged when it applies (`active` picks the text).
+void log_ap_warning(bool active) {
+    const dfu32::net::Status ns = dfu32::net::status();
+    const char* w = dfu32::ap::ap_warning(ns.ap.enabled, ns.ap.open, dfu32::api::claimed(), active);
+    if (w != nullptr) ESP_LOGW(TAG, "access point \"%s\": %s", ns.hostname.c_str(), w);
+}
+
+/// net's AP observer. Runs on the esp_timer task, outside net's locks, so it
+/// only logs and posts: improv::close() hands the close to the Improv task.
+void on_ap_event(dfu32::net::ApEvent e) {
+    if (e == dfu32::net::ApEvent::Up) {
+        log_ap_warning(true);
+    } else if (e == dfu32::net::ApEvent::ClientJoined && g_improv_auto_opened.load() &&
+               dfu32::improv::active() && !dfu32::improv::attempt_running()) {
+        // An attempt in flight is left alone: closing would roll its network back.
+        // The flag stays set, so the next phone to join tries again.
+        dfu32::improv::close();
+        g_improv_auto_opened.store(false);
+        ESP_LOGI(TAG, "Improv BLE closed: a phone joined the access point (`improv start` opens it again)");
+    }
 }
 
 }  // namespace
@@ -194,8 +240,19 @@ extern "C" void app_main(void) {
     }
 
     // WiFi failing to start is logged but not fatal: the console, staging
-    // from a PC and flashing still work without it.
-    const bool net_ok = dfu32::net::init();
+    // from a PC and flashing still work without it. The AP settings go in
+    // with init, so an AP that is due at boot (no network stored) comes up
+    // with the right security from the start (§9.5). A failed read leaves
+    // the defaults: AP mode off.
+    bool net_ok = false;
+    {
+        dfu32::api::DeviceConfig dc;
+        dfu32::config::load_device(dc);
+        dfu32::net::ApSettings ap{dc.ap_enabled, dc.ap_password, dc.ap_delay_s};
+        net_ok = dfu32::net::init(ap);
+        dfu32::improv::wipe(ap.password);  // net keeps its own copy
+        dfu32::improv::wipe(dc.ap_password);
+    }
     if (!net_ok) ESP_LOGE(TAG, "WiFi init failed; networking disabled");
 
     if (!dfu32::job::init()) {
@@ -205,14 +262,23 @@ extern "C" void app_main(void) {
     // The API needs the network stack; without it the console still works.
     const bool api_ok = net_ok && dfu32::api::start();
     if (net_ok && !api_ok) ESP_LOGE(TAG, "HTTP API failed to start");
+    if (net_ok) {
+        // After api::start(), so api::claimed() knows whether a token is set.
+        // An AP that came up during init (no network stored) was up before the
+        // observer: warn for it here. A race can log the warning twice, never zero times.
+        dfu32::net::set_ap_observer(&on_ap_event);
+        if (dfu32::net::status().ap.active) log_ap_warning(true);
+    }
 
     // Improv BLE (SPEC.md §9.2): open while no network is stored; the button
     // (or `improv start`) opens it later.
     if (net_ok && !dfu32::improv::init()) ESP_LOGE(TAG, "Improv BLE init failed");
-    if (net_ok && !dfu32::net::status().provisioned) {
+    if (const dfu32::net::Status ns = dfu32::net::status(); net_ok && !ns.provisioned) {
         ESP_LOGI(TAG, "no WiFi network stored: set one from the installer page (Improv Serial), over Improv BLE, "
-                      "or with `wifi <ssid> <password>`");
-        dfu32::improv::open(dfu32::improv::Window::Unprovisioned);
+                      "or with `wifi <ssid> <password>`%s%s%s%s",
+                 ns.ap.enabled ? ", or join the WiFi network '" : "", ns.ap.enabled ? ns.hostname.c_str() : "",
+                 ns.ap.enabled ? "' and open " : "", ns.ap.enabled ? dfu32::ap::kUrl : "");
+        if (dfu32::improv::open(dfu32::improv::Window::Unprovisioned)) g_improv_auto_opened.store(true);
     }
     // The console reader, and Improv Serial with it, as early as the network
     // allows: the installer page asks within seconds of resetting the board.
@@ -222,6 +288,7 @@ extern "C" void app_main(void) {
     hooks.improv_active = [] { return dfu32::improv::active(); };
     hooks.identifying = [] { return dfu32::improv::identifying(); };
     hooks.on_improv_window = [] {
+        g_improv_auto_opened.store(false);  // opened on purpose now: a phone joining the AP doesn't close it
         if (!dfu32::improv::open(dfu32::improv::Window::Button)) {
             ESP_LOGW(TAG, "Improv BLE not opened (disabled, or BLE busy with a job)");
         }
@@ -229,6 +296,7 @@ extern "C" void app_main(void) {
     hooks.on_clear_token = [] {
         ESP_LOGW(TAG, "%s", dfu32::api::clear_token() ? "API token cleared: the API is open until a token is set again"
                                                     : "clearing the API token failed");
+        log_ap_warning(dfu32::net::status().ap.active);  // an open AP is now unclaimed (§9.5)
     };
     hooks.on_factory_reset = [] {
         // SPEC.md §9.3: settings and WiFi go; the staged image and run log stay.
@@ -247,18 +315,22 @@ extern "C" void app_main(void) {
             ESP_LOGE(TAG, "factory reset refused: something just started; try again");
             return;
         }
-        if (!dfu32::config::erase_all()) {
-            ESP_LOGE(TAG, "factory reset failed: could not erase the settings; nothing else changed, not rebooting");
+        // WiFi first (§9.5): AP mode off in RAM and the AP down before the
+        // erase, so no AP springs up during the 500 ms before the reboot.
+        // The settings are erased even if that fails (e.g. WiFi never came
+        // up): AP mode is already off in RAM, and the button must still be
+        // able to clear the settings on such a board.
+        const bool wifi_ok = dfu32::net::factory_reset();
+        const bool erased = dfu32::config::erase_all();
+        if (!wifi_ok || !erased) {
+            ESP_LOGE(TAG, "factory reset incomplete: %s; not rebooting",
+                     !wifi_ok ? (erased ? "settings erased, but the WiFi credentials could not be cleared"
+                                        : "neither the WiFi credentials nor the settings could be cleared")
+                              : "WiFi forgotten, but the settings could not be erased");
             if (!improv) dfu32::job::release();
             return;
         }
-        if (!dfu32::net::forget()) {
-            ESP_LOGE(TAG, "factory reset incomplete: settings erased, but the WiFi credentials could not be "
-                          "cleared (`wifi forget`); not rebooting");
-            if (!improv) dfu32::job::release();
-            return;
-        }
-        ESP_LOGW(TAG, "factory reset: settings erased, WiFi forgotten; rebooting");
+        ESP_LOGW(TAG, "factory reset: settings and access-point settings erased, WiFi forgotten; rebooting");
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
     };
@@ -276,5 +348,6 @@ extern "C" void app_main(void) {
         esp_ota_mark_app_valid_cancel_rollback();  // normal boot: nothing pending
     }
 
-    dfu32::start_console();
+    // `improv start` opens a window on purpose: a phone joining the AP leaves it open (§9.5).
+    dfu32::start_console([] { g_improv_auto_opened.store(false); });
 }

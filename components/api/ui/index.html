@@ -60,14 +60,16 @@ details summary{cursor:pointer;color:var(--mute);margin:.5rem 0}
 .center{max-width:28rem;margin:3rem auto}
 .drop{outline:2px dashed transparent;outline-offset:-2px}
 .drop.over{outline-color:var(--acc)}
+#warn{max-width:60rem;margin:0 auto;padding:0 1rem}
 @media (max-width:40rem){.grid{grid-template-columns:1fr}.grid dt{margin-top:.3rem}}
 </style>
 </head>
 <body>
 <header><b>DFU32</b><span id="hdr" class="mute small"></span><span class="sp"></span><span id="hjob"></span></header>
 <nav id="nav" hidden>
-<a href="#status">Status</a><a href="#image">Image</a><a href="#target">Target</a><a href="#runs">Runs</a><a href="#logs">Logs</a><a href="#system">System</a>
+<a href="#status">Status</a><a href="#image">Image</a><a href="#target">Target</a><a href="#runs">Runs</a><a href="#logs">Logs</a><a href="#wifi">WiFi</a><a href="#system">System</a>
 </nav>
+<div id="warn"></div>
 <main id="main"></main>
 <div id="toast"></div>
 <script>
@@ -123,12 +125,15 @@ function setToken(t) { token = t; try { t ? localStorage.setItem(TOKEN_KEY, t) :
 // A 401 means the device requires a token this browser doesn't have (any more): back to sign-in.
 function onUnauthorized() { setToken(""); newToken = ""; if (status) status.device.claimed = true; route(); }
 class ApiError extends Error { constructor(status, body) { super((body && (body.detail || body.error)) || "HTTP " + status); this.status = status; this.body = body; } }
-async function api(method, path, body) {
+// ms: a timeout, so a phone that drops off the access point isn't left waiting (§10.2).
+// Not AbortSignal.timeout(): iOS 15's WebKit (also the captive sheet's) lacks it.
+const tmo = (ms) => { if (!ms) return; const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal; };
+async function api(method, path, body, ms) {
   const headers = {};
   if (token) headers.Authorization = "Bearer " + token;
   let data;
   if (body !== undefined) { headers["Content-Type"] = "application/json"; data = JSON.stringify(body); }
-  const r = await fetch("/api/v1" + path, { method, headers, body: data, cache: "no-store" });
+  const r = await fetch("/api/v1" + path, { method, headers, body: data, cache: "no-store", signal: tmo(ms) });
   let j = null;
   if (r.status !== 204) { try { j = await r.json(); } catch (e) {} }
   if (r.status === 401) { onUnauthorized(); throw new ApiError(401, j); }
@@ -169,26 +174,30 @@ function targetPicker(after, help) {
   return h("div.row", { style: "margin-bottom:.7rem" }, opt("Target", help + " This browser remembers the choice; until one is made it is the default target.", sel));
 }
 
+async function getStatus() { status = await (await fetch("/api/v1/status", { cache: "no-store", signal: tmo(4000) })).json(); }
 async function refresh() {
   clearTimeout(timer);
   try {
-    status = await (await fetch("/api/v1/status", { cache: "no-store" })).json();
+    await getStatus();
     header();
     if (view === "status") renderStatus();
+    if (view === "wifi") renderWifi();
   } catch (e) { $("#hdr").textContent = "offline: retrying…"; }
   timer = setTimeout(refresh, active(status && status.job) ? 1000 : 10000);
 }
 function header() {
-  const d = status.device || {}, w = d.wifi || {};
-  $("#hdr").textContent = [d.hostname, d.version, w.connected ? ((cfg && cfg.wifi_ssid) || "WiFi") + " " + w.rssi + " dBm" : "WiFi down"].filter(Boolean).join(" · ");
+  const d = status.device || {}, w = d.wifi || {}, ap = d.ap || {};
+  $("#hdr").textContent = [d.hostname, d.version, w.connected ? ((cfg && cfg.wifi_ssid) || "WiFi") + " " + w.rssi + " dBm" : ap.active ? "AP " + ap.ssid + " · " + ap.clients + " client(s)" : "WiFi down"].filter(Boolean).join(" · ");
   const j = status.job;
   $("#hjob").replaceChildren(j && j.id ? badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]) : "");
+  // Open access point and no token (§9.5).
+  $("#warn").replaceChildren(ap.warning ? note("warn", ap.warning, " ", h("a", { href: "#wifi" }, "Set an access-point password"), " or ", h("a", { href: "#system" }, "require a token"), ".") : "");
 }
 
 // ---- router -----------------------------------------------------------------------------
-const VIEWS = { status: viewStatus, image: viewImage, target: viewTarget, runs: viewRuns, logs: viewLogs, system: viewSystem };
+const VIEWS = { status: viewStatus, image: viewImage, target: viewTarget, runs: viewRuns, logs: viewLogs, wifi: viewWifi, system: viewSystem };
 async function route() {
-  stopLogs();
+  stopLogs(); clearTimeout(wifiTimer);
   if (!status) await refresh();
   if (!status) return;
   // Token auth is opt-in: with no token set on the device, everything is open.
@@ -196,7 +205,8 @@ async function route() {
   else if (!token) return viewToken();
   $("#nav").hidden = false;
   if (!cfg) cfg = await api("GET", "/config").catch(() => null);
-  const [name, arg] = (location.hash.slice(1) || "status").split("/");
+  // A phone on the access point with no WiFi up is there to set the WiFi (§9.5).
+  const [name, arg] = (location.hash.slice(1) || (status.device.ap?.via_ap && !status.device.wifi.connected ? "wifi" : "status")).split("/");
   view = VIEWS[name] ? name : "status";
   for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("on", a.getAttribute("href") === "#" + view);
   VIEWS[view](arg);
@@ -215,7 +225,9 @@ function viewToken() {
   $("#main").replaceChildren(h("section.center", h("h2", "Sign in"),
     h("p", "This DFU32 requires an API token. Paste the one shown when the token was turned on."),
     h("div.row", inp, btn),
-    h("p.mute.small", "Lost it? On the console run ", h("code", "token rotate"), " for a new one or ", h("code", "token clear"), " to turn the token off, or hold the button 5–15 s to turn it off.")));
+    h("p.mute.small", "Lost it? On the console run ", h("code", "token rotate"), " for a new one or ", h("code", "token clear"), " to turn the token off, or hold the button 5–15 s to turn it off."),
+    // A captive-portal sheet keeps no storage (§9.5 [bench]).
+    status.device.ap?.via_ap ? h("p.mute.small", "In a sign-in pop-up the token isn't remembered; paste it again or open ", h("code", "http://192.168.4.1/"), " in your browser.") : null));
 }
 
 // ---- status -----------------------------------------------------------------------------
@@ -246,7 +258,7 @@ function renderStatus() {
       sec.append(h("div.bar", h("i", { style: "width:" + pct + "%" })), h("div.small.mute", kB(j.bytes_done) + " of " + kB(j.bytes_total) + " (" + pct + "%)" + (j.rate_bps ? " · " + (j.rate_bps / 1000).toFixed(1) + " kB/s" : "") + (j.attempt ? " · attempt " + j.attempt + " of " + j.max_attempts : "")));
     }
     if (j.state === "AWAITING_TARGET") sec.append(note("info", "Run ", h("code", "start ota"), " on the repeater now (USB, or remotely over LoRa from the companion app). Giving up in " + j.arm_remaining_s + " s."));
-    if (j.wifi_off && busy && ["RADIO_HANDOVER", "DFU_RUNNING"].includes(j.state)) sec.append(note("info", "WiFi is off for the transfer; this page catches up when it is back."));
+    if (j.wifi_off && busy && ["RADIO_HANDOVER", "DFU_RUNNING"].includes(j.state)) sec.append(note("info", "WiFi is off for the transfer; this page catches up when it is back." + (status.device.ap?.active ? " The access point goes off too; a phone on it rejoins afterwards." : "")));
     if (j.error) sec.append(note("bad", j.error));
     if (j.target_erased && j.state === "FAILED") sec.append(note("warn", "The repeater's app was erased. It waits in its bootloader (usually at MAC+1): flash again with source \"staged\" to recover."));
     if (j.version) sec.append(dl([["Image", j.version], ["Bootloader", j.bootloader], ["Run", j.run ? h("a", { href: "#runs/" + j.run }, "#" + j.run) : ""]]));
@@ -307,7 +319,7 @@ function actionControls(tid, fetches) {
   c.row2 = h("div.row", { style: "margin-top:.7rem" },
     opt("Flash from", fetches ? "Where Flash takes the image. manifest: fetch it from the target's manifest URL first (reusing the staged copy if it is the same). staged image: flash what the Image page shows, with no download." : "Flash sends the staged image: the one the Image page shows. With a manifest URL on the target, DFU32 can fetch images from a server instead.", c.source),
     opt("Arm timeout (s)", "For this flash only: how long DFU32 waits for the repeater to appear after you press Flash, which is the time you have to run start ota on it. 10–3600 s. Blank uses the target's setting (Target → Tuning, 600 s unless changed).", c.arm),
-    opt("WiFi off during the transfer", "Stops DFU32's WiFi while the image is sent, so its radio serves Bluetooth alone; this page is unreachable meanwhile and catches up afterwards. Starts out as the default from System → Settings.", c.wifiOff, true));
+    opt("WiFi off during the transfer", "Stops DFU32's WiFi while the image is sent, so its radio serves Bluetooth alone; this page is unreachable meanwhile and catches up afterwards. The access point goes off too; a phone on it rejoins afterwards. Starts out as the default from System → Settings.", c.wifiOff, true));
   return (actCtl = c);
 }
 
@@ -569,6 +581,93 @@ function viewLogs() {
   poll();
 }
 
+// ---- wifi (station and fallback access point, §9.5) -------------------------------------
+// The access point's limits, as in dfu32_core/ap.hpp (tools/test_ui.py compares them).
+const kAp = { delay: 120, min: 30, max: 1800, pwMin: 8, pwMax: 63 };
+let wifiTimer = 0;
+function apState() {
+  const ap = status.device.ap || {};
+  return !ap.supported ? "not in this build" : ap.active ? "on: " + ap.clients + " of 4 phones" : !ap.enabled ? "off" :
+    ap.standby_s != null ? "standby: comes up in " + ap.standby_s + " s without WiFi" : "standby" + (status.device.wifi.connected ? " (WiFi connected)" : "");
+}
+// The station part, redrawn by every refresh while the view is open.
+function renderWifi() {
+  const d = status.device, w = d.wifi, ap = d.ap || {}, ssid = cfg && cfg.wifi_ssid;
+  $("#wsta")?.replaceChildren(h("h2", "WiFi"), dl([["Network", ssid || "not set"],
+    ["State", w.connected ? badge("connected", "ok") : cfg && !ssid ? badge("not set") : w.paused ? badge("paused while a phone is on the access point", "warn") : badge("not connected", "bad")],
+    ["IP", w.connected ? w.ip : ""], ["Signal", w.connected ? w.rssi + " dBm" : ""], ["Access point", apState()]]),
+    ap.via_ap ? note("info", "You're on DFU32's own access point (" + ap.ssid + "). It has no internet.") : null);
+}
+async function viewWifi() {
+  cfg = await api("GET", "/config", undefined, 4000).catch(() => cfg);
+  const ap = status.device.ap || {}, out = [h("section", { id: "wsta" })], list = h("div"), prog = h("div");
+  const ssid = h("input", { placeholder: "Other network…", maxlength: 32, autocomplete: "off" });
+  const pw = h("input", { type: "password", autocomplete: "off" });
+  // A 409 (a join running, WiFi stopped) says why instead of listing nothing.
+  const scan = h("button", { onclick: () => act(scan, async () => {
+    list.replaceChildren(h("p.mute", "Scanning…"));
+    try {
+      const r = await api("POST", "/wifi/scan", undefined, 15000);
+      list.replaceChildren(r.networks.length ? h("table", r.networks.map((n) => h("tr", h("td", n.ssid || "(hidden)", n.secured ? [" ", badge("locked")] : ""), h("td", n.rssi + " dBm"),
+        h("td", n.ssid && h("button", { onclick: () => { ssid.value = n.ssid; pw.focus(); } }, "Use"))))) : h("p.mute", "No networks found."));
+    } catch (e) { list.replaceChildren(h("p.mute", e.message)); }
+  }) }, "Scan");
+  const go = h("button.pri", { onclick: async () => {
+    const s = ssid.value, until = Date.now() + 60000, end = (n) => { go.disabled = false; prog.replaceChildren(n); };
+    if (!s) return toast("Pick a network");
+    go.disabled = true;
+    // 202 means the attempt is pending. No answer (the phone dropped) may still mean it
+    // started, so follow /status; an older attempt's result counts only once this one shows.
+    let seen = false;
+    try { await api("PUT", "/wifi", { ssid: s, password: pw.value }, 4000); seen = true; }
+    catch (e) { if (e.status) return end(note("bad", e.message)); }
+    async function poll() {
+      if (view !== "wifi" || !prog.isConnected) return;
+      try {
+        await getStatus(); header();
+        const d = status.device, a = d.wifi.attempt || {};
+        seen ||= a.state === "pending" || a.state === "joining";
+        if (seen && a.state === "joined") {
+          if (cfg) cfg.wifi_ssid = s;
+          end(note("info", "Connected. On that network DFU32 is at http://" + d.wifi.ip + "/ and http://" + d.hostname + ".local/." + (d.ap?.via_ap ? " Switch this phone back to that network; the access point turns off once it leaves." : "")));
+        } else if (seen && a.state === "failed") end(note("bad", "Couldn't join " + s + ": " + a.detail + "; the previous network was put back."));
+        else prog.replaceChildren(h("p.mute", "Joining " + s + "… (" + a.state + ")"));
+        renderWifi();
+        if (!go.disabled) return;
+      } catch (e) { prog.replaceChildren(h("p.mute", "Reconnecting…")); }
+      if (Date.now() > until) return end(note("warn", "No result after a minute: if DFU32 joined " + s + ", find it on that network."));
+      wifiTimer = setTimeout(poll, 2000);
+    }
+    poll();
+  } }, "Connect");
+  out.push(h("section", h("h2", "Join a network"), scan, list, h("div.form", { style: "margin:.7rem 0" },
+      opt("Network (SSID)", "The network DFU32 joins: Use one from the scan, or type its name (hidden ones too).", ssid),
+      opt("Password", "Blank for an open network. If DFU32 can't join, it puts the previous network back.", pw)),
+    ap.via_ap ? note("info", "Your phone may drop off " + ap.ssid + " for a few seconds while DFU32 joins; this page reconnects by itself.") : null, go, prog));
+
+  if (ap.supported && cfg) {
+    const en = h("input", { type: "checkbox", checked: cfg.ap_enabled });
+    const delay = h("input", { type: "number", value: cfg.ap_delay_s, min: kAp.min, max: kAp.max, placeholder: kAp.delay });
+    const apw = h("input", { type: "password", autocomplete: "off", minlength: kAp.pwMin, maxlength: kAp.pwMax, placeholder: cfg.ap_password_set ? "set: leave blank to keep" : "none: open" });
+    // Asked of a phone on the access point, which these changes knock off (§10.2).
+    const bye = () => status.device.ap.via_ap ? "This phone will be disconnected from " + ap.ssid + ". " : "";
+    const put = (btn, body) => act(btn, async () => { cfg = await api("PUT", "/config", body, 4000); toast("Saved: applies in a moment"); viewWifi(); });
+    const save = h("button.pri", { onclick: () => {
+      const body = { ap_enabled: en.checked, ap_delay_s: Number(delay.value) || kAp.delay };
+      if (apw.value) body.ap_password = apw.value;
+      if (!bye() || !(cfg.ap_enabled && !en.checked || en.checked && apw.value) || confirm(bye() + (en.checked ? "Rejoin it with the new password." : "The access point turns off.") + " Continue?")) put(save, body);
+    } }, "Save");
+    const open = h("button.dng", { hidden: !cfg.ap_password_set, onclick: () => confirm(bye() + "Make the access point open? Anyone in range can join it.") && put(open, { ap_password: "" }) }, "Make it open");
+    out.push(h("section", h("h2", "Access point"), h("div.form",
+        opt("Fallback access point", "DFU32's own network, for a phone to reach this page; off by default. Its name is the hostname. It comes up at once when no WiFi network is stored, otherwise after the start delay without WiFi, and goes off 30 s after WiFi is back and no phone is on it.", en, true),
+        opt("Start after (s)", "Time without WiFi before the access point comes up, 30–1800 s; default 120.", delay),
+        opt("Password", "WPA2, 8–63 characters, never shown. Blank keeps it; without one the access point is open.", apw)),
+      h("div.row", { style: "margin-top:.7rem" }, save, open)));
+  }
+  $("#main").replaceChildren(...out);
+  renderWifi();
+}
+
 // ---- system -----------------------------------------------------------------------------
 async function viewSystem() {
   cfg = await api("GET", "/config").catch(() => cfg);
@@ -619,25 +718,25 @@ async function viewSystem() {
     const rotate = h("button", { onclick: () => { if (confirm("Issue a new API token? The old one stops working everywhere (scripts, Home Assistant).")) act(rotate, async () => {
       showToken((await api("POST", "/system/token/rotate")).token);
     }); } }, "Rotate token");
-    const off = h("button", { onclick: () => { if (confirm("Stop requiring a token? Anyone who can reach DFU32 on your network can then use this page and the API.")) act(off, async () => {
+    const off = h("button", { onclick: () => { if (confirm("Stop requiring a token? Anyone who can reach DFU32 on your network or join its open access point can then use this page and the API.")) act(off, async () => {
       await api("POST", "/system/token/clear"); setToken(""); newToken = ""; status.device.claimed = false; viewSystem(); toast("Token turned off");
     }); } }, "Turn off token");
     access.push(h("p.mute.small", "An API token is required for everything but the status summary."),
       h("div.row", rotate, off, h("button", { onclick: () => { setToken(""); newToken = ""; route(); } }, "Sign out of this browser"), reboot));
   } else {
     const on = h("button", { onclick: () => act(on, async () => { showToken((await api("POST", "/claim")).token); }) }, "Require a token");
-    access.push(h("p.mute.small", "No token is set: anyone who can reach DFU32 on your network can use this page and the API. Require a token to lock it down; each browser then signs in once."),
+    access.push(h("p.mute.small", "No token is set: anyone who can reach DFU32 on your network or join its open access point can use this page and the API. Require a token to lock it down; each browser then signs in once."),
       h("div.row", on, reboot));
   }
 
   $("#main").replaceChildren(
     h("section", h("h2", "Device"), dl([["Firmware", d.version + (cfg.partition ? " (" + cfg.partition + ")" : "")], ["Board", d.board], ["Hostname", d.hostname + ".local"], ["Uptime", dur(d.uptime_s * 1000)],
-      ["WiFi", w.connected ? (cfg.wifi_ssid || "") + " · " + w.ip + " · " + w.rssi + " dBm" : "not connected"], ["Clock", d.unix_time ? when(d.unix_time) : "not synced"], ["BLE", d.busy ? "in use: " + d.busy : "free"]])),
+      ["WiFi", w.connected ? (cfg.wifi_ssid || "") + " · " + w.ip + " · " + w.rssi + " dBm" : "not connected"], ["Clock", d.unix_time ? when(d.unix_time) : "not synced"], ["Access point", apState()], ["BLE", d.busy ? "in use: " + d.busy : "free"]])),
     h("section", h("h2", "Settings"), h("div.form",
-        opt("Hostname", "DFU32's name on your network: it answers at http://<hostname>.local/. Lowercase letters, digits and '-', up to 31. Blank goes back to the default, dfu32- and the last four digits of its MAC. Takes effect after a reboot.", host),
+        opt("Hostname", "DFU32's name on your network: it answers at http://<hostname>.local/. It is also the access point's name. Lowercase letters, digits and '-', up to 31. Blank goes back to the default, dfu32- and the last four digits of its MAC. Takes effect (and renames the access point) after a reboot.", host),
         opt("NTP server", "The time server DFU32 asks for the clock that dates run records. Blank uses pool.ntp.org; give a server on your network if it has no internet. Takes effect after a reboot.", ntp),
         opt("Run deadline cap (s)", "The longest a flash may run once the repeater is found, 120–7200 s; default 1200. DFU32 works out a deadline from the image size and the number of attempts, and this caps it: when it passes, DFU32 drops the link and brings WiFi back.", deadline)),
-      h("div.row", { style: "margin-top:.7rem" }, opt("Stop WiFi during transfers by default", "Whether Flash starts with \"WiFi off during the transfer\" ticked. With WiFi off, DFU32's radio serves Bluetooth alone, and this page is unreachable until the transfer ends. The Status page can still change it for one flash.", wifiOff, true), save)),
+      h("div.row", { style: "margin-top:.7rem" }, opt("Stop WiFi during transfers by default", "Whether Flash starts with \"WiFi off during the transfer\" ticked. With WiFi off, DFU32's radio serves Bluetooth alone, and this page is unreachable until the transfer ends. The access point goes off too; a phone on it rejoins afterwards. The Status page can still change it for one flash.", wifiOff, true), save)),
     h("section", h("h2", "Firmware update"), h("p.mute.small", "Upload the app image for this board: " + appFile + " from a release (dfu32.bin from a CI build), not the -merged.bin. If the new firmware can't bring WiFi and this page back within 90 s, it rolls back by itself."),
       h("div.row", file, opt("allow another board's build", "Skips the check that the file was built for this DFU32's board (shown under Device above). Leave it off unless you are moving to a different build on purpose: firmware for other hardware may not boot, and DFU32 then rolls back.", force, true), upload), prog),
     h("section", h("h2", "Access"), ...access,
@@ -645,17 +744,18 @@ async function viewSystem() {
         h("button", { onclick: () => { newToken = ""; viewSystem(); } }, "Done, I copied it")] : null));
 }
 async function waitBack(version, prog) {
-  const until = Date.now() + 150000;
+  // Over the access point, a provisioned DFU32 brings it back only after its start delay.
+  const ms = 1000 * (150 + (status.device.ap?.via_ap ? cfg.ap_delay_s || kAp.delay : 0)), until = Date.now() + ms;
+  if (ms > 150000) prog.append(h("p.mute.small", "The access point may take up to " + dur(ms) + " to come back; rejoin it then."));
   await new Promise((r) => setTimeout(r, 5000));
   while (Date.now() < until) {
     try {
-      const s = await (await fetch("/api/v1/status", { cache: "no-store" })).json();
-      status = s; header();
+      await getStatus(); const s = status; header();
       prog.replaceChildren(note(s.device.version === version ? "info" : "warn", s.device.version === version ? "Back up on " + version + "." : "Back up, but on " + s.device.version + ": the new firmware rolled back. Check the console log."));
       return;
     } catch (e) { await new Promise((r) => setTimeout(r, 3000)); }
   }
-  prog.replaceChildren(note("warn", "No answer after 2.5 minutes. Check the device's console."));
+  prog.replaceChildren(note("warn", "No answer after " + dur(ms) + ". Check the device's console."));
 }
 
 route();

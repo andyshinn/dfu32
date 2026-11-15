@@ -215,6 +215,7 @@ void indicator_task(void*) {
         in.provisioned = ns.provisioned;
         in.wifi_connected = ns.connected;
         in.wifi_stopped = ns.stopped;
+        in.ap_up = ns.ap.active;  // SPEC.md §9.5: AccessPoint pattern while the AP is up and no STA IP
         in.improv_active = g_hooks.improv_active && g_hooks.improv_active();
         in.identify = g_hooks.identifying && g_hooks.identifying();
         const int64_t pressed = g_pressed_at_us.load();
