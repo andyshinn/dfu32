@@ -51,9 +51,12 @@ const blink_step_t kIdentify[] = {COLOR(255, 255, 255), LEVEL(255, 100), LEVEL(0
 const blink_step_t kHold2[] = {COLOR(255, 110, 0), LEVEL(255, 400), LEVEL(0, 400), LOOP};
 const blink_step_t kHold5[] = {COLOR(255, 110, 0), LEVEL(255, 100), LEVEL(0, 100), LOOP};
 const blink_step_t kHold15[] = {COLOR(255, 110, 0), LEVEL(255, 0), STOP};
+// SPEC.md §13.4: DFU32's own access point is up and the station has no IP.
+// Offline's timing, in dim blue.
+const blink_step_t kAccessPoint[] = {COLOR(0, 0, 255), LEVEL(80, 1000), LEVEL(0, 1000), LOOP};
 
 const blink_step_t* kNeoLists[] = {kOff,    kIdle,    kOffline,  kImprov, kFetching, kAwaiting, kTransfer,
-                                   kSuccess, kFailed, kErased, kIdentify, kHold2,   kHold5,    kHold15};
+                                   kSuccess, kFailed, kErased, kIdentify, kHold2,   kHold5,    kHold15, kAccessPoint};
 static_assert(sizeof(kNeoLists) / sizeof(kNeoLists[0]) == static_cast<size_t>(Pattern::Count));
 
 // ---- red LED (plain GPIO) -----------------------------------------------------------

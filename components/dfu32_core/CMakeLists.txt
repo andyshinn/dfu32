@@ -1,10 +1,13 @@
-# dfu32_core: pure C++ job logic (JSON, URLs, manifests, staging writer). No
-# ESP-IDF dependencies, so it builds both as an IDF component and as a plain
-# CMake library for host unit tests (test/host). JSON parsing uses cJSON:
+# dfu32_core: pure C++ job logic (JSON, URLs, manifests, staging writer, the
+# access-point policy and captive portal). No ESP-IDF dependencies, so it
+# builds both as an IDF component and as a plain CMake library for host unit
+# tests (test/host). JSON parsing uses cJSON:
 # espressif/cjson in the firmware (idf_component.yml), the same upstream
 # release fetched here for host builds.
 set(DFU32_CORE_SRCS
+    src/ap.cpp
     src/api_core.cpp
+    src/captive.cpp
     src/errors.cpp
     src/job.cpp
     src/json.cpp

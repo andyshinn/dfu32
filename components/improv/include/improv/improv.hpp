@@ -4,11 +4,14 @@
 // from a phone or browser (Home Assistant, the Improv web page). It runs only
 // while DFU32 has no network stored, for 5 minutes after a 2 s button press,
 // or when started from the console. While it runs it holds the device-wide
-// BLE lease, so no scan or flash can start (409 Busy, holder "improv").
+// BLE lease, so no scan or flash can start (409 Busy, holder "improv"). The
+// window opened at boot closes when the first phone joins DFU32's access
+// point (SPEC.md §9.5), so its lease doesn't lock out the AP operator.
 #pragma once
 
 #include <cstdint>
 #include <span>
+#include <string>
 
 #include "improv/core.hpp"
 
@@ -66,5 +69,39 @@ void serial_deliver(uint8_t type, std::span<const uint8_t> data);
 /// The reader dropped a frame (bad checksum, too long): answers INVALID_RPC,
 /// so the client doesn't wait for its timeout.
 void serial_invalid_frame();
+
+}  // namespace dfu32::improv
+
+// ---- Station setup from the web UI (SPEC.md §9.5) ---------------------------------------
+//
+// PUT /api/v1/wifi runs the same kind of attempt as Improv, on the Improv
+// Serial task, so there is at most one attempt across Improv BLE, Improv
+// Serial and the web.
+
+namespace dfu32::improv {
+
+enum class WebAttemptState : uint8_t { None, Pending, Joining, Joined, Failed };
+
+struct WebAttempt {
+    WebAttemptState state = WebAttemptState::None;
+    uint8_t reason = 0;   // wifi_err_reason_t when Failed by timeout (0 if none recorded)
+    bool refused = false; // Failed because the lease was held or another attempt ran when it was due
+};
+
+/// Queues an attempt on the Improv Serial task that starts `delay_ms` later,
+/// so the 202 reaches the phone before the AP follows the station to another
+/// channel. Like an Improv attempt: lease "wifi-setup", 30 s for an IP, the
+/// previous network put back on failure, and an open Improv BLE window closed
+/// on success. Copies the passphrase and wipes it once used. False if one is
+/// already pending or running, or the task isn't up.
+bool web_connect(const std::string& ssid, const std::string& password, uint32_t delay_ms = 1500);
+
+/// The last web attempt, kept in RAM until the next one so a phone that
+/// rejoined the AP can still read the outcome (/status device.wifi.attempt).
+WebAttempt web_attempt();
+
+/// True while any Improv BLE, Improv Serial or web attempt runs, or a web
+/// attempt is pending: PUT /wifi and the WiFi scan answer 409 then.
+bool attempt_running();
 
 }  // namespace dfu32::improv

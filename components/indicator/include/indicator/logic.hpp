@@ -28,6 +28,7 @@ enum class Pattern : uint8_t {
     Hold2,      // amber slow blink: release now opens the Improv window
     Hold5,      // amber fast blink: release now clears the API token
     Hold15,     // solid amber: release now factory-resets
+    AccessPoint,  // dim blue, slow blink: DFU32's access point is up and the station has no IP
     Count,
 };
 
@@ -61,6 +62,7 @@ struct Inputs {
     bool provisioned = false;     // WiFi credentials stored
     bool wifi_connected = false;
     bool wifi_stopped = false;    // stopped on purpose for a transfer
+    bool ap_up = false;           // DFU32's own access point is up (SPEC.md §9.5)
     bool improv_active = false;
     bool identify = false;
     uint8_t hold_level = 0;       // 0, 2, 5 or 15 (seconds held so far)
@@ -75,7 +77,9 @@ struct Output {
 
 /// Highest priority first: button feedback, identify, a running job (its
 /// progress beats stale outcomes), Improv, erased target, failure, success,
-/// WiFi down, idle.
+/// WiFi down, idle. At the WiFi-down level the access point (SPEC.md §9.5)
+/// shows instead of WiFi down, or of idle when nothing is stored, while it is
+/// up and the station has no IP: it tells the operator where to connect.
 Output decide(const Inputs& in);
 
 enum class ButtonAction : uint8_t { None, ImprovWindow, ClearToken, FactoryReset };

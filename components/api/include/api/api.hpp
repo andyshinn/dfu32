@@ -21,4 +21,8 @@ std::string rotate_token();
 /// on again with a new token.
 bool clear_token();
 
+/// An API token is set (cached, no NVS read). Feeds the open-AP warning
+/// (SPEC.md §9.5, ap::ap_warning).
+bool claimed();
+
 }  // namespace dfu32::api

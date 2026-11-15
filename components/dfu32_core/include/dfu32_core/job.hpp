@@ -97,6 +97,33 @@ uint32_t run_deadline_s(uint32_t attempts, uint32_t bin_size, uint32_t cap_s) no
 
 inline constexpr uint32_t kDefaultDeadlineMaxS = 1200;
 
+/// SPEC.md §7.3 layer 4 (restore verification), decided after restore
+/// attempt `attempt` (1 or 2) has run its course. In order:
+/// - !expect_connect -> Done: the home network was already down at the
+///   handover, so a missing IP is not the restore's fault (never a reboot);
+/// - fault (the `restore_fail` injection, which stands for a dead radio) ->
+///   Retry, then Reboot, so the bench can exercise the reboot path;
+/// - sta_ip -> Done;
+/// - attempt < 2 -> Retry;
+/// - radio_alive -> Done: the driver works (it reported a disconnect or
+///   connect failure since the restore, or DFU32's access point is up), only
+///   the home network is gone; rebooting wouldn't bring it back and would drop
+///   the phones on the access point (§9.5), so keep running and let the
+///   station keep retrying;
+/// - otherwise Reboot: no sign of life from the driver.
+enum class RestoreStep : uint8_t { Done, Retry, Reboot };
+RestoreStep restore_step(bool expect_connect, bool sta_ip, bool fault, bool radio_alive, uint8_t attempt) noexcept;
+
+/// The first-boot WiFi test of a pending OTA image (SPEC.md §10.1 rollback,
+/// §12.3), decided once the 90 s window ends: it rolls back only for faults
+/// the new image could have caused. In order: a station IP confirms; an
+/// access point started since boot confirms (§9.5: the radio works); no
+/// stored network confirms without a network test; a disconnect reason
+/// (`last_reason` != 0: network not found, wrong passphrase) confirms, since the
+/// radio works and the router is at fault; no WiFi activity at all rolls back.
+enum class OtaVerdict : uint8_t { Confirm, ConfirmAccessPoint, ConfirmNoNetwork, ConfirmRadioWorks, Rollback };
+OtaVerdict ota_verdict(bool sta_ip, bool ap_started, bool provisioned, uint8_t last_reason) noexcept;
+
 /// What GET /api/v1/status shows about the current (or last) job.
 struct Snapshot {
     uint32_t id = 0;                 // increments per job; 0 = none since boot
