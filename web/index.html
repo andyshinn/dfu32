@@ -297,7 +297,12 @@ footer a { color: var(--muted); }
   const customStatus = document.getElementById('custom-status');
   const customFile = document.getElementById('custom-file');
   const hintDefault = hint.textContent;
-  const fwNoteDefault = fwNote.textContent;
+  // dfu32.app/?prerelease=1 also lists pre-releases. Without it they stay off
+  // the list, so a pre-release can be published (and the page redeployed with
+  // it, SPEC §9.4) and tried before anyone else is offered it.
+  const SHOW_PRERELEASES = new URLSearchParams(location.search).get('prerelease') === '1';
+  const fwNoteDefault = fwNote.textContent + (SHOW_PRERELEASES ? ' Pre-releases are listed too (?prerelease=1): they are for testing and may have problems.' : '');
+  fwNote.textContent = fwNoteDefault;
   const customStatusDefault = customStatus.innerHTML;
 
   // The board the user picks is kept in a first-party cookie, so coming back to
@@ -742,6 +747,7 @@ footer a { color: var(--muted); }
     Object.assign(VERSIONS[0], { channel: first.channel || '', tag: first.tag || null });
     for (const e of rest) {
       if (!e || !e.version || !e.manifests || VERSIONS.some(v => v.version === String(e.version))) continue;
+      if (e.channel === 'pre-release' && !SHOW_PRERELEASES) continue;
       VERSIONS.push({ version: String(e.version), channel: e.channel || '', tag: e.tag || null, published_at: e.published_at || null, manifests: e.manifests });
     }
     renderVersions();

@@ -149,7 +149,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
 - **Partition baseline:** `tools/check_partitions.py` checks `nvs`, `runlog` and `staging` against a committed baseline, so a layout change that would break keep-settings updates can't land by accident (SPEC §9.4).
 - **CI**: a `pages` job in `ci.yml` (details in SPEC §9.4):
   - runs on `push` to `main`, `release: published` and `workflow_dispatch`. Each run builds the firmware (a release run from the tag) and uses that run's artifacts;
-  - deploys only for the latest stable release, never a pre-release or a patch to an older line, under a `pages` concurrency group;
+  - deploys for the latest stable release, never a patch to an older line, under a `pages` concurrency group. A pre-release deploys too, but stays hidden unless the page is opened with `?prerelease=1`, and the default stays the latest stable release;
   - pushes and manual runs don't deploy: after v0.5.1 the page serves releases only (a `main` deploy and a release of the same commit shared one Pages deployment name, so the release never went live; SPEC §9.4);
   - generates the manifests and copies `web/`, the parts and the manifests into one directory;
   - it publishes that directory with `actions/upload-pages-artifact` and `actions/deploy-pages`. The `.bin` files have to be served from Pages itself, because release-asset downloads don't send CORS headers;
@@ -162,7 +162,7 @@ A static page on GitHub Pages that flashes DFU32 over Web Serial and sets WiFi w
   - a wrong passphrase shows the Improv error, and the retry works;
   - coming back with DFU32 installed: the page recognises it, and updating keeps WiFi, the token, the target and the staged image;
   - the console REPL still works in a terminal afterwards, including after a cut-off Improv frame;
-  - after the first release is published, the page serves it. Publishing a pre-release leaves the page alone.
+  - after the first release is published, the page serves it. Publishing a pre-release keeps that default and lists the pre-release only at `?prerelease=1`.
 - **Done when:** someone else can go from a fresh Feather to a successful repeater flash using only the browser (moved here from M4).
 
 ## M6: v1.0 hardening (2 days)

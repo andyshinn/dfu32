@@ -227,9 +227,9 @@ class Site:
             img = app_image(chip, version or tag, **{"board": board, **app})
             (d / f"dfu32-{board}-merged.bin").write_bytes(merged_image(chip, table, app=img)[0])
 
-    def index(self, releases, channel="main", tag=None, limit=20):
+    def index(self, releases, channel="main", tag=None, limit=20, **kw):
         self.warnings = []
-        return wv.build_index(self.site, releases, self.assets, channel, tag, limit, warn=self.warnings.append)
+        return wv.build_index(self.site, releases, self.assets, channel, tag, limit, warn=self.warnings.append, **kw)
 
     def __enter__(self):
         return self
@@ -400,6 +400,95 @@ class Index(unittest.TestCase):
                 self.assertEqual(wv.main(["--site", str(s.site), "--releases", str(releases) + ".missing",
                                           "--assets", str(s.assets)]), 1)
             self.assertIn("error:", err.getvalue())
+
+
+BOTH = (("feather_esp32s3", CHIP_S3, TABLE_4MB), ("feather_esp32_v2", CHIP_ESP32, TABLE_8MB))
+
+
+def baseline(notice_4mb=None, notice_8mb=None) -> dict:
+    def table(entries, notice):
+        return {"partitions": {label: {"offset": hex(off), "size": hex(size)}
+                               for label, _, _, off, size in entries if label in wv.KEPT},
+                "erase_notice": notice}
+    return {"tables": {"4mb.csv": table(TABLE_4MB, notice_4mb), "8mb.csv": table(TABLE_8MB, notice_8mb)}}
+
+
+class PreReleaseRun(unittest.TestCase):
+    """--default-release: a pre-release run whose page keeps the latest stable release as its default."""
+
+    RELEASES = [rel("v0.5.0", "2026-03-01T00:00:00Z"), rel("v0.6.0-rc.1", "2026-04-01T00:00:00Z", pre=True)]
+
+    def site(self):
+        s = Site(boards=())  # no manifest-<board>.json: this run's build is only in ASSETS/<its tag>
+        s.release("v0.5.0", boards=BOTH)
+        s.release("v0.6.0-rc.1", boards=BOTH)
+        return s
+
+    def test_stable_is_the_default_and_the_prerelease_is_listed(self):
+        with self.site() as s:
+            ix = s.index(self.RELEASES, channel="release", default_release="v0.5.0")
+            self.assertEqual(ix["default"], "v0.5.0")
+            self.assertEqual([(e["version"], e["channel"], e["tag"]) for e in ix["versions"]],
+                             [("v0.5.0", "release", "v0.5.0"), ("v0.6.0-rc.1", "pre-release", "v0.6.0-rc.1")])
+            self.assertEqual(ix["versions"][0]["manifests"], {"feather_esp32_v2": "manifest-feather_esp32_v2.json",
+                                                              "feather_esp32s3": "manifest-feather_esp32s3.json"})
+            self.assertEqual(ix["versions"][1]["manifests"]["feather_esp32s3"],
+                             "fw/v0.6.0-rc.1/feather_esp32s3/manifest.json")
+            self.assertEqual(s.warnings, [])
+
+    def test_default_manifest_and_parts(self):
+        with self.site() as s:
+            s.index(self.RELEASES, channel="release", default_release="v0.5.0")
+            m = json.loads((s.site / "manifest-feather_esp32_v2.json").read_text())
+            self.assertEqual((m["name"], m["version"], m["new_install_prompt_erase"]), ("DFU32", "v0.5.0", True))
+            self.assertNotIn("dfu32_erase_notice", m)
+            self.assertEqual(m["builds"][0]["chipFamily"], "ESP32")
+            parts = m["builds"][0]["parts"]
+            self.assertEqual([(p["path"], p["offset"]) for p in parts],
+                             [("fw/v0.5.0/feather_esp32_v2/bootloader.bin", 0x1000),
+                              ("fw/v0.5.0/feather_esp32_v2/partition-table.bin", 0x8000),
+                              ("fw/v0.5.0/feather_esp32_v2/ota_data_initial.bin", 0x18000),
+                              ("fw/v0.5.0/feather_esp32_v2/dfu32.bin", 0x30000)])
+            _, expected = merged_image(CHIP_ESP32, TABLE_8MB, app=app_image(CHIP_ESP32, "v0.5.0", "feather_esp32_v2"))
+            for p, (_, data) in zip(parts, expected):
+                self.assertEqual((s.site / p["path"]).read_bytes(), data)
+
+    def test_baseline_notice_by_layout(self):
+        with self.site() as s:
+            s.index(self.RELEASES, channel="release", default_release="v0.5.0",
+                    baseline=baseline(notice_8mb="  8 MB boards moved nvs.  "))
+            notice = lambda b: json.loads((s.site / f"manifest-{b}.json").read_text()).get("dfu32_erase_notice")
+            self.assertEqual(notice("feather_esp32_v2"), "8 MB boards moved nvs.")
+            self.assertIsNone(notice("feather_esp32s3"))
+
+    def test_baseline_of_another_layout_gives_no_notice(self):
+        moved = [e if e[0] != "nvs" else ("nvs", 1, 2, 0x9000, 0x5000) for e in TABLE_4MB]
+        self.assertIsNone(wv.baseline_notice(baseline(notice_4mb="moved"), wv.kept_layout(partition_table(moved))))
+        self.assertEqual(wv.baseline_notice(baseline(notice_4mb="moved"), wv.kept_layout(partition_table(TABLE_4MB))), "moved")
+
+    def test_stable_without_images_fails(self):
+        with Site(boards=()) as s:
+            s.release("v0.6.0-rc.1")
+            with self.assertRaisesRegex(wv.SplitError, "v0.5.0 has no usable"):
+                s.index(self.RELEASES, channel="release", default_release="v0.5.0")
+
+    def test_needs_the_release_channel(self):
+        with self.site() as s, self.assertRaisesRegex(wv.SplitError, "--channel release"):
+            s.index(self.RELEASES, default_release="v0.5.0")
+
+    def test_cli(self):
+        with self.site() as s:
+            root = Path(s.tmp.name)
+            (root / "releases.json").write_text(json.dumps(self.RELEASES))
+            (root / "baseline.json").write_text(json.dumps(baseline()))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(wv.main(["--site", str(s.site), "--releases", str(root / "releases.json"),
+                                          "--assets", str(s.assets), "--channel", "release",
+                                          "--default-release", "v0.5.0", "--baseline", str(root / "baseline.json")]), 0)
+            self.assertEqual(out.getvalue().splitlines(),
+                             ["v0.5.0  release v0.5.0  feather_esp32_v2, feather_esp32s3",
+                              "v0.6.0-rc.1  pre-release v0.6.0-rc.1  feather_esp32_v2, feather_esp32s3"])
 
 
 if __name__ == "__main__":

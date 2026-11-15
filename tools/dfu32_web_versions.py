@@ -42,6 +42,14 @@ Example (the CI pages job, after dfu32_web_manifest.py):
   gh release download <tag> -p 'dfu32-*-merged.bin' -D releases/<tag>    # for each tag
   dfu32_web_versions.py --site _site --releases releases.json --assets releases --channel release --tag v0.5.2
 
+A pre-release run deploys the page too, but keeps the latest stable release as
+its default: --default-release <stable tag> writes that release's manifests in
+place of this run's build (split from ASSETS/<stable tag>), and this run's
+merged images go into ASSETS/<its tag> to be offered like any other release.
+The page lists pre-releases only when opened with ?prerelease=1.
+  dfu32_web_versions.py --site _site --releases releases.json --assets releases --channel release \\
+      --default-release v0.5.2 --baseline partitions/baseline.json
+
 Only releases deploy dfu32.app (SPEC.md §9.4). --channel main (the default)
 labels a build that isn't a release, such as a site assembled locally from
 your own build (README, "Preview the installer page"); the page shows it as
@@ -187,6 +195,66 @@ def split_merged(merged: bytes) -> dict:
     return {"chip_family": family, "parts": parts, "app": app_info(app)}
 
 
+def baseline_notice(baseline: dict, layout: dict[str, tuple[int, int]]) -> str | None:
+    """The erase_notice of the baseline table whose nvs, runlog and staging match LAYOUT.
+
+    A merged image doesn't name its partition CSV, so the table is found by its layout;
+    tables that share one must agree on the notice, or none is given."""
+    notices = set()
+    for entry in baseline.get("tables", {}).values():
+        kept = {name: (int(str(p["offset"]), 0), int(str(p["size"]), 0))
+                for name, p in entry.get("partitions", {}).items() if name in KEPT}
+        if kept == layout:
+            notices.add((entry.get("erase_notice") or "").strip())
+    return (notices.pop() or None) if len(notices) == 1 else None
+
+
+def write_default_release(site: Path, tag: str, assets: Path, baseline: dict | None = None, warn=print) -> None:
+    """Write manifest-<board>.json for release TAG, split from its merged images, in place of this run's build.
+
+    A pre-release run deploys the page too (SPEC.md §9.4), but its default stays the
+    latest stable release: this writes that release where dfu32_web_manifest.py would
+    have written this run's build, so everything after it works the same way."""
+    files = sorted((assets / tag).glob("dfu32-*-merged.bin")) if (assets / tag).is_dir() else []
+    versions = set()
+    for path in files:
+        m = ASSET_RE.match(path.name)
+        if not m or not BOARD_RE.match(m.group(1)):
+            continue
+        board = m.group(1)
+        try:
+            split = split_merged(path.read_bytes())
+        except (SplitError, struct.error) as e:
+            warn(f"{tag} {board}: {e}")
+            continue
+        info = split["app"]
+        if info["project"] != "dfu32" or (info["board"] and info["board"] != board):
+            warn(f"{tag} {board}: the image is {info['project']!r} for {info['board']!r}")
+            continue
+        if versions and info["version"] not in versions:
+            warn(f"{tag} {board}: version {info['version']} differs from {next(iter(versions))}")
+            continue
+        versions.add(info["version"])
+        rel = Path("fw") / version_slug(info["version"]) / board
+        (site / rel).mkdir(parents=True, exist_ok=True)
+        for name, (_, data) in zip(PART_FILES, split["parts"]):
+            (site / rel / name).write_bytes(data)
+        manifest = {
+            "name": "DFU32",
+            "version": info["version"],
+            "new_install_prompt_erase": True,
+            "builds": [{"chipFamily": split["chip_family"],
+                        "parts": [{"path": (rel / name).as_posix(), "offset": off}
+                                  for name, (off, _) in zip(PART_FILES, split["parts"])]}],
+        }
+        notice = baseline and baseline_notice(baseline, kept_layout(split["parts"][1][1]))
+        if notice:
+            manifest["dfu32_erase_notice"] = notice
+        (site / f"manifest-{board}.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    if not versions:
+        raise SplitError(f"{tag} has no usable dfu32-<board>-merged.bin in {assets / tag}")
+
+
 def default_entry(site: Path, channel: str, tag: str | None) -> dict:
     """This run's build: the manifest-<board>.json files dfu32_web_manifest.py wrote."""
     manifests, versions = {}, set()
@@ -280,7 +348,15 @@ def add_release(site: Path, release: dict, assets: Path, default: dict, layouts:
 
 
 def build_index(site: Path, releases: list[dict], assets: Path, channel: str, tag: str | None = None,
-                limit: int = 20, warn=lambda msg: print(f"warning: {msg}", file=sys.stderr)) -> dict:
+                limit: int = 20, warn=lambda msg: print(f"warning: {msg}", file=sys.stderr),
+                default_release: str | None = None, baseline: dict | None = None) -> dict:
+    if default_release:
+        # This run's own build is a pre-release, offered like any other release
+        # (its merged images in ASSETS/<its tag>); the default is DEFAULT_RELEASE.
+        if channel != "release":
+            raise SplitError("--default-release needs --channel release")
+        write_default_release(site, default_release, assets, baseline, warn)
+        tag = default_release
     if channel == "release" and tag and SEMVER_PRE.match(tag):
         channel = "pre-release"  # as the pages gate counts it, even if releases.json doesn't list it
     default = default_entry(site, channel, tag)
@@ -307,10 +383,17 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--channel", choices=("main", "release"), default="main", help="what this site's build is: a release, or any other build (main)")
     ap.add_argument("--tag", help="this run's release tag, if it is one")
     ap.add_argument("--limit", type=int, default=20, help="newest releases to offer (default 20)")
+    ap.add_argument("--default-release", metavar="TAG",
+                    help="make this release the default, split from ASSETS/TAG, instead of manifest-<board>.json "
+                         "already in SITE (a pre-release run: --tag is then ignored)")
+    ap.add_argument("--baseline", type=Path,
+                    help="with --default-release: partition baseline JSON whose erase_notice the default gets")
     a = ap.parse_args(argv)
     try:
         releases = json.loads(a.releases.read_text())
-        index = build_index(a.site, releases, a.assets, a.channel, a.tag, a.limit)
+        baseline = json.loads(a.baseline.read_text()) if a.baseline else None
+        index = build_index(a.site, releases, a.assets, a.channel, a.tag, a.limit,
+                            default_release=a.default_release, baseline=baseline)
     except (SplitError, OSError, json.JSONDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
