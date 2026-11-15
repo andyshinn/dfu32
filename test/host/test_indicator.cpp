@@ -40,6 +40,58 @@ TEST_CASE("Indicator: idle, offline and Improv", "[indicator]") {
     CHECK(decide(unprov).pattern == Pattern::Improv);
 }
 
+TEST_CASE("Indicator: access point", "[indicator]") {
+    // SPEC.md §9.5, §13.4: the AP shows at the WiFi-down level.
+    Inputs in = idle();
+    in.wifi_connected = false;
+    CHECK(decide(in).pattern == Pattern::Offline);  // unchanged without the AP
+    in.ap_up = true;
+    Output o = decide(in);
+    CHECK(o.pattern == Pattern::AccessPoint);
+    CHECK(o.brightness == 255);
+    CHECK(o.red == RedLed::Off);
+    in.wifi_connected = true;  // station back, AP still serving a phone
+    CHECK(decide(in).pattern == Pattern::Idle);
+    in.wifi_connected = false;
+    in.wifi_stopped = true;  // stopped for a transfer: the AP is down with it
+    CHECK(decide(in).pattern != Pattern::AccessPoint);
+    CHECK(decide(in).pattern == Pattern::Idle);
+
+    // Nothing stored: the AP replaces idle, Improv still wins.
+    Inputs unprov;
+    unprov.ap_up = true;
+    CHECK(decide(unprov).pattern == Pattern::AccessPoint);
+    unprov.improv_active = true;
+    CHECK(decide(unprov).pattern == Pattern::Improv);
+
+    // Outcomes outrank the AP as they outrank WiFi down.
+    in = idle();
+    in.wifi_connected = false;
+    in.ap_up = true;
+    in.success_showing = true;
+    CHECK(decide(in).pattern == Pattern::Success);
+    in.failed = true;
+    CHECK(decide(in).pattern == Pattern::Failed);
+    in.erased_pending = true;
+    CHECK(decide(in).pattern == Pattern::Erased);
+
+    // A running job, identify and button holds too.
+    in = idle();
+    in.wifi_connected = false;
+    in.ap_up = true;
+    in.job_state = job::State::DfuRunning;
+    in.bytes_total = 1000;
+    in.bytes_done = 500;
+    o = decide(in);
+    CHECK(o.pattern == Pattern::Transfer);
+    CHECK(o.brightness == 147);
+    in.job_state = job::State::Idle;
+    in.identify = true;
+    CHECK(decide(in).pattern == Pattern::Identify);
+    in.hold_level = 2;
+    CHECK(decide(in).pattern == Pattern::Hold2);
+}
+
 TEST_CASE("Indicator: job phases", "[indicator]") {
     Inputs in = idle();
     for (auto s : {job::State::Fetching, job::State::VerifyingStaged, job::State::Precheck}) {
