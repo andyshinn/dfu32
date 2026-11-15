@@ -438,7 +438,8 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 9. **Rollback rules:**
    - With the router on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
    - Switch the router's WiFi off as soon as the upload finishes. After 90 s the console says "confirmed: WiFi works but … isn't reachable" (a router outage is not the firmware's fault), and it stays on the new version once the router is back.
-   - A real rollback needs a build that breaks itself, which a normal build can't do. Use the console log: a self-check failure, or "shows no WiFi activity", followed by "rolling back to the previous image", and the page reports the old version.
+   - DFU32's own access point never confirms a provisioned image (SPEC §9.5): the confirm log never names the access point.
+   - A real rollback needs a build that breaks itself, which a normal build can't do. Use the console log: a self-check failure, or "shows no station WiFi activity", followed by "rolling back to the previous image", and the page reports the old version.
 10. **Busy:** while a flash runs, **Install** answers busy.
 
 ## 10. Improv Serial and the browser installer (M5)
@@ -484,32 +485,34 @@ These need a phone (ideally an iPhone and an Android phone), a laptop, and the c
 1. **Off by default:** a freshly erased board has `ap` "off" and no `dfu32-xxxx` network, even with no WiFi stored.
 2. **No network stored:** `wifi forget`, then `ap on`. `dfu32-xxxx` appears at once, open; the NeoPixel blinks dim blue; `ap` and the web UI show the open-AP warning while no token is set.
 3. **Start delay:** with a network stored, `ap delay 30` and switch the router off. The access point comes up about 30 s after the IP is lost, and `ap` counts down meanwhile. Switch the router back on with no phone on the access point: it goes away about 30 s after DFU32 has its IP again.
-4. **Password:** `ap password "two words here"`; `ap` says WPA2, a phone on it is dropped and joins with the new password. `ap password clear` opens it again. `ap password short` answers `Not saved: …` and changes nothing. The password never appears in `logs`, `GET /config` (only `ap_password_set`) or `/status`.
-5. **Off wins:** `ap off` with a phone on it takes it down.
-6. **Factory reset:** with the access point up, hold the button 15 s. No `dfu32-xxxx` appears before the reboot, and afterwards `ap` is off.
+4. **Idle limit:** with a network stored, `ap delay 30`, `ap idle 300` and the router off, with no phone on it. The access point comes up about 30 s after the IP is lost and goes away 5 minutes later (the log says "access point down: idle limit reached"); `ap` then counts down and it is back about 30 s later. Join a phone before the 5 minutes are up: it stays up while the phone is on, and the 5 minutes start again when it leaves. `ap idle off`: it stays up. `ap idle 299` answers `Not saved: …`. Repeat with `wifi forget`: the access point comes up at once, and after an idle take-down it returns after the start delay.
+5. **Password:** `ap password "two words here"`; `ap` says WPA2, a phone on it is dropped and joins with the new password. `ap password clear` opens it again. `ap password short` answers `Not saved: …` and changes nothing. The password never appears in `logs`, `GET /config` (only `ap_password_set`) or `/status`.
+6. **Off wins:** `ap off` with a phone on it takes it down.
+7. **Factory reset:** with the access point up, hold the button 15 s. No `dfu32-xxxx` appears before the reboot, and afterwards `ap` is off.
 
 **From a phone:**
 
-7. **Captive pop-up** on iOS, Android, Windows and macOS: joining `dfu32-xxxx` opens the sign-in sheet with the web UI on the WiFi view. Note per OS that the sign-in sheet has short-lived storage (the token must be pasted again) and may block file inputs (Image upload, firmware update). `http://192.168.4.1/` in a normal browser always works, and so does `http://dfu32-xxxx.local/` where the phone resolves `.local`.
-8. **Set the network:** **Scan**, pick the network, **Connect**. The phone drops for a few seconds while the AP moves to the router's channel (CSA), then the page shows "joined" with the new address. Note per OS how long the drop lasts, and whether the 30 s grace is enough for the page to show the result before the AP goes away. A wrong password shows "wrong password", and the previous network is still stored.
-9. **Android without internet:** whether Android offers "Keep WiFi connection?" or quietly switches to mobile data or another WiFi network.
-10. **Strict pause:** with a network stored and the router off, keep a phone on the access point. `ap` and the web UI say station retries are paused, the console shows no connect attempts, and the page loads without drops. Leave: the station retries at once. **Connect** from the phone still runs while it is paused.
-11. **Sleeping phone:** lock a phone that's on the access point for several minutes. It isn't dropped by the 60 s inactivity limit while it is merely asleep, and a phone switched off without leaving is dropped after about 60 s (`ap` client count), so retries resume.
-12. **Scan disruption:** while a phone on the access point loads pages, run **Scan**. The phone stays associated (IDF's default 30 ms home-channel dwell between scanned channels).
-13. **Rebinding guard:** from a laptop on the access point, `curl -i -H 'Host: example.com' http://192.168.4.1/api/v1/status` answers `421`, and `curl -i http://192.168.4.1/generate_204` answers `302` to `http://192.168.4.1/`. From the LAN nothing changes (unknown paths are 404).
+8. **Captive pop-up** on iOS, Android, Windows and macOS: joining `dfu32-xxxx` opens the sign-in sheet with the web UI on the WiFi view. Note per OS that the sign-in sheet has short-lived storage (the token must be pasted again) and may block file inputs (Image upload, firmware update). `http://192.168.4.1/` in a normal browser always works, and so does `http://dfu32-xxxx.local/` where the phone resolves `.local`.
+9. **Set the network:** **Scan**, pick the network, **Connect**. The phone drops for a few seconds while the AP moves to the router's channel (CSA), then the page shows "joined" with the new address. Note per OS how long the drop lasts, and whether the 30 s grace is enough for the page to show the result before the AP goes away. A wrong password shows "wrong password", and the previous network is still stored.
+10. **Failed attempt under the pause:** with a network stored, the router off and a phone on the access point, **Connect** to a network with a wrong password. After the failure the previous network is stored again, and `ap` says station retries are paused (no connect attempts in the log) until the phone leaves; then the station retries at once.
+11. **Android without internet:** whether Android offers "Keep WiFi connection?" or quietly switches to mobile data or another WiFi network.
+12. **Strict pause:** with a network stored and the router off, keep a phone on the access point. `ap` and the web UI say station retries are paused, the console shows no connect attempts, and the page loads without drops. Leave: the station retries at once. **Connect** from the phone still runs while it is paused.
+13. **Sleeping phone:** lock a phone that's on the access point for several minutes. It isn't dropped by the 60 s inactivity limit while it is merely asleep, and a phone switched off without leaving is dropped after about 60 s (`ap` client count), so retries resume.
+14. **Scan disruption:** while a phone on the access point loads pages, run **Scan**. The phone stays associated (IDF's default 30 ms home-channel dwell between scanned channels).
+15. **Rebinding guard:** from a laptop on the access point, `curl -i -H 'Host: example.com' http://192.168.4.1/api/v1/status` answers `421`, and `curl -i http://192.168.4.1/generate_204` answers `302` to `http://192.168.4.1/`. From the LAN nothing changes (unknown paths are 404). A Host too long to read fails closed: `curl -i -H "Host: $(printf 'a%.0s' $(seq 80))" http://192.168.4.1/api/v1/status` answers `421`; with no Host at all (`curl -0 -i -H 'Host:' …`) it answers `200`.
 
 **Radio and driver:**
 
-14. **Mode changes:** `set_mode(APSTA→STA)` keeps an associated station connected (the access point going down doesn't drop the home network), and the RAM-stored AP config survives `APSTA→STA→APSTA`: the AP comes back with its own name and security, never the driver's default open `ESP_xxxxxx` network, also right after boot.
-15. **Default route:** with the access point up and the station then joining, manifest fetches and SNTP work again once the station has its IP (esp_netif switches the default route back on `GOT_IP`).
-16. **Transfer with WiFi off:** with a phone on the access point, flash with `"wifi_off":true`. The access point and the phone drop during the transfer and come back after it.
-17. **Heap:** on the classic ESP32 (RAK11200, Feather V2), record the minimum free internal heap with the access point up, a phone joined and a BLE flash with WiFi on.
-18. **ESP32-C5:** the access point follows the station to a 5 GHz channel, which 2.4 GHz-only phones can't see; record that, and the DFS scan time.
-19. **Subnet clash:** a home LAN on 192.168.4.0/24 collides with the access point's subnet while both are up. This is documented, not handled: note what breaks.
+16. **Mode changes:** `set_mode(APSTA→STA)` keeps an associated station connected (the access point going down doesn't drop the home network), and the RAM-stored AP config survives `APSTA→STA→APSTA`: the AP comes back with its own name and security, never the driver's default open `ESP_xxxxxx` network, also right after boot.
+17. **Default route:** with the access point up and the station then joining, manifest fetches and SNTP work again once the station has its IP (esp_netif switches the default route back on `GOT_IP`).
+18. **Transfer with WiFi off:** with a phone on the access point, flash with `"wifi_off":true`. The access point and the phone drop during the transfer and come back after it.
+19. **Heap:** on the classic ESP32 (RAK11200, Feather V2), record the minimum free internal heap with the access point up, a phone joined and a BLE flash with WiFi on.
+20. **ESP32-C5:** the access point follows the station to a 5 GHz channel, which 2.4 GHz-only phones can't see; record that, and the DFS scan time.
+21. **Subnet clash:** a home LAN on 192.168.4.0/24 collides with the access point's subnet while both are up. This is documented, not handled: note what breaks.
 
 **Installer page:**
 
-20. **Enable AP mode:** install with **Enable AP mode** ticked and a password. After the dialog closes, the page reports "AP password set" and "AP mode on"; `ap` on the console agrees, and the password never shows on the page or in its `?trace=1` log. A password containing `IMPROV` is refused before anything is sent. On older firmware the page says it is too old. A native-USB board that re-enumerated asks for **Connect** again.
+22. **Enable AP mode:** install with **Enable AP mode** ticked and a password. After the dialog closes, the page reports "AP password set" and "AP mode on"; `ap` on the console agrees, and the password never shows on the page or in its `?trace=1` log. A password containing `IMPROV` is refused before anything is sent. On older firmware the page says it is too old. A native-USB board that re-enumerated asks for **Connect** again.
 
 ## Bench results so far
 

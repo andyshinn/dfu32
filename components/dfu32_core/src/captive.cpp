@@ -26,8 +26,11 @@ bool is_api(std::string_view path) noexcept {
 
 }  // namespace
 
-bool host_is_ours(std::string_view host, std::string_view hostname) noexcept {
-    if (host.empty()) return true;  // HTTP/1.0 without a Host header
+bool host_is_ours(std::optional<std::string_view> host_hdr, std::string_view hostname) noexcept {
+    // No Host header is legal only in HTTP/1.0 (RFC 7230 §5.4), which can't be rebound
+    // to a foreign origin by name; an empty value names no origin either (SPEC §9.5).
+    if (!host_hdr || host_hdr->empty()) return true;
+    std::string_view host = *host_hdr;
     constexpr std::string_view kPort = ":80";
     if (host.size() > kPort.size() && host.substr(host.size() - kPort.size()) == kPort) {
         host.remove_suffix(kPort.size());
@@ -41,7 +44,7 @@ bool host_is_ours(std::string_view host, std::string_view hostname) noexcept {
            equal_ci(host.substr(hostname.size()), kLocal);
 }
 
-Action decide(bool on_ap, std::string_view method, std::string_view host, std::string_view path,
+Action decide(bool on_ap, std::string_view method, std::optional<std::string_view> host, std::string_view path,
               std::string_view hostname) noexcept {
     if (const size_t q = path.find('?'); q != std::string_view::npos) path = path.substr(0, q);
     const bool api = is_api(path);

@@ -236,7 +236,8 @@ esp_err_t apply_ap_cfg() {
     return err;
 }
 
-// Under s_ctrl_mu.
+// Under s_ctrl_mu. Only a password change needs the driver (and a deauth); a
+// delay or idle limit change just moves the controller's timers (§9.5).
 void promote_settings() {
     if (s_ap_live.password != s_ap.password) ++s_ap_gen;
     s_ap_live = s_ap;
@@ -245,7 +246,7 @@ void promote_settings() {
 
 // Under s_ctrl_mu. Without its netif or preloaded config the AP can't run, so
 // AP mode acts as off (the fault shows in status, §9.5).
-ap::Settings live_settings() { return {s_ap_live.enabled && s_ap_usable, s_ap_live.delay_s}; }
+ap::Settings live_settings() { return {s_ap_live.enabled && s_ap_usable, s_ap_live.delay_s, s_ap_live.idle_s}; }
 
 // Under s_wifi_mu. The captive DNS follows the AP (SPEC.md §9.5): on once it
 // has started, off when it is down. Level-triggered, so a failed start is
@@ -316,7 +317,7 @@ void ap_eval_cb(void*) {
         }
     } else if (d.action == ap::Action::TakeDown) {
         esp_wifi_set_mode(WIFI_MODE_STA);
-        ESP_LOGI(TAG, "access point down");
+        ESP_LOGI(TAG, "access point down%s", d.why == ap::Why::Idle ? ": idle limit reached" : "");
     } else if (f.ap_up && s_ap_applied_gen != gen) {
         if (apply_ap_cfg() == ESP_OK) {
             // A new password while up: nobody stays on from the old security.
@@ -383,9 +384,8 @@ void reconcile_ap() {
         Lock lk(s_ctrl_mu);
         if (s_ap_pending) promote_settings();  // settings changed while stopped apply now
         d = s_ctrl.step(live_settings(), f, now);
+        // Also opens the join window: a phone that rejoins the AP doesn't pause the §7.3 verification.
         s_ctrl.restored(now);
-        // Join window: a phone that rejoins the AP doesn't pause the §7.3 verification.
-        s_ctrl.explicit_join(now);
         gen = s_ap_gen;
     }
     esp_err_t err = ESP_OK;
@@ -539,7 +539,7 @@ bool init(const ApSettings& ap_settings) {
         // config already sanitised them; checked again so a bad value can never
         // open a protected AP (SPEC.md §9.5).
         ApSettings a = ap_settings;
-        const ap::LoadFixups fix = ap::sanitize_loaded(a.enabled, a.password, a.delay_s);
+        const ap::LoadFixups fix = ap::sanitize_loaded(a.enabled, a.password, a.delay_s, a.idle_s);
         if (fix.password_invalid) ESP_LOGE(TAG, "AP password invalid; AP mode stays off");
         Lock lk(s_ctrl_mu);
         s_ap = a;
@@ -663,6 +663,7 @@ Status status() {
         s.ap.enabled = s_ap.enabled;
         s.ap.open = s_ap.password.empty();
         s.ap.delay_s = s_ap.delay_s;
+        s.ap.idle_s = s_ap.idle_s;
         up_at = s_up_at_ms;
     }
     s.ap.active = s_ap_mode;
@@ -678,8 +679,12 @@ Status status() {
     return s;
 }
 
-bool set_credentials(const std::string& ssid, const std::string& password) {
-    if (!s_init || ssid.empty() || ssid.size() > 32 || password.size() > 64) return false;
+bool set_credentials(const std::string& ssid, const std::string& password, bool user_join) {
+    // A NUL would cut the SSID short in the driver and join a different network.
+    if (!s_init || ssid.empty() || ssid.size() > 32 || password.size() > 64 ||
+        ssid.find('\0') != std::string::npos) {
+        return false;
+    }
     wifi_config_t cfg{};
     std::memcpy(cfg.sta.ssid, ssid.data(), ssid.size());
     std::memcpy(cfg.sta.password, password.data(), password.size());
@@ -698,15 +703,23 @@ bool set_credentials(const std::string& ssid, const std::string& password) {
         ESP_LOGE(TAG, "esp_wifi_set_config: %s", esp_err_to_name(err));
         return false;
     }
-#if CONFIG_ESP_WIFI_SOFTAP_SUPPORT
-    {
-        // An explicit join is never paused: the 65 s join window (§9.5).
-        Lock lk(s_ctrl_mu);
-        s_ctrl.explicit_join(now_ms());
-    }
-#endif
     s_backoff_ms = kBackoffMinMs;
+#if CONFIG_ESP_WIFI_SOFTAP_SUPPORT
+    // A user's join is never paused: the 65 s join window (§9.5). Putting the
+    // previous network back after a failed attempt isn't one: it ends the
+    // attempt's window, and the AP controller (kick) connects or, with a phone
+    // on the AP, keeps the strict pause. connect_now() here would still see
+    // the pause as it was during the attempt.
+    {
+        Lock lk(s_ctrl_mu);
+        if (user_join) s_ctrl.explicit_join(now_ms());
+        else s_ctrl.end_join();
+    }
+    if (user_join || s_ap_eval == nullptr) connect_now();  // no controller timer: nothing else would
+#else
+    (void)user_join;
     connect_now();
+#endif
     kick();
     return true;
 }
@@ -857,7 +870,10 @@ bool restore(uint32_t timeout_ms) {
 
 bool set_ap(const ApSettings& s) {
 #if CONFIG_ESP_WIFI_SOFTAP_SUPPORT
-    if (!ap::validate_ap_password(s.password).empty() || !ap::validate_ap_delay(s.delay_s).empty()) return false;
+    if (!ap::validate_ap_password(s.password).empty() || !ap::validate_ap_delay(s.delay_s).empty() ||
+        !ap::validate_ap_idle(s.idle_s)) {
+        return false;
+    }
     {
         Lock lk(s_ctrl_mu);
         s_ap = s;

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -989,7 +990,7 @@ int cmd_improv(int argc, char** argv) {
 
 // ---- access-point fallback (SPEC.md §9.5) -------------------------------------------
 
-/// The `ap` status table. Mode, password and delay are the saved settings (a
+/// The `ap` status table. Mode, password, delay and idle limit are the saved settings (a
 /// change applies 1.5 s later, or after a transfer); state, clients and the
 /// pause are net's live view. Never prints the password.
 void print_ap_status(const api::DeviceConfig& dc) {
@@ -997,6 +998,11 @@ void print_ap_status(const api::DeviceConfig& dc) {
     const bool open = dc.ap_password.empty();
     std::printf("  ap mode    %s\n", !dc.ap_enabled ? "off" : open ? "on, open" : "on, WPA2");
     std::printf("  delay      %" PRIu32 " s\n", dc.ap_delay_s);
+    // Up unused this long -> down (§9.5): whole minutes as "30 min", 0 as "off".
+    std::printf("  idle       ");
+    if (dc.ap_idle_s == 0) std::printf("off\n");
+    else if (dc.ap_idle_s % 60 == 0) std::printf("%" PRIu32 " min\n", dc.ap_idle_s / 60);
+    else std::printf("%" PRIu32 " s\n", dc.ap_idle_s);
     std::printf("  state      ");
     if (st.stopped) {
         std::printf("stopped for a transfer");
@@ -1021,7 +1027,7 @@ void print_ap_status(const api::DeviceConfig& dc) {
 int cmd_ap(int argc, char** argv) {
     ap::Command c = ap::parse_command(argc, argv);
     if (c.kind == ap::Command::Kind::Usage) {
-        std::printf("Usage: ap [on | off | password <pw>|clear | delay <seconds>]\n");
+        std::printf("%s\n", ap::kUsage);
         return 1;
     }
     if (c.kind == ap::Command::Kind::Invalid) {
@@ -1050,6 +1056,7 @@ int cmd_ap(int argc, char** argv) {
                     case ap::Command::Kind::SetPassword: d.ap_password = c.password; break;
                     case ap::Command::Kind::ClearPassword: d.ap_password.clear(); break;
                     case ap::Command::Kind::Delay: d.ap_delay_s = c.delay_s; break;
+                    case ap::Command::Kind::Idle: d.ap_idle_s = c.idle_s; break;
                     default: break;
                 }
                 return std::string();
@@ -1062,7 +1069,7 @@ int cmd_ap(int argc, char** argv) {
         }
         // Saved first, applied 1.5 s later by net (no reboot); while stopped,
         // at restore(). Only a password change deauthenticates clients.
-        net::ApSettings s{dc.ap_enabled, dc.ap_password, dc.ap_delay_s};
+        net::ApSettings s{dc.ap_enabled, dc.ap_password, dc.ap_delay_s, dc.ap_idle_s};
         net::set_ap(s);
         improv::wipe(s.password);
         // Fixed first lines: the installer page and scripts match them (§9.5).
@@ -1072,6 +1079,10 @@ int cmd_ap(int argc, char** argv) {
             case ap::Command::Kind::SetPassword: std::printf("AP password set.\n"); break;
             case ap::Command::Kind::ClearPassword:
                 std::printf("AP password cleared: the access point is open.\n");
+                break;
+            case ap::Command::Kind::Idle:
+                if (dc.ap_idle_s == 0) std::printf("AP idle limit off.\n");
+                else std::printf("AP idle limit %" PRIu32 " s.\n", dc.ap_idle_s);
                 break;
             default: std::printf("AP delay %" PRIu32 " s.\n", dc.ap_delay_s); break;
         }
@@ -1092,6 +1103,10 @@ int run_and_flush(void* context, int argc, char** argv) {
     fsync(fileno(stdout));
     return ret;
 }
+
+// The `ap` hint is the argument part of ap::kUsage, so the two can't drift apart.
+constexpr std::string_view kApUsagePrefix = "Usage: ap ";
+static_assert(std::string_view(ap::kUsage).substr(0, kApUsagePrefix.size()) == kApUsagePrefix);
 
 void reg(const char* name, const char* help, const char* hint, esp_console_cmd_func_t fn) {
     esp_console_cmd_t cmd{};
@@ -1219,8 +1234,8 @@ void start_console(void (*on_improv_start)()) {
     reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
     reg("token", "API token: show whether one is required, set one, or turn it off.", "[rotate | clear]", &cmd_token);
     reg("improv", "Improv WiFi provisioning: show state, open or close Improv BLE.", "[start | stop]", &cmd_improv);
-    reg("ap", "WiFi access-point fallback: show it, turn it on or off, set its password or start delay.",
-        "[on | off | password <pw>|clear | delay <seconds>]", &cmd_ap);
+    reg("ap", "WiFi access-point fallback: show it, turn it on or off, set its password, start delay or idle limit.",
+        ap::kUsage + kApUsagePrefix.size(), &cmd_ap);
 
     // HTTP client and manifest parsing run on this task.
     if (xTaskCreate(&repl_task, "console_repl", 12288, nullptr, 2, nullptr) != pdPASS) {

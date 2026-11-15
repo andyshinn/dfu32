@@ -9,20 +9,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace dfu32::captive {
 
 enum class Action : uint8_t { Serve, Redirect, Misdirected, NotFound };
 
-/// AP IP, <hostname>, <hostname>.local; case-insensitive; optional ":80"; one trailing '.'; empty = ours.
-bool host_is_ours(std::string_view host, std::string_view hostname) noexcept;
+/// AP IP, <hostname>, <hostname>.local; case-insensitive; optional ":80"; one trailing '.'.
+/// nullopt (no Host header, HTTP/1.0) and an empty value are ours. The glue fails closed on a Host it
+/// could not read (e.g. too long for its buffer) by passing a foreign value, never nullopt (§9.5).
+bool host_is_ours(std::optional<std::string_view> host, std::string_view hostname) noexcept;
 
 /// path may carry "?query" (ignored). method: "GET","HEAD","POST",...
 /// !on_ap: "/" and "/api/v1/..." -> Serve, others -> NotFound (LAN unchanged).
 /// on_ap:  "/api/v1" or "/api/v1/..." -> ours ? Serve : Misdirected (never Redirect);
 ///         "/" -> ours ? Serve : Redirect; other paths -> GET/HEAD ? Redirect : NotFound.
-Action decide(bool on_ap, std::string_view method, std::string_view host, std::string_view path,
+Action decide(bool on_ap, std::string_view method, std::optional<std::string_view> host, std::string_view path,
               std::string_view hostname) noexcept;
 
 inline constexpr size_t kDnsMaxPacket = 512;
