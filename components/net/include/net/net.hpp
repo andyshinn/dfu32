@@ -25,6 +25,7 @@ struct ApStatus {
     bool sta_paused = false;     // automatic station retries paused for AP clients
     uint8_t clients = 0;
     uint32_t delay_s = 120;      // = ap::kDefaultDelayS (net's header can't see dfu32_core)
+    uint32_t idle_s = 1800;      // = ap::kDefaultIdleS; 0 = never
     int64_t up_in_s = -1;        // standby countdown, -1 = none pending
     const char* fault = nullptr; // "netif" | "start" | nullptr
 };
@@ -50,6 +51,7 @@ struct ApSettings {
     bool enabled = false;
     std::string password;       // "" = open
     uint32_t delay_s = 120;     // = ap::kDefaultDelayS
+    uint32_t idle_s = 1800;     // = ap::kDefaultIdleS; 0 = never
 };
 
 /// Brings up esp_netif, WiFi (STA), mDNS and SNTP, and loads the AP config
@@ -65,8 +67,12 @@ bool init(const ApSettings& ap = {});
 Status status();
 
 /// Stores credentials (persisted by the WiFi driver) and reconnects with them.
-/// Opens the 65 s join window: retries run even while phones are on the AP.
-bool set_credentials(const std::string& ssid, const std::string& password);
+/// `user_join` (a new network from a user) opens the 65 s join window: retries
+/// run even while phones are on the AP. A failed attempt putting the previous
+/// network back passes false: that ends the attempt's window, so the strict
+/// pause holds while a phone is on the AP (§9.5). False for an
+/// SSID with a NUL byte: the driver's station config is a C string.
+bool set_credentials(const std::string& ssid, const std::string& password, bool user_join = true);
 
 /// Clears stored credentials and disconnects. With AP mode on, the AP comes
 /// up at once (no network stored, §9.5).
@@ -116,7 +122,8 @@ bool restore(uint32_t timeout_ms);
 /// console reply goes out before the radio changes. Validated again with
 /// dfu32_core; the caller persists them. While stopped they wait for
 /// restore(). A password change while the AP is up deauthenticates every
-/// client. False (nothing changed) if the settings don't validate.
+/// client; a delay or idle limit change doesn't. False (nothing changed) if
+/// the settings don't validate.
 bool set_ap(const ApSettings& s);
 
 /// Factory reset (§9.3): AP mode off in RAM, AP down, station forgotten

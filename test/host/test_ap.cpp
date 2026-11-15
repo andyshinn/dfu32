@@ -22,10 +22,11 @@ Facts facts(bool provisioned, bool ip, bool ap_up, uint8_t clients, bool stopped
     return f;
 }
 
-Settings on(uint32_t delay_s = 120) {
+Settings on(uint32_t delay_s = 120, uint32_t idle_s = kDefaultIdleS) {
     Settings s;
     s.enabled = true;
     s.delay_s = delay_s;
+    s.idle_s = idle_s;
     return s;
 }
 
@@ -117,6 +118,21 @@ TEST_CASE("AP: delay validation", "[ap]") {
     CHECK(validate_ap_delay(29) == "ap_delay_s must be 30-1800");
 }
 
+TEST_CASE("AP: idle limit validation", "[ap]") {
+    CHECK(validate_ap_idle(0));  // never
+    CHECK_FALSE(validate_ap_idle(1));
+    CHECK_FALSE(validate_ap_idle(kMinIdleS - 1));
+    CHECK(validate_ap_idle(kMinIdleS));
+    CHECK(validate_ap_idle(kDefaultIdleS));
+    CHECK(validate_ap_idle(kMaxIdleS));
+    CHECK_FALSE(validate_ap_idle(kMaxIdleS + 1));
+    CHECK_FALSE(validate_ap_idle(UINT32_MAX));
+    CHECK(kMinIdleS == 300);
+    CHECK(kMaxIdleS == 86400);
+    CHECK(kDefaultIdleS == 1800);
+    CHECK(Settings{}.idle_s == kDefaultIdleS);
+}
+
 TEST_CASE("AP: station credentials validation", "[ap]") {
     CHECK_FALSE(validate_wifi_credentials("", "").empty());
     CHECK_FALSE(validate_wifi_credentials(std::string(33, 's'), "").empty());
@@ -136,34 +152,57 @@ TEST_CASE("AP: load sanitising never opens the AP", "[ap]") {
     bool enabled = true;
     std::string pw = "short";
     uint32_t delay = 300;
-    LoadFixups fx = sanitize_loaded(enabled, pw, delay);
+    uint32_t idle = 600;
+    LoadFixups fx = sanitize_loaded(enabled, pw, delay, idle);
     CHECK(fx.password_invalid);
     CHECK_FALSE(fx.delay_reset);
+    CHECK_FALSE(fx.idle_reset);
     CHECK_FALSE(enabled);
     CHECK(pw.empty());
     CHECK(delay == 300);
+    CHECK(idle == 600);
 
     for (uint32_t bad : {0u, 5000u}) {
         enabled = true;
         pw = "longenough";
         delay = bad;
-        fx = sanitize_loaded(enabled, pw, delay);
+        idle = 0;
+        fx = sanitize_loaded(enabled, pw, delay, idle);
         CHECK(fx.delay_reset);
         CHECK_FALSE(fx.password_invalid);
+        CHECK_FALSE(fx.idle_reset);
+        CHECK(idle == 0);  // never is a valid value
         CHECK(delay == kDefaultDelayS);
         CHECK(enabled);
         CHECK(pw == "longenough");
     }
 
+    // An out-of-range idle limit loads as the default, never as "never".
+    for (uint32_t bad : {1u, kMinIdleS - 1, kMaxIdleS + 1, UINT32_MAX}) {
+        enabled = true;
+        pw = "longenough";
+        delay = 120;
+        idle = bad;
+        fx = sanitize_loaded(enabled, pw, delay, idle);
+        CHECK(fx.idle_reset);
+        CHECK_FALSE(fx.delay_reset);
+        CHECK_FALSE(fx.password_invalid);
+        CHECK(idle == kDefaultIdleS);
+        CHECK(enabled);
+    }
+
     enabled = true;
     pw = "";
     delay = 1800;
-    fx = sanitize_loaded(enabled, pw, delay);
+    idle = kMaxIdleS;
+    fx = sanitize_loaded(enabled, pw, delay, idle);
     CHECK_FALSE(fx.password_invalid);
     CHECK_FALSE(fx.delay_reset);
+    CHECK_FALSE(fx.idle_reset);
     CHECK(enabled);
     CHECK(pw.empty());
     CHECK(delay == 1800);
+    CHECK(idle == kMaxIdleS);
 }
 
 TEST_CASE("AP: channel", "[ap]") {
@@ -221,11 +260,46 @@ TEST_CASE("AP: console grammar", "[ap]") {
     CHECK(c.error == "not a number");
     CHECK(parse({"delay", "-5"}).kind == K::Invalid);
 
+    c = parse({"idle", "off"});
+    CHECK(c.kind == K::Idle);
+    CHECK(c.idle_s == 0);
+    c = parse({"idle", "0"});
+    CHECK(c.kind == K::Idle);
+    CHECK(c.idle_s == 0);
+    for (const char* v : {"300", "1800", "86400", "0x12c"}) {
+        INFO(v);
+        c = parse({"idle", v});
+        CHECK(c.kind == K::Idle);
+        CHECK(c.idle_s == (std::strcmp(v, "0x12c") == 0 ? 300u : static_cast<uint32_t>(std::stoul(v))));
+    }
+    for (const char* v : {"1", "299", "86401", "4294967295"}) {
+        INFO(v);
+        c = parse({"idle", v});
+        CHECK(c.kind == K::Invalid);
+        CHECK(c.error == "ap_idle_s must be 0 (never) or 300-86400");
+    }
+    for (const char* v : {"x", "-300", "OFF", "on", "", "4294967296", "300s"}) {
+        INFO(v);
+        c = parse({"idle", v});
+        CHECK(c.kind == K::Invalid);
+        CHECK(c.error == "not a number");
+    }
+
     CHECK(parse({"password"}).kind == K::Usage);
     CHECK(parse({"delay"}).kind == K::Usage);
     CHECK(parse({"off", "extra"}).kind == K::Usage);
     CHECK(parse({"password", "longenough", "x"}).kind == K::Usage);
     CHECK(parse({"bogus"}).kind == K::Usage);
+    CHECK(parse({"idle"}).kind == K::Usage);
+    CHECK(parse({"idle", "300", "x"}).kind == K::Usage);
+    CHECK(parse({"idle", "off", "now"}).kind == K::Usage);
+
+    const std::string usage = kUsage;
+    CHECK(usage.rfind("Usage: ap ", 0) == 0);
+    for (const char* sub : {"on", "off", "password <pw>|clear", "delay <seconds>", "idle <seconds>|off"}) {
+        INFO(sub);
+        CHECK(usage.find(sub) != std::string::npos);
+    }
 }
 
 // ---- the rule table (SPEC.md §9.5) -----------------------------------------------------
@@ -319,10 +393,10 @@ TEST_CASE("AP: 30 s grace after the station gets an IP", "[ap]") {
     CHECK(g.step(on(), facts(true, true, true, 0), 42000).action == Action::TakeDown);
 }
 
-TEST_CASE("AP: once up without a station IP it stays up", "[ap]") {
+TEST_CASE("AP: once up without a station IP it stays up (idle limit off)", "[ap]") {
     Controller c;
     c.boot(0);
-    const Decision d = c.step(on(), facts(true, false, true, 0), 500000);
+    const Decision d = c.step(on(120, 0), facts(true, false, true, 0), 500000);
     CHECK(d.want_up);
     CHECK(d.action == Action::None);
     CHECK(d.next_eval_ms == kNever);
@@ -343,8 +417,29 @@ TEST_CASE("AP: station retries pause for clients, except in the join window", "[
     CHECK_FALSE(c.step(on(), facts(true, true, true, 1), 100000).pause_sta);
     CHECK_FALSE(c.step(on(), facts(true, false, true, 0), 100000).pause_sta);
     CHECK_FALSE(c.step(on(), facts(false, false, true, 1), 100000).pause_sta);  // nothing to retry
+    // Strict pause: no wake-up of its own while it holds (no probing).
     d = c.step(on(), phone, 100000);
-    CHECK_FALSE(d.probe_now);  // strict pause: no probing
+    CHECK(d.pause_sta);
+    CHECK(d.next_eval_ms == kNever);
+}
+
+TEST_CASE("AP: restored() opens the join window itself", "[ap]") {
+    for (bool had_ip : {false, true}) {
+        INFO(had_ip);
+        Controller c;
+        c.boot(0);
+        c.stopped(had_ip);
+        CHECK(c.step(on(), facts(true, false, true, 0, true), 100000).why == Why::Stopped);
+        c.restored(200000);
+        CHECK(c.join_window_open(200000));
+        const Facts phone = facts(true, false, true, 1);
+        Decision d = c.step(on(), phone, 200000);
+        CHECK_FALSE(d.pause_sta);
+        CHECK(d.next_eval_ms == 200000 + kJoinWindowMs);
+        CHECK_FALSE(c.step(on(), phone, 200000 + kJoinWindowMs - 1).pause_sta);
+        CHECK(c.step(on(), phone, 200000 + kJoinWindowMs).pause_sta);
+        CHECK_FALSE(c.join_window_open(200000 + kJoinWindowMs));
+    }
 }
 
 TEST_CASE("AP: a failed bring-up is retried after 10 s", "[ap]") {
@@ -402,6 +497,265 @@ TEST_CASE("AP: the station clock follows the facts when an event is missed", "[a
         CHECK(d.want_up);
         CHECK(d.next_eval_ms == 25000 + kDownGraceMs);
     }
+}
+
+// ---- idle limit (SPEC.md §9.5) ---------------------------------------------------------------
+
+TEST_CASE("AP: the idle limit boundary", "[ap]") {
+    for (uint32_t idle : {kMinIdleS, kDefaultIdleS, kMaxIdleS}) {
+        INFO(idle);
+        const uint64_t ms = uint64_t{idle} * 1000;
+        Controller c;
+        c.boot(0);
+        Decision d = c.step(on(120, idle), facts(true, false, false, 0), 120000);
+        REQUIRE(d.action == Action::BringUp);
+        CHECK(d.next_eval_ms == 120000 + ms);  // counts from the bring-up itself
+        d = c.step(on(120, idle), facts(true, false, true, 0), 120000 + ms - 1);
+        CHECK(d.want_up);
+        CHECK(d.action == Action::None);
+        CHECK(d.why == Why::StationDown);
+        CHECK(d.next_eval_ms == 120000 + ms);
+        d = c.step(on(120, idle), facts(true, false, true, 0), 120000 + ms);
+        CHECK_FALSE(d.want_up);
+        CHECK(d.action == Action::TakeDown);
+        CHECK(d.why == Why::Idle);
+        CHECK_FALSE(d.pause_sta);
+        CHECK(c.sta_down_since_ms() == 120000 + ms);  // re-armed
+        CHECK(d.next_eval_ms == 240000 + ms);
+        CHECK(d.up_in_ms == 120000);
+        // Down, the station still without an IP: back after a fresh ap_delay_s.
+        d = c.step(on(120, idle), facts(true, false, false, 0), 240000 + ms - 1);
+        CHECK_FALSE(d.want_up);
+        CHECK(d.why == Why::Waiting);
+        CHECK(d.up_in_ms == 1);
+        d = c.step(on(120, idle), facts(true, false, false, 0), 240000 + ms);
+        CHECK(d.action == Action::BringUp);
+        CHECK(d.next_eval_ms == 240000 + 2 * ms);
+    }
+}
+
+TEST_CASE("AP: idle limit off never takes the AP down", "[ap]") {
+    for (bool provisioned : {false, true}) {
+        INFO(provisioned);
+        Sim sim;
+        sim.s = on(120, 0);
+        sim.f.provisioned = provisioned;
+        sim.c.boot(0);
+        sim.run_to(48ull * 3600 * 1000);
+        CHECK(sim.ups.size() == 1);
+        CHECK(sim.downs.empty());
+        CHECK(sim.f.ap_up);
+        CHECK(sim.d.next_eval_ms == kNever);
+    }
+}
+
+TEST_CASE("AP: clients keep the AP up past the idle limit", "[ap]") {
+    Sim sim;
+    sim.s = on(120, kMinIdleS);
+    sim.c.boot(0);
+    sim.run_to(120000);
+    REQUIRE(sim.f.ap_up);
+    sim.clients(1);
+    sim.run_to(10ull * 3600 * 1000);
+    CHECK(sim.downs.empty());
+    CHECK(sim.d.why == Why::ClientsPresent);
+    CHECK(sim.d.pause_sta);
+    // The clock restarts when the last client leaves.
+    const uint64_t left = sim.now;
+    sim.clients(0);
+    sim.run_to(left + uint64_t{kMinIdleS} * 1000 - 1);
+    CHECK(sim.downs.empty());
+    sim.run_to(left + uint64_t{kMinIdleS} * 1000);
+    REQUIRE(sim.downs.size() == 1);
+    CHECK(sim.downs[0] == left + uint64_t{kMinIdleS} * 1000);
+    CHECK(sim.d.why == Why::Waiting);
+}
+
+TEST_CASE("AP: the idle clock restarts on every client join and leave", "[ap]") {
+    Sim sim;
+    sim.s = on(120, kMinIdleS);
+    sim.c.boot(0);
+    sim.run_to(120000);  // up
+    sim.run_to(400000);
+    sim.clients(1);  // joins 20 s before the limit
+    sim.run_to(410000);
+    sim.clients(0);  // leaves: the limit counts from here
+    sim.run_to(500000);
+    sim.clients(2);
+    sim.clients(1);  // one of two leaves: still clients, still up
+    sim.run_to(520000);
+    sim.clients(0);
+    sim.run_to(819999);
+    CHECK(sim.downs.empty());
+    sim.run_to(900000);
+    REQUIRE(sim.downs.size() == 1);
+    CHECK(sim.downs[0] == 820000);
+}
+
+TEST_CASE("AP: scenario: an unattended AP cycles with the idle limit", "[ap]") {
+    Sim sim;
+    sim.s = on(120, kMinIdleS);
+    sim.c.boot(0);
+    sim.get_ip();
+    sim.run_to(10000);
+    sim.lose_ip();  // the router dies at 10 s
+    sim.run_to(2000000);
+    // Up 120 s after the loss, down after 300 s idle, back 120 s later, ...
+    REQUIRE(sim.ups.size() >= 3);
+    for (size_t i = 0; i < sim.ups.size(); ++i) CHECK(sim.ups[i] == 130000 + i * 420000);
+    REQUIRE(sim.downs.size() >= 3);
+    for (size_t i = 0; i < sim.downs.size(); ++i) CHECK(sim.downs[i] == sim.ups[i] + 300000);
+    // The router comes back while the AP is down: it stays down.
+    sim.now = sim.downs.back() + 1000;
+    sim.get_ip();
+    const size_t ups = sim.ups.size();
+    sim.run_to(sim.now + 3600000);
+    CHECK(sim.ups.size() == ups);
+    CHECK(sim.d.why == Why::StationUp);
+}
+
+TEST_CASE("AP: idle take-down with no network stored waits ap_delay_s", "[ap]") {
+    Sim sim;
+    sim.s = on(60, kMinIdleS);
+    sim.f.provisioned = false;
+    sim.c.boot(0);
+    sim.eval();
+    REQUIRE(sim.ups.size() == 1);
+    CHECK(sim.ups[0] == 0);  // boot: at once
+    sim.run_to(300000);
+    REQUIRE(sim.downs.size() == 1);
+    CHECK(sim.downs[0] == 300000);
+    CHECK(sim.d.why == Why::Waiting);
+    CHECK(sim.d.up_in_ms == 60000);
+    sim.run_to(359999);
+    CHECK(sim.ups.size() == 1);
+    sim.run_to(360000);
+    REQUIRE(sim.ups.size() == 2);
+    CHECK(sim.d.why == Why::NoNetworkStored);
+    sim.run_to(660000);
+    REQUIRE(sim.downs.size() == 2);
+    CHECK(sim.downs[1] == 660000);
+
+    SECTION("turning AP mode off and on brings it up at once") {
+        sim.s.enabled = false;
+        sim.eval();
+        sim.s.enabled = true;
+        sim.eval();
+        CHECK(sim.ups.size() == 3);
+        CHECK(sim.ups[2] == 660000);
+    }
+    SECTION("a stored network then forgotten brings it up at once") {
+        sim.f.provisioned = true;
+        sim.eval();
+        CHECK(sim.d.why == Why::Waiting);
+        sim.f.provisioned = false;  // wifi forget
+        sim.eval();
+        CHECK(sim.ups.size() == 3);
+        CHECK(sim.d.why == Why::NoNetworkStored);
+    }
+}
+
+TEST_CASE("AP: forgetting the network after an idle take-down brings the AP up at once", "[ap]") {
+    Sim sim;
+    sim.s = on(120, kMinIdleS);
+    sim.c.boot(0);
+    sim.run_to(420000);
+    REQUIRE(sim.downs.size() == 1);  // up at 120 s, idle at 420 s
+    sim.now = 430000;
+    sim.f.provisioned = false;
+    sim.eval();
+    REQUIRE(sim.ups.size() == 2);
+    CHECK(sim.ups[1] == 430000);
+}
+
+TEST_CASE("AP: the idle limit and the station-up grace", "[ap]") {
+    Sim sim;
+    sim.s = on(120, kMinIdleS);
+    sim.c.boot(0);
+    sim.run_to(130000);  // up at 120 s; idle due at 420 s
+    sim.now = 410000;
+    sim.get_ip();  // the grace governs now, not the idle limit
+    CHECK(sim.d.why == Why::StationUpGrace);
+    CHECK(sim.d.next_eval_ms == 440000);
+    sim.run_to(430000);
+    CHECK(sim.downs.empty());
+    CHECK(sim.d.why == Why::StationUpGrace);
+    sim.lose_ip();  // lost within the grace: the idle clock restarts at the loss
+    CHECK(sim.d.why == Why::StationDown);
+    CHECK(sim.d.next_eval_ms == 730000);
+    sim.run_to(729999);
+    CHECK(sim.downs.empty());
+    sim.run_to(730000);
+    REQUIRE(sim.downs.size() == 1);
+    CHECK(sim.downs[0] == 730000);
+
+    // Station up with no client: the 30 s grace ends it long before any idle limit.
+    Sim g;
+    g.s = on(120, kMinIdleS);
+    g.c.boot(0);
+    g.run_to(120000);
+    g.get_ip();
+    g.run_to(1000000);
+    REQUIRE(g.downs.size() == 1);
+    CHECK(g.downs[0] == 150000);
+}
+
+TEST_CASE("AP: the idle clock across a radio handover", "[ap]") {
+    Sim sim;
+    sim.s = on(120, kMinIdleS);
+    sim.c.boot(0);
+    sim.run_to(330000);  // up at 120 s; idle would be due at 420 s
+    sim.c.stopped(false);
+    SECTION("stepped while stopped") {
+        sim.f.stopped = true;  // the AP stays in the driver mode, frozen
+        sim.run_to(600000);
+        CHECK(sim.downs.empty());
+        CHECK(sim.d.why == Why::Stopped);
+        sim.f.stopped = false;
+    }
+    SECTION("net's sequence: no step while stopped, reconcile steps before restored()") {
+        sim.now = 600000;  // 180 s past the pre-stop idle deadline
+    }
+    SECTION("net's sequence, restored within the pre-stop idle_s") {
+        sim.now = 400000;  // the pre-stop clock would end it 20 s after the restore
+    }
+    const uint64_t restore = sim.now;
+    sim.eval();  // back with the restart: the limit counts from here
+    sim.c.restored(sim.now);
+    CHECK(sim.downs.empty());
+    CHECK(sim.d.why == Why::StationDown);
+    CHECK(sim.d.next_eval_ms == restore + 300000);
+    sim.run_to(restore + 299999);
+    CHECK(sim.downs.empty());
+    sim.run_to(restore + 300000);
+    REQUIRE(sim.downs.size() == 1);
+    CHECK(sim.downs[0] == restore + 300000);
+}
+
+TEST_CASE("AP: end_join() closes the join window at once, even right after boot", "[ap]") {
+    Controller c;
+    c.boot(0);
+    const Facts phone = facts(true, false, true, 1);
+    c.explicit_join(40000);  // an attempt
+    CHECK_FALSE(c.step(on(), phone, 45000).pause_sta);
+    c.end_join();  // give_up puts the previous network back at 50 s
+    CHECK_FALSE(c.join_window_open(50000));
+    const Decision d = c.step(on(), phone, 50000);
+    CHECK(d.pause_sta);
+    CHECK(d.next_eval_ms == kNever);
+}
+
+TEST_CASE("AP: setting the idle limit after the AP came up counts from the AP's last activity", "[ap]") {
+    Controller c;
+    c.boot(0);
+    CHECK(c.step(on(120, 0), facts(true, false, false, 0), 120000).action == Action::BringUp);
+    CHECK(c.step(on(120, 0), facts(true, false, true, 0), 400000).next_eval_ms == kNever);
+    Decision d = c.step(on(120, kMinIdleS), facts(true, false, true, 0), 410000);
+    CHECK(d.want_up);
+    CHECK(d.next_eval_ms == 420000);
+    d = c.step(on(120, kMinIdleS), facts(true, false, true, 0), 420000);
+    CHECK(d.action == Action::TakeDown);  // idle since 120 s
+    CHECK(d.why == Why::Idle);
 }
 
 // ---- scenario traces -----------------------------------------------------------------------
@@ -473,7 +827,6 @@ TEST_CASE("AP: scenario: radio handover", "[ap]") {
         CHECK(sim.ups.empty());
         sim.f.stopped = false;
         sim.c.restored(sim.now);
-        sim.c.explicit_join(sim.now);
         sim.run_to(400000);
         REQUIRE(sim.ups.size() == 1);
         CHECK(sim.ups[0] == 180000);  // 20 s after restore
@@ -503,7 +856,6 @@ TEST_CASE("AP: scenario: radio handover", "[ap]") {
         sim.run_to(250000);
         sim.f.stopped = false;
         sim.c.restored(sim.now);
-        sim.c.explicit_join(sim.now);
         sim.run_to(600000);
         REQUIRE(sim.ups.size() == 1);
         CHECK(sim.ups[0] == 370000);
@@ -551,20 +903,24 @@ TEST_CASE("AP: seeded invariant fuzz", "[ap]") {
     std::mt19937_64 rng(0xDF032A9);
     const auto pick = [&](uint64_t n) { return std::uniform_int_distribution<uint64_t>(0, n - 1)(rng); };
     uint64_t checks = 0, paused = 0, bringups = 0, takedowns = 0;
-    bool seen[8] = {};  // every Why
+    uint64_t idles = 0;
+    bool seen[9] = {};  // every Why
+    const auto idle_pick = [&] { return pick(4) == 0 ? 0u : static_cast<uint32_t>(kMinIdleS + pick(3301)); };
 
     for (int run = 0; run < 2000; ++run) {
         Controller c;
         Settings s;
         s.enabled = pick(4) != 0;
         s.delay_s = static_cast<uint32_t>(kMinDelayS + pick(kMaxDelayS - kMinDelayS + 1));
+        s.idle_s = idle_pick();
+        bool idle_taken_down = false;  // an idle take-down happened in this run
         Facts f = facts(pick(3) != 0, false, false, 0);
         uint64_t now = pick(1000000);
         c.boot(now);
         Decision d = c.step(s, f, now);
 
         for (int ev = 0; ev < 300; ++ev) {
-            switch (pick(14)) {
+            switch (pick(15)) {
                 case 0: now += pick(300000); break;
                 case 1:
                     if (d.next_eval_ms != kNever) now = d.next_eval_ms;
@@ -609,7 +965,7 @@ TEST_CASE("AP: seeded invariant fuzz", "[ap]") {
                     if (f.stopped) {
                         f.stopped = false;
                         c.restored(now);
-                        c.explicit_join(now);
+                        CHECK(c.join_window_open(now));
                     }
                     break;
                 case 11: c.explicit_join(now); break;
@@ -619,6 +975,7 @@ TEST_CASE("AP: seeded invariant fuzz", "[ap]") {
                         f.clients = 0;
                     }
                     break;
+                case 13: s.idle_s = idle_pick(); break;
                 default: break;
             }
 
@@ -635,7 +992,26 @@ TEST_CASE("AP: seeded invariant fuzz", "[ap]") {
                 CHECK(d.want_up == elapsed);
             }
             CHECK((d.next_eval_ms == kNever || d.next_eval_ms > now));
-            CHECK_FALSE(d.probe_now);
+            // Clients always keep an enabled AP up; with no IP and no client it is
+            // re-evaluated by the idle limit at the latest.
+            if (s.enabled && !f.stopped && f.ap_up && f.clients > 0) CHECK(d.want_up);
+            if (s.enabled && !f.stopped && f.ap_up && f.clients == 0 && !f.sta_has_ip && s.idle_s > 0 &&
+                d.why != Why::Idle) {
+                CHECK(d.next_eval_ms <= now + uint64_t{s.idle_s} * 1000);
+            }
+            if (d.why == Why::Idle) {
+                CHECK(s.idle_s > 0);
+                CHECK(d.action == Action::TakeDown);
+                CHECK((f.ap_up && f.clients == 0 && !f.sta_has_ip));
+                CHECK(c.sta_down_since_ms() == now);  // re-armed: back after ap_delay_s
+                CHECK(d.next_eval_ms == now + uint64_t{s.delay_s} * 1000);
+                idle_taken_down = true;
+                ++idles;
+            }
+            // Nothing stored: up, except after an idle take-down (the delay then applies).
+            if (s.enabled && !f.stopped && !f.provisioned && !d.want_up) {
+                CHECK((d.why == Why::Idle || (d.why == Why::Waiting && idle_taken_down)));
+            }
 
             // Soundness: nothing changes on its own before next_eval_ms (or ever, for kNever).
             const uint64_t later = d.next_eval_ms == kNever ? now + 1000000000 : d.next_eval_ms - 1;
@@ -670,4 +1046,5 @@ TEST_CASE("AP: seeded invariant fuzz", "[ap]") {
     CHECK(paused > 1000);
     CHECK(bringups > 1000);
     CHECK(takedowns > 1000);
+    CHECK(idles > 100);
 }

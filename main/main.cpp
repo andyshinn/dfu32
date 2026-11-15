@@ -105,15 +105,15 @@ static void record_aborted_run() {
 // rolls back at once. WiFi is then the deciding signal, but only for faults
 // the new image could have caused (job::ota_verdict, host-tested):
 //  - a station address within 90 s: confirmed;
-//  - DFU32's access point started since boot: confirmed, the radio works
-//    (§9.5; an unprovisioned board with AP mode on gets here at once);
-//  - no network stored: confirmed (there is nothing to test against);
+//  - no network stored: confirmed (there is nothing to test against; an
+//    unprovisioned board with AP mode on gets here at once);
 //  - the radio is demonstrably working but the network isn't reachable (the
 //    driver reported a disconnect: AP not found, wrong passphrase, ...):
 //    confirmed with a warning, so a router that is down during the update
-//    doesn't throw away a good image. A provisioned board gets this verdict
-//    from its disconnect reason long before its access point is due;
-//  - no sign of life from WiFi at all: rolled back.
+//    doesn't throw away a good image;
+//  - no sign of life from the station at all: rolled back. DFU32's own
+//    access point running doesn't count (§9.5): it proves nothing about the
+//    station path, which is what a provisioned image must show.
 
 namespace {
 
@@ -146,10 +146,6 @@ void ota_confirm_task(void*) {
             esp_ota_mark_app_valid_cancel_rollback();
             ESP_LOGI(TAG, "new firmware confirmed: WiFi and the HTTP API are up");
             break;
-        case OtaVerdict::ConfirmAccessPoint:
-            esp_ota_mark_app_valid_cancel_rollback();
-            ESP_LOGI(TAG, "new firmware confirmed: WiFi works (access point up)");
-            break;
         case OtaVerdict::ConfirmNoNetwork:
             esp_ota_mark_app_valid_cancel_rollback();
             ESP_LOGW(TAG, "new firmware confirmed without a network test: no WiFi network is stored");
@@ -161,7 +157,7 @@ void ota_confirm_task(void*) {
                      ns.ssid.c_str(), ns.last_disconnect_reason);
             break;
         case OtaVerdict::Rollback:
-            ESP_LOGE(TAG, "new firmware shows no WiFi activity after %u s: rolling back to the previous image",
+            ESP_LOGE(TAG, "new firmware shows no station WiFi activity after %u s: rolling back to the previous image",
                      static_cast<unsigned>(kOtaConfirmMs / 1000));
             vTaskDelay(pdMS_TO_TICKS(300));
             esp_ota_mark_app_invalid_rollback_and_reboot();
@@ -248,7 +244,7 @@ extern "C" void app_main(void) {
     {
         dfu32::api::DeviceConfig dc;
         dfu32::config::load_device(dc);
-        dfu32::net::ApSettings ap{dc.ap_enabled, dc.ap_password, dc.ap_delay_s};
+        dfu32::net::ApSettings ap{dc.ap_enabled, dc.ap_password, dc.ap_delay_s, dc.ap_idle_s};
         net_ok = dfu32::net::init(ap);
         dfu32::improv::wipe(ap.password);  // net keeps its own copy
         dfu32::improv::wipe(dc.ap_password);

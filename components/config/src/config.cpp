@@ -173,6 +173,7 @@ constexpr const char* kDeadline = "dfu_deadline";
 constexpr const char* kApEnabled = "ap_enabled";
 constexpr const char* kApPassword = "ap_password";
 constexpr const char* kApDelay = "ap_delay";
+constexpr const char* kApIdle = "ap_idle";  // u32 seconds, 0 = never
 constexpr const char* kToken = "token_sha256";
 
 bool set_or_erase_str(nvs_handle_t h, const char* key, const std::string& v) {
@@ -198,13 +199,18 @@ bool load(api::DeviceConfig& out, bool& ap_password_bad) {
     get_str(h, kApPassword, out.ap_password);
     uint32_t ap_delay = 0;
     if (nvs_get_u32(h, kApDelay, &ap_delay) == ESP_OK) out.ap_delay_s = ap_delay;
+    uint32_t ap_idle = 0;
+    if (nvs_get_u32(h, kApIdle, &ap_idle) == ESP_OK) out.ap_idle_s = ap_idle;
     nvs_close(h);
-    // SPEC.md §9.5: a bad delay loads as the default, but a bad password turns AP mode
+    // SPEC.md §9.5: a bad delay or idle limit loads as the default, but a bad password turns AP mode
     // off instead of loading as "open", so a corrupt value can never open a protected AP.
     // Done before validate() below, which also checks the AP fields.
-    const ap::LoadFixups fix = ap::sanitize_loaded(out.ap_enabled, out.ap_password, out.ap_delay_s);
+    const ap::LoadFixups fix = ap::sanitize_loaded(out.ap_enabled, out.ap_password, out.ap_delay_s, out.ap_idle_s);
     if (fix.delay_reset) {
         ESP_LOGW(TAG, "stored ap_delay is out of range; using %u s", static_cast<unsigned>(ap::kDefaultDelayS));
+    }
+    if (fix.idle_reset) {
+        ESP_LOGW(TAG, "stored ap_idle is out of range; using %u s", static_cast<unsigned>(ap::kDefaultIdleS));
     }
     ap_password_bad = fix.password_invalid;
     if (fix.password_invalid) {
@@ -232,7 +238,8 @@ bool save(const api::DeviceConfig& c, bool keep_password) {
                     nvs_set_u32(h, kDeadline, c.dfu_deadline_max_s) == ESP_OK &&
                     nvs_set_u8(h, kApEnabled, c.ap_enabled ? 1 : 0) == ESP_OK &&
                     (keep_password || set_or_erase_str(h, kApPassword, c.ap_password)) &&
-                    nvs_set_u32(h, kApDelay, c.ap_delay_s) == ESP_OK && nvs_commit(h) == ESP_OK;
+                    nvs_set_u32(h, kApDelay, c.ap_delay_s) == ESP_OK &&
+                    nvs_set_u32(h, kApIdle, c.ap_idle_s) == ESP_OK && nvs_commit(h) == ESP_OK;
     nvs_close(h);
     return ok;
 }

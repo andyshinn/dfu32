@@ -164,9 +164,34 @@ class TestPage(unittest.TestCase):
         def const(name):
             return int(re.search(r"inline constexpr uint32_t %s = (\d+);" % name, hdr).group(1))
         want = {"delay": const("kDefaultDelayS"), "min": const("kMinDelayS"), "max": const("kMaxDelayS"),
+                "idle": const("kDefaultIdleS"), "idleMax": const("kMaxIdleS"),
                 "pwMin": const("kMinPasswordLen"), "pwMax": const("kMaxPasswordLen")}
         got = {k: int(v) for k, v in re.findall(r"(\w+): (\d+)", re.search(r"const kAp = \{(.*?)\}", self.js).group(1))}
         self.assertEqual(got, want)
+
+    def test_ap_idle_limit_field(self):
+        # The idle limit (SPEC §9.5) is sent as ap_idle_s; 0 (off) must survive the save,
+        # so it is not read with `|| default` like the delay, and the help names the bound.
+        view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
+        self.assertIn("ap_idle_s: idle.value === \"\" ? kAp.idle : Number(idle.value)", view)
+        self.assertIn("value: cfg.ap_idle_s, min: 0, max: kAp.idleMax", view)
+        self.assertRegex(view, r'opt\("Idle limit \(s\)", "[^"]*open to anyone in range[^"]*0 for off')
+
+    def test_wifi_join_sends_ssid_hex_for_lossy_names(self):
+        # A scanned name that isn't valid UTF-8 shows sanitised and is marked; Connect then
+        # sends its raw bytes as ssid_hex, never both keys (SPEC §10.1, PUT /wifi).
+        view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
+        self.assertIn('n.ssid_hex ? " (non-UTF-8 name)" : ""', view)
+        self.assertIn("hex ? { ssid_hex: hex, password: pw.value } : { ssid: p ? p.ssid : s, password: pw.value }", view)
+        # The pick is compared with what the input holds after setting it (.value drops CR/LF),
+        # and an unchanged pick sends the entry's own bytes, never the input's text.
+        self.assertIn("ssid.value = n.ssid; picked = [n, ssid.value];", view)
+        self.assertIn("p = picked && s === picked[1] ? picked[0] : null, hex = p?.ssid_hex,", view)
+
+    def test_refused_attempt_does_not_claim_a_rollback(self):
+        # A web attempt refused when due ("busy") changed nothing (review item 8).
+        view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
+        self.assertIn('a.detail === "busy" ? "DFU32 was busy, so nothing was changed.', view)
 
     def test_wifi_view_is_routed(self):
         self.assertIn('href="#wifi"', self.html)

@@ -117,20 +117,20 @@ Hold the button and let go: 2–5 s opens Improv for 5 minutes, 5–15 s clears 
 
 ## 9. Access point (no WiFi on site)
 
-DFU32 can put up its own WiFi network, named after its hostname (`dfu32-xxxx`), so you can reach the web UI from a phone where there is no network for it to join, or its network has gone away. It is off until you turn it on. Once on, it is a fallback: it comes up at once when no WiFi network is stored, otherwise after DFU32 has been without WiFi for the start delay (2 minutes by default). It goes away again 30 s after DFU32 is back on WiFi and no phone is on it.
+DFU32 can put up its own WiFi network, named after its hostname (`dfu32-xxxx`), so you can reach the web UI from a phone where there is no network for it to join, or its network has gone away. It is off until you turn it on. Once on, it is a fallback: it comes up at once when no WiFi network is stored, otherwise after DFU32 has been without WiFi for the start delay (2 minutes by default). It goes away again 30 s after DFU32 is back on WiFi and no phone is on it. While DFU32 is still without WiFi, it also goes away once no phone has been on it for the idle limit (30 minutes by default), and comes back after the start delay; a phone on it keeps it up for as long as it stays.
 
 **Turn it on**, any one of:
 
-- **Console:** `ap on`. `ap` shows the state, `ap off` turns it off, `ap delay <seconds>` sets the start delay (30–1800).
-- **Web UI:** **WiFi** → the access-point settings. Saving applies at once, no reboot.
+- **Console:** `ap on`. `ap` shows the state, `ap off` turns it off, `ap delay <seconds>` sets the start delay (30–1800), `ap idle <seconds>` sets the idle limit (300–86400) and `ap idle off` removes it.
+- **Web UI:** **WiFi** → the access-point settings (the idle limit in seconds, 0 for none). Saving applies at once, no reboot.
 - **Installer page** ([dfu32.app](https://dfu32.app/)): tick **Enable AP mode** next to the install button, with a password if you like. After the install the page sets it over USB and shows the result. Nothing you type there is stored.
 
 **Join it.** On the phone, join the WiFi network `dfu32-xxxx` (with the password, if you set one). The phone should pop up a sign-in page showing DFU32's web UI. If it doesn't (some phones skip it, for example with Android's Private DNS on "strict"), open **http://192.168.4.1/** in the browser. The network has no internet: if the phone asks whether to stay connected, say yes; if pages don't load, turn mobile data off for now.
 
 **Set the home network from the phone.** Reached this way, the page opens on **WiFi**:
 
-1. **Scan**, pick your network and enter its password, then **Connect**.
-2. The phone may drop off `dfu32-xxxx` for a few seconds while DFU32 moves to the router's channel. The page waits, then shows the result: joined, or failed with the reason ("wrong password", "network not found"). A failed attempt puts the previous network back.
+1. **Scan**, pick your network and enter its password, then **Connect**. A network whose name has unusual characters shows "(non-UTF-8 name)"; pick it as usual.
+2. The phone may drop off `dfu32-xxxx` for a few seconds while DFU32 moves to the router's channel. The page waits, then shows the result: joined, or failed with the reason ("wrong password", "network not found"). A failed attempt puts the previous network back; if DFU32 was busy (a flash had the radio), nothing was changed and you can try again.
 3. Once it has joined, the page shows DFU32's new address (`http://<ip>/` and `http://dfu32-xxxx.local/`). Switch the phone back to your home network and open it. The access point goes away 30 s after the last phone leaves.
 
 While a phone is on the access point and DFU32 has no WiFi, it stops retrying its stored network by itself, because each try knocks the phone off. It retries as soon as the phone leaves, and **Connect** always works. A phone that leaves without saying so is dropped after a minute.
@@ -140,4 +140,6 @@ While a phone is on the access point and DFU32 has no WiFi, it stops retrying it
 - set a password (8–63 characters): `ap password <password>` on the console (in quotes if it has spaces), or the password field under **WiFi**. Phones already on it are dropped and rejoin with the new password;
 - or require an API token (§2).
 
-`ap password clear` (or **Make it open** in the web UI) makes it open again. A factory reset turns AP mode off and forgets the password. During a flash with WiFi off, the access point goes away too and comes back afterwards.
+The idle limit keeps an access point nobody uses from staying up for hours, but it is not a lock: while DFU32 has no WiFi, the access point comes back after the start delay. `ap idle off` keeps it up for as long as DFU32 has no WiFi.
+
+`ap password clear` (or **Make it open** in the web UI) makes it open again. If DFU32 reports that its stored access-point password is invalid, AP mode stays off: set a password (or `ap password clear`), then turn it on again with `ap on`. A factory reset turns AP mode off and forgets the password. During a flash with WiFi off, the access point goes away too and comes back afterwards.
