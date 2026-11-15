@@ -700,14 +700,28 @@ footer a { color: var(--muted); }
     dlBoard.textContent = board.short;
     download.href = imageUrl(board.id);
     renderVersions();
-    // An earlier release may predate this board.
-    if (chosen !== CUSTOM && !chosen.manifests[board.id]) {
-      choose(VERSIONS[0], `${fmtVersion(chosen.version)} has no ${board.short} build, so the latest is chosen instead.`);
-    } else {
+    if (!fitVersion()) {
       fwNote.textContent = fwNoteDefault;  // a note about the previous board no longer applies
       refresh();
       refreshNotice();
     }
+  }
+
+  // An earlier release may predate the chosen board, and a board new in a
+  // pre-release has no build in the latest one: move to the newest version
+  // that has a build for it. Returns false if the chosen version already has one.
+  function fitVersion() {
+    if (!selected || chosen === CUSTOM || chosen.manifests[selected.id]) return false;
+    const alt = VERSIONS.find(e => e.manifests[selected.id]);
+    if (alt) {
+      const was = fmtVersion(chosen.version) || 'The latest version';
+      choose(alt, `${was} has no ${selected.short} build, so ${alt === VERSIONS[0] ? 'the latest' : fmtVersion(alt.version)} is chosen instead.`);
+    } else {
+      fwNote.textContent = `No ${selected.short} build has been published yet.`;
+      refresh();
+      refreshNotice();
+    }
+    return true;
   }
 
   // Back to no board: the button connects with the board-less manifest again.
@@ -742,16 +756,18 @@ footer a { color: var(--muted); }
     const list = index && Array.isArray(index.versions) ? index.versions : [];
     if (!list.length) return;
     const [first, ...rest] = list;
-    // The first is the site's own build: same manifests, so only its name and channel are taken.
+    // The first is the site's own build. Its manifests are the same files, but
+    // only for the boards it has: a board new in a pre-release has none yet.
     if (first.version) VERSIONS[0].version = String(first.version);
     Object.assign(VERSIONS[0], { channel: first.channel || '', tag: first.tag || null });
+    if (first.manifests && typeof first.manifests === 'object') VERSIONS[0].manifests = first.manifests;
     for (const e of rest) {
       if (!e || !e.version || !e.manifests || VERSIONS.some(v => v.version === String(e.version))) continue;
       if (e.channel === 'pre-release' && !SHOW_PRERELEASES) continue;
       VERSIONS.push({ version: String(e.version), channel: e.channel || '', tag: e.tag || null, published_at: e.published_at || null, manifests: e.manifests });
     }
     renderVersions();
-    refresh();
+    if (!fitVersion()) refresh();
   }).catch(() => {});
 
   // The button's manifest is set once: the saved board's, or the board-less one.

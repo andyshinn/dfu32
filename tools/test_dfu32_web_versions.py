@@ -417,16 +417,20 @@ class PreReleaseRun(unittest.TestCase):
     """--default-release: a pre-release run whose page keeps the latest stable release as its default."""
 
     RELEASES = [rel("v0.5.0", "2026-03-01T00:00:00Z"), rel("v0.6.0-rc.1", "2026-04-01T00:00:00Z", pre=True)]
+    NAMES = [b for b, _, _ in BOTH]
 
-    def site(self):
+    def site(self, stable=BOTH, pre=BOTH):
         s = Site(boards=())  # no manifest-<board>.json: this run's build is only in ASSETS/<its tag>
-        s.release("v0.5.0", boards=BOTH)
-        s.release("v0.6.0-rc.1", boards=BOTH)
+        s.release("v0.5.0", boards=stable)
+        s.release("v0.6.0-rc.1", boards=pre)
         return s
+
+    def index(self, s, **kw):
+        return s.index(self.RELEASES, channel="release", **{"default_release": "v0.5.0", "default_boards": self.NAMES, **kw})
 
     def test_stable_is_the_default_and_the_prerelease_is_listed(self):
         with self.site() as s:
-            ix = s.index(self.RELEASES, channel="release", default_release="v0.5.0")
+            ix = self.index(s)
             self.assertEqual(ix["default"], "v0.5.0")
             self.assertEqual([(e["version"], e["channel"], e["tag"]) for e in ix["versions"]],
                              [("v0.5.0", "release", "v0.5.0"), ("v0.6.0-rc.1", "pre-release", "v0.6.0-rc.1")])
@@ -438,7 +442,7 @@ class PreReleaseRun(unittest.TestCase):
 
     def test_default_manifest_and_parts(self):
         with self.site() as s:
-            s.index(self.RELEASES, channel="release", default_release="v0.5.0")
+            self.index(s)
             m = json.loads((s.site / "manifest-feather_esp32_v2.json").read_text())
             self.assertEqual((m["name"], m["version"], m["new_install_prompt_erase"]), ("DFU32", "v0.5.0", True))
             self.assertNotIn("dfu32_erase_notice", m)
@@ -455,8 +459,7 @@ class PreReleaseRun(unittest.TestCase):
 
     def test_baseline_notice_by_layout(self):
         with self.site() as s:
-            s.index(self.RELEASES, channel="release", default_release="v0.5.0",
-                    baseline=baseline(notice_8mb="  8 MB boards moved nvs.  "))
+            self.index(s, baseline=baseline(notice_8mb="  8 MB boards moved nvs.  "))
             notice = lambda b: json.loads((s.site / f"manifest-{b}.json").read_text()).get("dfu32_erase_notice")
             self.assertEqual(notice("feather_esp32_v2"), "8 MB boards moved nvs.")
             self.assertIsNone(notice("feather_esp32s3"))
@@ -464,17 +467,47 @@ class PreReleaseRun(unittest.TestCase):
     def test_baseline_of_another_layout_gives_no_notice(self):
         moved = [e if e[0] != "nvs" else ("nvs", 1, 2, 0x9000, 0x5000) for e in TABLE_4MB]
         self.assertIsNone(wv.baseline_notice(baseline(notice_4mb="moved"), wv.kept_layout(partition_table(moved))))
-        self.assertEqual(wv.baseline_notice(baseline(notice_4mb="moved"), wv.kept_layout(partition_table(TABLE_4MB))), "moved")
+        self.assertEqual(wv.baseline_notice(baseline(notice_4mb="moved"), wv.kept_layout(partition_table(TABLE_4MB))),
+                         "moved")
 
-    def test_stable_without_images_fails(self):
+    def test_a_board_still_uploading_fails(self):
+        # The stable release's images go up one at a time: a default with boards missing never deploys.
+        with self.site(stable=BOTH[:1]) as s, \
+                self.assertRaisesRegex(wv.SplitError, "no dfu32-feather_esp32_v2-merged.bin .*not attached yet"):
+            self.index(s)
+        with Site(boards=()) as s, self.assertRaisesRegex(wv.SplitError, "no boards given"):
+            self.index(s, default_boards=None)
+
+    def test_the_default_is_held_to_a_release_build(self):
+        # As this run's own build would be: any board that isn't right fails, rather than being left out.
         with Site(boards=()) as s:
-            s.release("v0.6.0-rc.1")
-            with self.assertRaisesRegex(wv.SplitError, "v0.5.0 has no usable"):
-                s.index(self.RELEASES, channel="release", default_release="v0.5.0")
+            s.release("v0.5.0", boards=BOTH, version="v0.5.0-dirty")
+            with self.assertRaisesRegex(wv.SplitError, "reports version 'v0.5.0-dirty', not v0.5.0"):
+                self.index(s)
+        with Site(boards=()) as s:
+            s.release("v0.5.0", boards=BOTH, project="other")
+            with self.assertRaisesRegex(wv.SplitError, "the image is 'other'"):
+                self.index(s)
+        with Site(boards=()) as s:
+            s.release("v0.5.0", boards=BOTH)
+            (s.assets / "v0.5.0" / "dfu32-feather_esp32s3-merged.bin").write_bytes(b"\xFF" * 0x9000)
+            with self.assertRaisesRegex(wv.SplitError, "v0.5.0 feather_esp32s3: no bootloader"):
+                self.index(s)
+
+    def test_a_board_new_in_the_prerelease(self):
+        new = ("xiao_esp32s3", CHIP_S3, TABLE_8MB)
+        with self.site(pre=BOTH + (new,)) as s:
+            ix = self.index(s, boards=self.NAMES + ["xiao_esp32s3"])
+            self.assertNotIn("xiao_esp32s3", ix["versions"][0]["manifests"])
+            m = ix["versions"][1]["manifests"]["xiao_esp32s3"]
+            self.assertEqual(m, "fw/v0.6.0-rc.1/xiao_esp32s3/manifest.json")
+            self.assertNotIn("dfu32_erase_notice", json.loads((s.site / m).read_text()))  # nothing to compare with
+        with self.site(pre=BOTH + (new,)) as s:  # without --boards: only those of the default
+            self.assertNotIn("xiao_esp32s3", self.index(s)["versions"][1]["manifests"])
 
     def test_needs_the_release_channel(self):
         with self.site() as s, self.assertRaisesRegex(wv.SplitError, "--channel release"):
-            s.index(self.RELEASES, default_release="v0.5.0")
+            s.index(self.RELEASES, default_release="v0.5.0", default_boards=self.NAMES)
 
     def test_cli(self):
         with self.site() as s:
@@ -485,11 +518,17 @@ class PreReleaseRun(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 self.assertEqual(wv.main(["--site", str(s.site), "--releases", str(root / "releases.json"),
                                           "--assets", str(s.assets), "--channel", "release",
-                                          "--default-release", "v0.5.0", "--baseline", str(root / "baseline.json")]), 0)
+                                          "--default-release", "v0.5.0", "--default-boards", " feather_esp32s3,feather_esp32_v2",
+                                          "--boards", "feather_esp32s3,feather_esp32_v2",
+                                          "--baseline", str(root / "baseline.json")]), 0)
             self.assertEqual(out.getvalue().splitlines(),
                              ["v0.5.0  release v0.5.0  feather_esp32_v2, feather_esp32s3",
                               "v0.6.0-rc.1  pre-release v0.6.0-rc.1  feather_esp32_v2, feather_esp32s3"])
-
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(wv.main(["--site", str(s.site), "--releases", str(root / "releases.json"),
+                                          "--assets", str(s.assets), "--channel", "release",
+                                          "--default-release", "v0.5.0", "--default-boards", "rak11200_rak19007"]), 1)
+            self.assertIn("no dfu32-rak11200_rak19007-merged.bin", err.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

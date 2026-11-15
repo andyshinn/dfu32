@@ -22,7 +22,7 @@ The merged image is for a fresh install and resets settings (WiFi, token, target
 
 ### Preview the installer page
 
-dfu32.app only changes when a release is published (SPEC §9.4). A pre-release doesn't change the default: it is listed only at [dfu32.app/?prerelease=1](https://dfu32.app/?prerelease=1), for trying it before anyone else is offered it. To look at the page itself, copy in ESP Web Tools and esptool-js (from hash-pinned npm tarballs; `web/vendor/` is git-ignored) and serve `web/`. There is no firmware to install this way:
+dfu32.app only changes when a release is published (SPEC §9.4). A pre-release doesn't change the default: it is listed only at [dfu32.app/?prerelease=1](https://dfu32.app/?prerelease=1), for trying it before anyone else is offered it. Promote a tested pre-release by releasing a new commit (a version bump or changelog entry): a release of a commit the page was already deployed from would never go live, so CI refuses it. To look at the page itself, copy in ESP Web Tools and esptool-js (from hash-pinned npm tarballs; `web/vendor/` is git-ignored) and serve `web/`. There is no firmware to install this way:
 
 ```bash
 python3 tools/fetch_esp_web_tools.py --site web && python3 -m http.server -d web 8000

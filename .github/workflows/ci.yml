@@ -259,11 +259,14 @@ jobs:
     name: Installer page (deploy?)
     if: github.event_name == 'release'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      deployments: read
     outputs:
       deploy: ${{ steps.check.outputs.deploy }}
-      # stable: this run's build is the default. prerelease: `stable` is.
+      # stable: this run's build is the default. prerelease: the latest stable
+      # release is, looked up again inside the pages concurrency group.
       mode: ${{ steps.check.outputs.mode }}
-      stable: ${{ steps.check.outputs.stable }}
     steps:
       - id: check
         env:
@@ -271,6 +274,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
           PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
+          set -o pipefail
           deploy=false mode=stable
           # A SemVer pre-release tag (v0.4.0-rc.1) counts even when the
           # release wasn't ticked as a pre-release: the flag is read at
@@ -278,20 +282,40 @@ jobs:
           # The regex lives in a variable because bash would take a quoted
           # one literally.
           semver_pre='^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'
-          # The latest stable release: releases/latest never returns a pre-release.
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          # The latest stable release (releases/latest never returns a
+          # pre-release). It 404s while there is none; any other error fails.
+          if ! latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>gh-err); then
+            grep -q 'HTTP 404' gh-err || { cat gh-err >&2; exit 1; }
+            latest=
+          fi
           if [ "$PRERELEASE" = true ] || [[ "$TAG" =~ $semver_pre ]]; then
-            echo "$TAG is a pre-release: deploying it hidden (?prerelease=1), with $latest as the default"
-            deploy=true mode=prerelease
+            if [ -n "$latest" ]; then
+              echo "$TAG is a pre-release: deploying it hidden (?prerelease=1), with the latest stable release as the default"
+              deploy=true mode=prerelease
+            else
+              echo "$TAG is a pre-release and there is no stable release for the default yet: page left alone"
+            fi
           elif [ "$latest" = "$TAG" ]; then
             deploy=true
           else
-            echo "$TAG is not the latest release ($latest): page left alone"
+            echo "$TAG is not the latest release (${latest:-none}): page left alone"
+          fi
+          # A Pages deployment is named after its commit, and Pages keeps the
+          # site it has when another deployment of that commit arrives (SPEC
+          # §9.4). So if a pages job for another ref (a pre-release of this
+          # commit, typically) has run here, this release would never go
+          # live: say so now, not after the live-page check gives up.
+          if [ "$deploy" = true ]; then
+            others=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&sha=$GITHUB_SHA&per_page=100" \
+                     | jq -r --arg tag "$TAG" '[.[].ref | sub("^refs/(tags|heads)/"; "") | select(. != $tag)] | unique | join(", ")')
+            if [ -n "$others" ]; then
+              echo "::error::$TAG is on commit $GITHUB_SHA, which the installer page was already deployed from ($others). Pages would keep that site, so $TAG would never go live. To publish it, release a new commit (a version bump or a changelog entry), not the same one again (SPEC §9.4)."
+              exit 1
+            fi
           fi
           {
             echo "deploy=$deploy"
             echo "mode=$mode"
-            echo "stable=$latest"
           } >> "$GITHUB_OUTPUT"
 
   # web/ plus one manifest and its parts per board, served from Pages. The
@@ -364,18 +388,56 @@ jobs:
       # them: each one's merged images, split back into parts next to this
       # run's build, and versions.json listing them all. The assets are
       # downloaded here because the page itself can't fetch them (no CORS).
+      # A pre-release run's default: the latest stable release, looked up here,
+      # inside the pages concurrency group. A newer pending job in the group
+      # cancels an older one, so this run may have displaced a stable release's
+      # own deploy, published moments ago; deploying it here makes up for that.
+      # Its images are attached by its release-assets job a few minutes after it
+      # is published, one file at a time, so this waits until every board it
+      # was built for (its own CMakePresets.json) has one, up to 30 minutes.
+      - name: Latest stable release
+        id: stable
+        if: needs.pages-gate.outputs.mode == 'prerelease'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          stable=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          boards=$(gh api -H "Accept: application/vnd.github.raw" \
+                     "repos/$GITHUB_REPOSITORY/contents/CMakePresets.json?ref=$stable" \
+                   | jq -r '[.configurePresets[].name] | join(",")')
+          test -n "$boards" || { echo "::error::$stable: no board presets"; exit 1; }
+          want=$(tr ',' '\n' <<<"$boards" | sed 's/.*/dfu32-&-merged.bin/' | sort)
+          for i in $(seq 1 60); do
+            have=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$stable" \
+                     --jq '.assets[] | select(.state == "uploaded") | .name' | sort)
+            missing=$(comm -23 <(echo "$want") <(echo "$have") | paste -sd' ')
+            [ -z "$missing" ] && break
+            if [ "$i" -eq 60 ]; then
+              echo "::error::$stable, the default, still has no $missing after 30 minutes: re-run this job once its Release images job has attached them"
+              exit 1
+            fi
+            echo "Waiting for $stable's images: $missing"
+            sleep 30
+          done
+          echo "Default: $stable ($boards)"
+          {
+            echo "tag=$stable"
+            echo "boards=$boards"
+          } >> "$GITHUB_OUTPUT"
+
       # A release published since the last deploy shows up at the next one.
       # A pre-release run takes its own images from this run (its release-assets
-      # job may not have attached them yet) and makes the latest stable release
-      # the default, from that release's images; a stable release whose images
-      # aren't attached yet (its run still building) fails this step, and the
-      # pre-release then shows up with that release's own deploy.
+      # job may not have attached them yet), and makes the latest stable release
+      # the default, from that release's images.
       - name: Earlier releases
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
           MODE: ${{ needs.pages-gate.outputs.mode }}
-          STABLE: ${{ needs.pages-gate.outputs.stable }}
+          BOARDS: ${{ needs.boards.outputs.boards }}
+          STABLE: ${{ steps.stable.outputs.tag }}
+          STABLE_BOARDS: ${{ steps.stable.outputs.boards }}
           # How many releases the page offers: both the list and the script use it.
           RELEASES: 20
         run: |
@@ -389,10 +451,13 @@ jobs:
           if [ "$MODE" = prerelease ]; then
             # Over any copy just downloaded: the same build.
             rm -rf "releases/$TAG" && cp -R "prerelease/$TAG" "releases/$TAG"
-            # More than RELEASES pre-releases since it would leave it off the list.
-            [ -d "releases/$STABLE" ] || gh release download "$STABLE" --repo "$GITHUB_REPOSITORY" \
-              -p "dfu32-*-merged.bin" -D "releases/$STABLE"
-            default_args=(--default-release "$STABLE" --baseline partitions/baseline.json)
+            # Again, failing on an error: the download above only warns, and
+            # this one is the default.
+            rm -rf "releases/$STABLE"
+            gh release download "$STABLE" --repo "$GITHUB_REPOSITORY" -p "dfu32-*-merged.bin" -D "releases/$STABLE"
+            # --boards: this run's, so a board new in the pre-release is offered.
+            default_args=(--default-release "$STABLE" --default-boards "$STABLE_BOARDS"
+                          --boards "$(jq -r 'join(",")' <<<"$BOARDS")" --baseline partitions/baseline.json)
           else
             default_args=(--tag "$TAG")
           fi
@@ -409,7 +474,7 @@ jobs:
         id: recheck
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE: ${{ needs.pages-gate.outputs.stable }}
+          STABLE: ${{ steps.stable.outputs.tag }}
           MODE: ${{ needs.pages-gate.outputs.mode }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -441,7 +506,7 @@ jobs:
         if: steps.recheck.outputs.deploy == 'true'
         env:
           TAG: ${{ github.event.release.tag_name }}
-          STABLE: ${{ needs.pages-gate.outputs.stable }}
+          STABLE: ${{ steps.stable.outputs.tag }}
           MODE: ${{ needs.pages-gate.outputs.mode }}
           URL: ${{ steps.deploy.outputs.page_url }}
         run: |
@@ -459,7 +524,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::error::${URL%/}/versions.json gives \"$got\", not \"$want\", 3 minutes after the deploy. Pages most likely kept the previous site: a release of a commit an earlier release (a pre-release too) already deployed never goes live; see SPEC §9.4."
+          echo "::error::${URL%/}/versions.json gives \"$got\", not \"$want\", 3 minutes after the deploy. Pages most likely kept the previous site; see SPEC §9.4."
           exit 1
 
   # Fresh-install images for esptool users, on every published release
