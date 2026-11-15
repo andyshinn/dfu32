@@ -45,6 +45,8 @@ std::string validate_ap_delay(uint64_t s) {
     return {};
 }
 
+bool validate_ap_idle(uint32_t s) noexcept { return s == 0 || (s >= kMinIdleS && s <= kMaxIdleS); }
+
 std::string validate_wifi_credentials(std::string_view ssid, std::string_view pw) {
     // An SSID is 1-32 arbitrary bytes (802.11); the driver's wifi_config_t holds 32.
     if (ssid.empty() || ssid.size() > 32) return "ssid must be 1-32 bytes";
@@ -56,7 +58,7 @@ std::string validate_wifi_credentials(std::string_view ssid, std::string_view pw
     return {};
 }
 
-LoadFixups sanitize_loaded(bool& enabled, std::string& password, uint32_t& delay_s) {
+LoadFixups sanitize_loaded(bool& enabled, std::string& password, uint32_t& delay_s, uint32_t& idle_s) {
     LoadFixups f;
     if (!validate_ap_password(password).empty()) {
         // A corrupt value must never load as "open" (SPEC.md §9.5): AP mode stays
@@ -68,6 +70,12 @@ LoadFixups sanitize_loaded(bool& enabled, std::string& password, uint32_t& delay
     if (!validate_ap_delay(delay_s).empty()) {
         f.delay_reset = true;
         delay_s = kDefaultDelayS;
+    }
+    if (!validate_ap_idle(idle_s)) {
+        // The default, not 0: a corrupt value must not lift the bound on how long
+        // an unattended AP stays up (SPEC.md §9.5).
+        f.idle_reset = true;
+        idle_s = kDefaultIdleS;
     }
     return f;
 }
@@ -143,6 +151,20 @@ Command parse_command(int argc, const char* const* argv) {
             c.kind = Command::Kind::Delay;
             c.delay_s = s;
         }
+    } else if (sub == "idle" && argc == 3) {
+        uint32_t s = 0;
+        if (value == "off") {
+            c.kind = Command::Kind::Idle;  // idle_s 0: never
+        } else if (!parse_u32(value, s)) {
+            c.kind = Command::Kind::Invalid;
+            c.error = "not a number";
+        } else if (!validate_ap_idle(s)) {
+            c.kind = Command::Kind::Invalid;
+            c.error = "ap_idle_s must be 0 (never) or 300-86400";
+        } else {
+            c.kind = Command::Kind::Idle;
+            c.idle_s = s;
+        }
     } else {
         c.kind = Command::Kind::Usage;
     }
@@ -161,18 +183,27 @@ void Controller::ip_lost(uint64_t now_ms) noexcept {
 
 void Controller::ip_got() noexcept { sta_down_since_ms_ = kNever; }
 
-void Controller::stopped(bool had_ip) noexcept { had_ip_at_stop_ = had_ip; }
+void Controller::stopped(bool had_ip) noexcept {
+    had_ip_at_stop_ = had_ip;
+    // The idle limit and the grace don't run while the radio is handed over: net
+    // doesn't step() while stopped, so the first step() after restore() would see
+    // the pre-stop start and count the transfer as idle time (SPEC.md §9.5).
+    idle_since_ms_ = down_ok_since_ms_ = kNever;
+}
 
 void Controller::restored(uint64_t now_ms) noexcept {
     // The handover itself took the station's IP away, so the time stopped isn't
     // "the network is gone". A handover that began with the station already down
     // keeps the clock, so time spent stopped counts (SPEC.md §9.5).
     if (had_ip_at_stop_) sta_down_since_ms_ = now_ms;
+    // Join window: a phone that rejoins the AP must not pause the §7.3 restore
+    // verification. Opened here so the policy stays in the pure layer.
+    explicit_join(now_ms);
 }
 
 void Controller::explicit_join(uint64_t now_ms) noexcept { join_until_ms_ = add_sat(now_ms, kJoinWindowMs); }
 
-void Controller::probed(uint64_t now_ms) noexcept { last_probe_ms_ = now_ms; }
+void Controller::end_join() noexcept { join_until_ms_ = 0; }
 
 void Controller::bringup_failed(uint64_t now_ms) noexcept {
     bringup_retry_at_ms_ = add_sat(now_ms, kBringUpRetryMs);
@@ -201,6 +232,19 @@ Decision Controller::step(const Settings& s, const Facts& f, uint64_t now_ms) no
     if (!grace_running) down_ok_since_ms_ = kNever;
     else if (down_ok_since_ms_ == kNever) down_ok_since_ms_ = now_ms;
 
+    // Idle bookkeeping: the limit counts time up with no client and no station IP,
+    // continuously, so it restarts when a client associates or leaves, and when the
+    // AP comes up (set at BringUp below).
+    const bool idle_running = !f.stopped && s.enabled && f.ap_up && f.clients == 0 && !f.sta_has_ip;
+    if (!idle_running) idle_since_ms_ = kNever;
+    else if (idle_since_ms_ == kNever) idle_since_ms_ = now_ms;
+    const uint64_t idle_ms = uint64_t{s.idle_s} * 1000;
+    const bool idle_due =
+        s.idle_s > 0 && idle_running && now_ms >= idle_since_ms_ && now_ms - idle_since_ms_ >= idle_ms;
+    // The hold after an idle take-down with nothing stored ends once there is a
+    // network (rule 7 then governs) or the station has an IP.
+    if (f.provisioned || f.sta_has_ip) idle_hold_ = false;
+
     Decision d;
     if (f.stopped) {
         // Radio handed over (§7.1): nothing touches the driver until restore().
@@ -209,9 +253,21 @@ Decision Controller::step(const Settings& s, const Facts& f, uint64_t now_ms) no
         return d;
     }
 
+    const uint64_t delay_ms = uint64_t{s.delay_s} * 1000;
     if (!s.enabled) {
         d.why = Why::Disabled;  // an explicit off wins, even with phones on the AP
-    } else if (!f.provisioned) {
+        idle_hold_ = false;
+    } else if (idle_due) {
+        // Nobody has used the AP for idle_s: down, which bounds an open AP's
+        // exposure. The "without an IP since" clock restarts, so it returns after a
+        // fresh ap_delay_s if the station is still down; with no network stored too
+        // (idle_hold_), instead of at once (SPEC.md §9.5).
+        d.why = Why::Idle;
+        sta_down_since_ms_ = now_ms;
+        idle_hold_ = !f.provisioned;
+        d.next_eval_ms = add_sat(now_ms, delay_ms);
+        d.up_in_ms = static_cast<int64_t>(delay_ms);
+    } else if (!f.provisioned && (f.ap_up || !idle_hold_)) {
         d.want_up = true;  // nothing to join: the AP is the only way in
         d.why = Why::NoNetworkStored;
     } else if (f.ap_up && f.clients > 0) {
@@ -227,7 +283,7 @@ Decision Controller::step(const Settings& s, const Facts& f, uint64_t now_ms) no
     } else {
         // Once up, the AP stays up while the station has no IP; it only returns after
         // a fresh ap_delay_s without an IP, which is the hysteresis (SPEC.md §9.5).
-        const uint64_t delay_ms = uint64_t{s.delay_s} * 1000;
+        // Also the wait after an idle take-down with no network stored.
         const uint64_t since = sta_down_since_ms_;
         const bool running = since != kNever;
         // since > now (clock skew) counts as "not yet": no underflow, not up.
@@ -242,10 +298,20 @@ Decision Controller::step(const Settings& s, const Facts& f, uint64_t now_ms) no
     }
 
     if (d.want_up && !f.ap_up) {
-        if (now_ms >= bringup_retry_at_ms_) d.action = Action::BringUp;
-        else d.next_eval_ms = std::min(d.next_eval_ms, bringup_retry_at_ms_);
+        if (now_ms >= bringup_retry_at_ms_) {
+            d.action = Action::BringUp;
+            idle_hold_ = false;
+            // The AP comes up now: the idle limit counts from here even if net
+            // doesn't evaluate again until next_eval_ms.
+            if (!f.sta_has_ip) idle_since_ms_ = now_ms;
+        } else {
+            d.next_eval_ms = std::min(d.next_eval_ms, bringup_retry_at_ms_);
+        }
     } else if (!d.want_up && f.ap_up) {
         d.action = Action::TakeDown;
+    }
+    if (s.idle_s > 0 && d.want_up && idle_since_ms_ != kNever) {
+        d.next_eval_ms = std::min(d.next_eval_ms, add_sat(idle_since_ms_, idle_ms));
     }
 
     // Station retries scan every channel and take the AP off its channel, so they
@@ -255,11 +321,6 @@ Decision Controller::step(const Settings& s, const Facts& f, uint64_t now_ms) no
     if (pausable) {
         if (join_window_open(now_ms)) d.next_eval_ms = std::min(d.next_eval_ms, join_until_ms_);  // pause starts then
         else d.pause_sta = true;
-    }
-    if (d.pause_sta && kPausedProbeMs > 0) {
-        const uint64_t due_at = add_sat(last_probe_ms_, kPausedProbeMs);
-        d.probe_now = now_ms >= due_at;
-        d.next_eval_ms = std::min(d.next_eval_ms, d.probe_now ? add_sat(now_ms, kPausedProbeMs) : due_at);
     }
     return d;
 }

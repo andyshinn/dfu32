@@ -29,9 +29,9 @@ bool erase_target();
 
 /// Device-level settings (SPEC.md §9.1): keys hostname, ntp_server,
 /// wifi_off_dfu, dfu_deadline, and the AP fallback's ap_enabled, ap_password,
-/// ap_delay (§9.5). net reads hostname/ntp_server at boot, so changes to
-/// those apply after a reboot. load_device sanitises the AP keys
-/// (ap::sanitize_loaded): a bad delay loads as the default, and a bad
+/// ap_delay, ap_idle (§9.5). net reads hostname/ntp_server at boot, so changes
+/// to those apply after a reboot. load_device sanitises the AP keys
+/// (ap::sanitize_loaded): a bad delay or idle limit loads as the default, and a bad
 /// password turns AP mode off rather than opening the AP.
 bool load_device(api::DeviceConfig& out);
 bool save_device(const api::DeviceConfig& c);

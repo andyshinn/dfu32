@@ -259,7 +259,7 @@ footer a { color: var(--muted); }
 
     <div class="apmode web-only" id="apmode">
       <label><input type="checkbox" id="ap-on"><span><b>Enable AP mode</b>
-        <span class="muted">Off by default. DFU32 then broadcasts its own WiFi network, dfu32-xxxx, when it has no WiFi or loses it for 2 minutes, so a phone can open its page at <code>http://192.168.4.1/</code>. Open unless you set a password.</span></span></label>
+        <span class="muted">Off by default. DFU32 then broadcasts its own WiFi network, dfu32-xxxx, when it has no WiFi or loses it for 2 minutes, so a phone can open its page at <code>http://192.168.4.1/</code>. With no phone on it, it goes off after 30 minutes and comes back 2 minutes later while WiFi is still down. Open unless you set a password.</span></span></label>
       <div class="pw" id="ap-pw-box" hidden>
         <input type="password" id="ap-pw" autocomplete="new-password" minlength="8" maxlength="63" aria-label="Access point password (WPA2)" aria-describedby="ap-pw-note" placeholder="optional: blank keeps the current one, or open">
         <p class="warn" id="ap-pw-note">Open: anyone nearby can join and, until you turn on an API token, use DFU32.</p>

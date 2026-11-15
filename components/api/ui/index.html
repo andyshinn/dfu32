@@ -499,7 +499,7 @@ function viewLogs() {
 
 // ---- wifi (station and fallback access point, §9.5) -------------------------------------
 // The access point's limits, as in dfu32_core/ap.hpp (tools/test_ui.py compares them).
-const kAp = { delay: 120, min: 30, max: 1800, pwMin: 8, pwMax: 63 };
+const kAp = { delay: 120, min: 30, max: 1800, idle: 1800, idleMax: 86400, pwMin: 8, pwMax: 63 };
 let wifiTimer = 0;
 function apState() {
   const ap = status.device.ap || {};
@@ -519,23 +519,27 @@ async function viewWifi() {
   const ap = status.device.ap || {}, out = [h("section", { id: "wsta" })], list = h("div"), prog = h("div");
   const ssid = h("input", { placeholder: "Other network…", maxlength: 32, autocomplete: "off" });
   const pw = h("input", { type: "password", autocomplete: "off" });
+  // A name that isn't valid UTF-8 shows sanitised; its raw bytes come as ssid_hex. While the
+  // picked name is left as the input shows it (setting .value drops CR/LF), Connect sends the
+  // entry's own ssid_hex or ssid, not the input's text (§10.1).
+  let picked;
   // A 409 (a join running, WiFi stopped) says why instead of listing nothing.
   const scan = h("button", { onclick: () => act(scan, async () => {
     list.replaceChildren(h("p.mute", "Scanning…"));
     try {
       const r = await api("POST", "/wifi/scan", undefined, 15000);
-      list.replaceChildren(r.networks.length ? h("table", r.networks.map((n) => h("tr", h("td", n.ssid || "(hidden)", n.secured ? [" ", badge("locked")] : ""), h("td", n.rssi + " dBm"),
-        h("td", n.ssid && h("button", { onclick: () => { ssid.value = n.ssid; pw.focus(); } }, "Use"))))) : h("p.mute", "No networks found."));
+      list.replaceChildren(r.networks.length ? h("table", r.networks.map((n) => h("tr", h("td", (n.ssid || "(hidden)") + (n.ssid_hex ? " (non-UTF-8 name)" : ""), n.secured ? [" ", badge("locked")] : ""), h("td", n.rssi + " dBm"),
+        h("td", (n.ssid || n.ssid_hex) && h("button", { onclick: () => { ssid.value = n.ssid; picked = [n, ssid.value]; pw.focus(); } }, "Use"))))) : h("p.mute", "No networks found."));
     } catch (e) { list.replaceChildren(h("p.mute", e.message)); }
   }) }, "Scan");
   const go = h("button.pri", { onclick: async () => {
-    const s = ssid.value, until = Date.now() + 60000, end = (n) => { go.disabled = false; prog.replaceChildren(n); };
-    if (!s) return toast("Pick a network");
+    const s = ssid.value, p = picked && s === picked[1] ? picked[0] : null, hex = p?.ssid_hex, until = Date.now() + 60000, end = (n) => { go.disabled = false; prog.replaceChildren(n); };
+    if (!s && !hex) return toast("Pick a network");
     go.disabled = true;
     // 202 means the attempt is pending. No answer (the phone dropped) may still mean it
     // started, so follow /status; an older attempt's result counts only once this one shows.
     let seen = false;
-    try { await api("PUT", "/wifi", { ssid: s, password: pw.value }, 4000); seen = true; }
+    try { await api("PUT", "/wifi", hex ? { ssid_hex: hex, password: pw.value } : { ssid: p ? p.ssid : s, password: pw.value }, 4000); seen = true; }
     catch (e) { if (e.status) return end(note("bad", e.message)); }
     async function poll() {
       if (view !== "wifi" || !prog.isConnected) return;
@@ -546,7 +550,8 @@ async function viewWifi() {
         if (seen && a.state === "joined") {
           if (cfg) cfg.wifi_ssid = s;
           end(note("info", "Connected. On that network DFU32 is at http://" + d.wifi.ip + "/ and http://" + d.hostname + ".local/." + (d.ap?.via_ap ? " Switch this phone back to that network; the access point turns off once it leaves." : "")));
-        } else if (seen && a.state === "failed") end(note("bad", "Couldn't join " + s + ": " + a.detail + "; the previous network was put back."));
+        // "busy": refused when due (a flash or another attempt had the radio), so nothing changed.
+        } else if (seen && a.state === "failed") end(note("bad", "Couldn't join " + s + ": " + (a.detail === "busy" ? "DFU32 was busy, so nothing was changed. Try again." : a.detail + "; " + (cfg?.wifi_ssid ? "the previous network was put back." : "no network is stored, as before."))));
         else prog.replaceChildren(h("p.mute", "Joining " + s + "… (" + a.state + ")"));
         renderWifi();
         if (!go.disabled) return;
@@ -564,19 +569,22 @@ async function viewWifi() {
   if (ap.supported && cfg) {
     const en = h("input", { type: "checkbox", checked: cfg.ap_enabled });
     const delay = h("input", { type: "number", value: cfg.ap_delay_s, min: kAp.min, max: kAp.max, placeholder: kAp.delay });
+    const idle = h("input", { type: "number", value: cfg.ap_idle_s, min: 0, max: kAp.idleMax, placeholder: kAp.idle });
     const apw = h("input", { type: "password", autocomplete: "off", minlength: kAp.pwMin, maxlength: kAp.pwMax, placeholder: cfg.ap_password_set ? "set: leave blank to keep" : "none: open" });
     // Asked of a phone on the access point, which these changes knock off (§10.2).
     const bye = () => status.device.ap.via_ap ? "This phone will be disconnected from " + ap.ssid + ". " : "";
     const put = (btn, body) => act(btn, async () => { cfg = await api("PUT", "/config", body, 4000); toast("Saved: applies in a moment"); viewWifi(); });
     const save = h("button.pri", { onclick: () => {
-      const body = { ap_enabled: en.checked, ap_delay_s: Number(delay.value) || kAp.delay };
+      // 0 is a value here (no idle limit), so only a blank field means the default.
+      const body = { ap_enabled: en.checked, ap_delay_s: Number(delay.value) || kAp.delay, ap_idle_s: idle.value === "" ? kAp.idle : Number(idle.value) };
       if (apw.value) body.ap_password = apw.value;
       if (!bye() || !(cfg.ap_enabled && !en.checked || en.checked && apw.value) || confirm(bye() + (en.checked ? "Rejoin it with the new password." : "The access point turns off.") + " Continue?")) put(save, body);
     } }, "Save");
     const open = h("button.dng", { hidden: !cfg.ap_password_set, onclick: () => confirm(bye() + "Make the access point open? Anyone in range can join it.") && put(open, { ap_password: "" }) }, "Make it open");
     out.push(h("section", h("h2", "Access point"), h("div.form",
-        opt("Fallback access point", "DFU32's own network, for a phone to reach this page; off by default. Its name is the hostname. It comes up at once when no WiFi network is stored, otherwise after the start delay without WiFi, and goes off 30 s after WiFi is back and no phone is on it.", en, true),
+        opt("Fallback access point", "DFU32's own network, for a phone to reach this page; off by default. Its name is the hostname. It comes up at once when no WiFi network is stored, otherwise after the start delay without WiFi, and goes off 30 s after WiFi is back and no phone is on it, or after the idle limit.", en, true),
         opt("Start after (s)", "Time without WiFi before the access point comes up, 30–1800 s; default 120.", delay),
+        opt("Idle limit (s)", "The access point goes off once no phone has been on it for this long while WiFi is down, and comes back after the start delay. This bounds how long an unattended access point is open to anyone in range. 300–86400 s, or 0 for off (stays up); default 1800 (30 min).", idle),
         opt("Password", "WPA2, 8–63 characters, never shown. Blank keeps it; without one the access point is open.", apw)),
       h("div.row", { style: "margin-top:.7rem" }, save, open)));
   }

@@ -169,11 +169,12 @@ RestoreStep restore_step(bool expect_connect, bool sta_ip, bool fault, bool radi
     return radio_alive ? RestoreStep::Done : RestoreStep::Reboot;
 }
 
-OtaVerdict ota_verdict(bool sta_ip, bool ap_started, bool provisioned, uint8_t last_reason) noexcept {
+OtaVerdict ota_verdict(bool sta_ip, [[maybe_unused]] bool ap_started, bool provisioned,
+                       uint8_t last_reason) noexcept {
+    // ap_started is deliberately ignored (§9.5, §12.3): the SoftAP coming up
+    // proves nothing about the station path, so a provisioned image whose
+    // station never connects or reports a disconnect still rolls back.
     if (sta_ip) return OtaVerdict::Confirm;
-    // §9.5: the access point only starts if the WiFi driver works, which is
-    // all this test is meant to prove about the new image.
-    if (ap_started) return OtaVerdict::ConfirmAccessPoint;
     if (!provisioned) return OtaVerdict::ConfirmNoNetwork;
     if (last_reason != 0) return OtaVerdict::ConfirmRadioWorks;
     return OtaVerdict::Rollback;

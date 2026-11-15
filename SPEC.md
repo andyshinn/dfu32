@@ -426,8 +426,9 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Default 0 (WiFi stays on; bench comparison in §7.1). Per-request override: `wifi_off`. |
 | `dfu_deadline` | u32 | Cap on the §7.3 run deadline (`dfu_deadline_max_s`), default 1200, 120–7200. |
 | `ap_enabled` | u8 | Access-point fallback (§9.5). Default 0 (off). |
-| `ap_password` | str | WPA2 passphrase for the access point, 8–63 printable ASCII; absent = open. Plaintext, write-only over the API. An invalid stored value turns AP mode off for that boot (never open). |
+| `ap_password` | str | WPA2 passphrase for the access point, 8–63 printable ASCII; absent = open. Plaintext, write-only over the API. An invalid stored value turns AP mode off (never open); `ap on` is needed again once a valid password is stored. |
 | `ap_delay` | u32 | Station-down time before the access point comes up, default 120, 30–1800 s. |
+| `ap_idle` | u32 | Idle limit (API `ap_idle_s`): the access point goes down after this long up with no client while the station has no IP. Default 1800 (30 min), 0 = never, else 300–86400 s; out of range loads as 1800 with a warning. |
 | `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
@@ -514,7 +515,7 @@ A static page on GitHub Pages flashes DFU32 and sets its WiFi in one session. It
 
 ### 9.5 Access-point fallback (decided: off until turned on)
 
-DFU32 can bring up its own WiFi network (a soft-AP) so that an operator on site can reach the web UI from a phone when there is no usable WiFi network and no serial cable. It is a **fallback** only. Once enabled, the AP comes up when the station has nothing to join or has lost its network, and goes away again once the station is back and nobody is using the AP. It is **off by default** (security), because an open AP with no API token lets anyone in radio range control DFU32 (§9.3).
+DFU32 can bring up its own WiFi network (a soft-AP) so that an operator on site can reach the web UI from a phone when there is no usable WiFi network and no serial cable. It is a **fallback** only. Once enabled, the AP comes up when the station has nothing to join or has lost its network, and goes away again once the station is back and nobody is using the AP, or once nobody has used it for the idle limit. It is **off by default** (security), because an open AP with no API token lets anyone in radio range control DFU32 (§9.3).
 
 **Settings** (NVS namespace `dfu32`, §9.1; `api::DeviceConfig`; erased by a factory reset):
 
@@ -523,8 +524,9 @@ DFU32 can bring up its own WiFi network (a soft-AP) so that an operator on site 
 | AP mode on/off | `ap_enabled` (u8) | 0 (off) | |
 | Password | `ap_password` (str) | absent = open | WPA2-Personal passphrase, 8–63 printable ASCII (0x20–0x7E). A 64-hex raw PSK is not accepted. Stored in plaintext, as the WiFi driver stores the station passphrase; there is no NVS encryption. Never returned by the API, the console or the logs. |
 | Start delay | `ap_delay` (u32) | 120 s | 30–1800 s: how long the station may be without an IP before the AP comes up |
+| Idle limit | `ap_idle` (u32) | 1800 s (30 min) | 0 = never, else 300–86400 s: how long the AP may stay up with no client while the station has no IP (rule 2a) |
 
-A stored delay out of range loads as 120 with a warning. A stored password that fails validation does **not** load as "open": it turns AP mode off for that boot, with an error log, until `ap password <pw>` or `ap password clear` stores a valid value; until then other saves keep the bad value, and turning AP mode on is refused. A corrupt value can therefore never open a protected AP.
+A stored delay or idle limit out of range loads as its default (120 s, 1800 s) with a warning. A stored password that fails validation does **not** load as "open": it turns AP mode off, with an error log, until `ap password <pw>` or `ap password clear` stores a valid value; until then other saves keep the bad value, and turning AP mode on is refused. A corrupt value can therefore never open a protected AP. Storing a valid password does not turn AP mode back on: the next save writes AP mode as off, so `ap on` (or the web UI's switch) is needed again after fixing the password. That is the safe side: the operator decides again whether the AP should run.
 
 **When the AP is up.** One pure decision (`dfu32_core/ap.hpp`, `ap::Controller::step()`, host-tested) runs whenever something changes, and again at the next instant its answer could change on its own. It is evaluated in this order:
 
@@ -532,21 +534,26 @@ A stored delay out of range loads as 120 with a warning. A stored password that 
 |---|---|---|---|
 | 1 | Radio handed over (`net::stop()`, §7.1) | unchanged; nothing touches the driver until `restore()` | Stopped |
 | 2 | AP mode off | down (even with phones on it: an explicit off wins) | Disabled |
-| 3 | No station network stored | up, at once, from boot | NoNetworkStored |
+| 2a | `ap_idle_s` > 0, and the AP has been up with no client while the station has no IP, continuously for `ap_idle_s` | goes down; the "without an IP since" clock restarts at that moment | Idle |
+| 3 | No station network stored | up, at once, from boot; after an idle take-down, `ap_delay_s` later (rule 7's wait) | NoNetworkStored |
 | 4 | AP up and ≥ 1 client associated | stays up | ClientsPresent |
 | 5 | Station has an IP, AP up, no client | goes down after a **30 s** grace with no client (`kDownGraceMs`); the grace restarts whenever a client associates | StationUpGrace |
 | 6 | Station has an IP, AP down | stays down | StationUp |
-| 7 | Station has no IP | up once it has been without an IP for `ap_delay_s`; once up, stays up | StationDown / Waiting |
+| 7 | Station has no IP | up once it has been without an IP for `ap_delay_s`; once up, stays up until rule 2a takes it down | StationDown / Waiting |
 
 - "Without an IP since" is one clock. It starts at boot, at a lost IP, and at `restore()` when the station had an IP before the handover. A handover that started with the station already down keeps the clock running, so time spent stopped counts.
 - The 30 s grace implements "down once the station has an IP and no client" for the moment the station joins. The AP then moves to the router's channel (one radio; a channel-switch announcement over 3 beacons), and the phone drops and rejoins within a few seconds. Without the grace the AP would vanish in that gap, before the phone shows the "connected" result.
-- Hysteresis falls out of the rules: once the AP is down it can only return after the station loses its IP and then `ap_delay_s` (≥ 30 s) passes.
+- **Idle limit (rule 2a).** The idle clock runs while all of these hold: AP mode on, the AP up, no client associated, and no station IP. It starts again from zero whenever one of them stops holding (a client associates or leaves, the station gets or loses an IP) and when the AP comes up; it does not run while the radio is handed over, so it counts from `restore()`. Clients present always keep the AP up, however long. With `ap_idle_s` = 0 the rule is off, and an AP with no station IP stays up for as long as the station stays down.
+- An unattended AP therefore cycles while the station stays down: up `ap_delay_s` after the loss, down `ap_idle_s` later, up again `ap_delay_s` after that, and so on, so a phone that arrives on site finds it within `ap_delay_s`. A router that comes back while the AP is down keeps it down (rule 6). With no network stored the AP comes up at once at boot, at `wifi forget` and when AP mode is turned on, and returns `ap_delay_s` after an idle take-down; `ap.standby_s` (§10.1) and `ap` count down meanwhile.
+- A new idle limit applies at once and counts from the AP's last activity, so lowering it (or turning it on) can take an idle AP down straight away. A delay or idle limit change deauthenticates nobody.
+- Hysteresis falls out of the rules: with a network stored, once the AP is down, whether because the station joined or because of the idle limit, it only returns after the station has been without an IP for a fresh `ap_delay_s` (≥ 30 s).
 - If bringing the AP up fails (`esp_wifi_set_mode` / `set_config`), the error is logged and recorded (`net::status().ap.fault`), it is retried every 10 s, and the station is never affected. Nothing AP-related can make `net::init()` fail (a failing init would turn the API off and roll back a pending OTA, §12.3).
 
 **Station reconnects while a phone is on the AP.** In AP+STA mode the AP shares the station's single radio channel. Every station connect attempt to a missing network scans all channels and takes the AP off its channel, and a phone trying to load a page drops. So, as decided:
 
-- **While ≥ 1 client is associated**, the station has no IP and a network is stored, automatic station retries **pause** (decided 2026-11: a strict pause). No retry timer is armed and there is no occasional probe either; an attempt already in flight is left to finish. When the last client leaves, the backoff resets and the station retries at once.
-- **Explicit joins are never paused.** `net::set_credentials()` (console `wifi`, Improv BLE/Serial, the web UI) and `net::restore()` open a **65 s join window** in which retries run at the normal backoff even with clients present. That covers the longest Improv attempt (30 s), the console's 20 s wait and the §7.3 60 s restore verification.
+- **While ≥ 1 client is associated**, the station has no IP and a network is stored, automatic station retries **pause** (decided 2026-11: a strict pause). No retry timer is armed and nothing probes the network meanwhile (the pure layer has no probe timer); an attempt already in flight is left to finish. When the last client leaves, the backoff resets and the station retries at once.
+- **Explicit joins are never paused.** `net::set_credentials()` (console `wifi`, Improv BLE/Serial, the web UI) and `net::restore()` open a **65 s join window** in which retries run at the normal backoff even with clients present. That covers the longest Improv attempt (30 s), the console's 20 s wait and the §7.3 60 s restore verification. The restore's window is opened by `ap::Controller::restored()` itself, so the policy stays in the pure, host-tested layer.
+- Putting the previous network back after a failed attempt (`Attempt::give_up()`, which calls `net::set_credentials(…, user_join = false)`) is not an explicit join: it opens no window and ends the attempt's, so under the strict pause the restored network stays paused while a phone is on the AP, and connects as usual once none is.
 - Phones that leave without a deauth are dropped after 60 s of inactivity (`esp_wifi_set_inactive_time(WIFI_IF_AP, 60)`, re-applied at every AP start), so a phone that is gone cannot hold the pause. **[bench]** that a sleeping phone isn't dropped.
 - The client count is re-read from the driver (`esp_wifi_ap_get_sta_list`) at every evaluation, not added up from events, and is 0 whenever the AP is down. A lost or duplicated event cannot pin the pause.
 - `ap` status, `/status` (`device.wifi.paused`) and the UI say when retries are paused.
@@ -571,7 +578,9 @@ A stored delay out of range loads as 120 with a warning. A stored password that 
   - Every other type (AAAA, HTTPS 65, SVCB 64, …) gets NOERROR with no answer. iOS asks for HTTPS records first and needs a quick negative.
   - Responses, non-query opcodes, `QDCOUNT ≠ 1`, compressed or malformed names and oversized packets are dropped.
   - Because it is bound to the AP address, LAN clients on the station side are never answered.
-- **HTTP** (`components/api`, pure decision `captive::decide()`), on the AP interface only. "On the AP" means the request's local socket address is 192.168.4.1 (`getsockname`). Our hosts are 192.168.4.1, `<hostname>` and `<hostname>.local`, case-insensitive, with an optional `:80` and trailing dot, and an empty Host.
+- **HTTP** (`components/api`, pure decision `captive::decide()`), on the AP interface only. "On the AP" means the request's local socket address is 192.168.4.1 (`getsockname`). Our hosts are 192.168.4.1, `<hostname>` and `<hostname>.local`, case-insensitive, with an optional `:80` and trailing dot.
+  - No Host header (HTTP/1.0; RFC 7230 §5.4 allows that only there) and an empty one both count as ours: `captive::decide()` takes `std::optional<std::string_view>`, and httpd reports both as length 0, which the glue passes as `std::nullopt`.
+  - A Host the glue can't read whole (64 characters or longer, since its 64-byte buffer holds 63 plus the NUL, or a failed read) fails closed: it is passed on as a foreign name (`unreadable.invalid`), never as absent, so the API answers `421` and `/` redirects. Our longest name, a 31-character hostname + `.local.:80`, fits.
   - Unknown paths (the OS probes: `/hotspot-detect.html`, `/generate_204`, `/gen_204`, `/connecttest.txt`, `/ncsi.txt`, `/redirect`, `/canonical.html`, `/success.txt`, …) with GET/HEAD get `302 Found` with `Location: http://192.168.4.1/`, `Cache-Control: no-store`, `Connection: close` and a one-line HTML body (iOS needs a body). They never get their "online" answer, so the OS shows its sign-in sheet. This uses httpd's 404 error handler, so it takes no URI slot.
   - `GET /` with a foreign Host also gets the 302, so the UI always loads from one origin, `http://192.168.4.1/`.
   - `/api/v1/*` with a foreign Host gets `421 MISDIRECTED`. This guards against DNS rebinding: the captive DNS resolves every name to DFU32, so a foreign page must not drive the API. API paths are never redirected.
@@ -582,8 +591,8 @@ A stored delay out of range loads as 120 with a warning. A stored password that 
 
 **Setting the station from the phone.** The web UI's WiFi view (§10.2) is the default view when the page arrived over the AP (`/status` `device.ap.via_ap`) and the station has no IP. It works like this:
 
-1. **Scan.** The Scan button calls `POST /api/v1/wifi/scan`, which runs on the slow-request task. `net::scan()` is allowed while station retries are paused or nothing is stored, and refused only while a join is in flight (a connection attempt, or a stored network's retries that aren't paused) or the radio is stopped. It answers `409` with the reason instead of an empty list, and is also refused while a flash, console operation or connection attempt holds the radio.
-2. **Connect.** The operator picks a network and enters its password, then the page sends `PUT /api/v1/wifi`. The device answers `202` first. 1.5 s later it starts a connection attempt like an Improv one (§9.2): lease `wifi-setup`, at most one attempt across Improv BLE, Improv Serial and the web, 30 s for an IP. On failure the previous network is put back (or cleared again), so a typo can't overwrite a network that is only down for now. On success an open Improv BLE window is closed.
+1. **Scan.** The Scan button calls `POST /api/v1/wifi/scan`, which runs on the slow-request task. Each network's `ssid` is made safe for JSON (invalid UTF-8 and NUL become U+FFFD); when that changed the name, the entry also carries `ssid_hex`, the raw bytes as lowercase hex, and the page marks the row "(non-UTF-8 name)". Two such entries can look identical, since the scan deduplicates by the raw name. `net::scan()` is allowed while station retries are paused or nothing is stored, and refused only while a join is in flight (a connection attempt, or a stored network's retries that aren't paused) or the radio is stopped. It answers `409` with the reason instead of an empty list, and is also refused while a flash, console operation or connection attempt holds the radio.
+2. **Connect.** The operator picks a network and enters its password, then the page sends `PUT /api/v1/wifi`, with the picked entry's `ssid_hex` in place of `ssid` when it has one, so a name the scan had to sanitise is still joined by its real bytes. The device answers `202` first. 1.5 s later it starts a connection attempt like an Improv one (§9.2): lease `wifi-setup`, at most one attempt across Improv BLE, Improv Serial and the web, 30 s for an IP. On failure the previous network is put back (or cleared again), so a typo can't overwrite a network that is only down for now. An attempt refused when it was due (a flash or another attempt took the radio after the `202`) changes nothing, and the page says so rather than that the previous network was put back. An SSID holding a NUL byte can't be stored (the driver's station config is a C string), so a `ssid_hex` with `00` in it is `400` up front; no scan entry has one, since the driver's scan records are C strings too. On success an open Improv BLE window is closed.
 3. **Follow.** The phone usually drops for a few seconds when the AP follows the station to the router's channel. The page polls `/status` with short timeouts and shows the outcome from `device.wifi.attempt`, kept in RAM until the next attempt so a phone that rejoined can still read it: joined, or failed with a reason ("wrong password", "network not found").
 4. **Leave.** It shows `http://<ip>/` and `http://<hostname>.local/` and tells the operator to switch the phone back to the home network. The AP goes down 30 s after the last phone leaves.
 
@@ -597,6 +606,7 @@ A stored delay out of range loads as 120 with a warning. A stored password that 
   - the installer's checkbox hint.
 
   The text says that anyone in radio range can control DFU32 and can claim it (set a token) and lock the owner out, until the console or the button clears it (§9.3).
+- **Exposure bound:** the idle limit (rule 2a, default 30 min) bounds how long an unattended AP stays up at a stretch: nobody joining takes it down after `ap_idle_s`. It doesn't make an open AP safe, because the AP returns `ap_delay_s` later while the station is still down (with the defaults, up 30 of every 32 minutes), and `ap_idle_s` = 0 removes the bound. A password or an API token is the fix.
 - Otherwise the API behaves exactly as on the LAN (token rules of §9.3), plus the 421 Host check above.
 - The password is write-only everywhere:
   - `GET /config` reports only `ap_password_set`;
@@ -611,8 +621,8 @@ A stored delay out of range loads as 120 with a warning. A stored password that 
 **Interactions:**
 
 - **Radio handover (§7.1):** `net::stop()` (`esp_wifi_stop`) takes the AP and its phones down too. The phones rejoin after the transfer. While stopped, AP settings changes are stored but not applied. `net::restore()` reconciles the mode and AP config *before* `esp_wifi_start()`, so a disabled AP never comes back even briefly. If the AP was up, it returns with the restart.
-- **Restore (§7.3 layer 4):** when the station had no IP at the handover (an offline or AP-only device), `restore` restarts the driver (with the AP) and returns at once, with no 60 s wait and never `esp_restart`. When it had one, DFU32 waits for an IP and retries once, and the join window keeps a phone that rejoined the AP from pausing it. If there is still no IP, it reboots only when the radio shows no sign of life. An AP that is up, or a disconnect or failed connect reported since the restore, means the radio works: DFU32 logs a warning and keeps running, so the phones on the AP stay connected, and the station keeps retrying under the rules above.
-- **OTA confirm (§12.3):** the 90 s window is unchanged. A station IP confirms. An AP that has started since boot also confirms ("WiFi alive: access point up"). The existing branches (no network stored; a disconnect reason) stay. A provisioned device whose router is gone is already confirmed by its disconnect reason before its AP is due.
+- **Restore (§7.3 layer 4):** when the station had no IP at the handover (an offline or AP-only device), `restore` restarts the driver (with the AP) and returns at once, with no 60 s wait and never `esp_restart`. When it had one, DFU32 waits for an IP and retries once, and the join window that `ap::Controller::restored()` opens keeps a phone that rejoined the AP from pausing it. If there is still no IP, it reboots only when the radio shows no sign of life. An AP that is up, or a disconnect or failed connect reported since the restore, means the radio works: DFU32 logs a warning and keeps running, so the phones on the AP stay connected, and the station keeps retrying under the rules above.
+- **OTA confirm (§12.3):** the 90 s window is unchanged, and the AP never confirms a new image: a working SoftAP proves nothing about the station path, which is what a provisioned image must show. In order (`job::ota_verdict`, host-tested): a station IP confirms; no network stored confirms without a network test (an unprovisioned board with AP mode on gets here); a disconnect reason confirms with a warning (the radio works, the router is at fault); otherwise it rolls back, even with the AP up and phones on it.
 - **Factory reset (§9.3):** `net::factory_reset()` turns AP mode off in RAM, takes the AP down and forgets the station before `config::erase_all()`, so no AP springs up in the 500 ms before the reboot. The AP settings live only in `dfu32`, so the erase clears them.
 - **Jobs with WiFi kept on:** the AP keeps running during a transfer. The rules still apply (an AP coming up mid-transfer shares the radio through software coex), and a station retry pause doesn't affect the BLE side.
 - **Default route:** while only the AP has an address, it is lwIP's default interface. Fetches are refused anyway (no station IP: `HTTP_ERROR: WiFi is not connected (DFU32's access point has no internet)` while the AP is up, and the console says the same) and SNTP retries quietly. esp_netif switches the default back to the station (route priority 100 > 10) on `GOT_IP` **[bench]**.
@@ -620,8 +630,8 @@ A stored delay out of range loads as 120 with a warning. A stored password that 
 
 **Turning it on:**
 
-- **Console:** `ap` (status), `ap on`, `ap off`, `ap password <pw>|clear`, `ap delay <seconds>` (grammar below). Each change is saved to NVS before the reply is printed and applies 1.5 s later (`net::set_ap`), with no reboot.
-- **API / web UI:** `PUT /api/v1/config` with `ap_enabled`, `ap_delay_s` and the write-only `ap_password`. The change applies 1.5 s after the reply, so a phone on the AP being changed still gets its `200`.
+- **Console:** `ap` (status), `ap on`, `ap off`, `ap password <pw>|clear`, `ap delay <seconds>`, `ap idle <seconds>|off` (grammar below). Each change is saved to NVS before the reply is printed and applies 1.5 s later (`net::set_ap`), with no reboot.
+- **API / web UI:** `PUT /api/v1/config` with `ap_enabled`, `ap_delay_s`, `ap_idle_s` and the write-only `ap_password`. The change applies 1.5 s after the reply, so a phone on the AP being changed still gets its `200`.
 - **Installer:** the **Enable AP mode** checkbox (§9.4).
 
 **Console grammar** (`main/console.cpp`; the argument parsing is pure, `ap::parse_command`):
@@ -633,7 +643,12 @@ ap off                     turn AP mode off
 ap password <pw>           set the WPA2 password (8-63 printable ASCII; quote it if it has spaces)
 ap password clear          make the access point open
 ap delay <seconds>         30-1800
+ap idle <seconds>          idle limit, 300-86400
+ap idle off                no idle limit (same as `ap idle 0`)
 ```
+
+- An unknown subcommand, a missing value or an extra argument prints `ap::kUsage`, which the console's `ap` hint is built from: `Usage: ap [on | off | password <pw>|clear | delay <seconds> | idle <seconds>|off]`.
+- An idle value out of range answers `Not saved: ap_idle_s must be 0 (never) or 300-86400`, the API's wording.
 
 - The first line of each reply is fixed, so the installer page (§9.4) and scripts can match it:
 
@@ -642,11 +657,12 @@ ap delay <seconds>         30-1800
   | `AP mode on.` / `AP mode off.` | 0 |
   | `AP password set.` / `AP password cleared: the access point is open.` | 0 |
   | `AP delay <n> s.` | 0 |
+  | `AP idle limit <n> s.` / `AP idle limit off.` | 0 |
   | `Not saved: <reason>` (a bad value) | 1 |
   | `Usage: …` (an unknown subcommand, a missing value or an extra argument) | 1 |
   | `AP mode is not in this build.` | 1 |
 
-- After a change it prints the status (mode, delay, state, whether station retries are paused, and the open-AP warning when it applies).
+- After a change it prints the status (mode, delay, idle limit (`30 min`, `off`, or seconds when not whole minutes), state, whether station retries are paused, and the open-AP warning when it applies).
 - When WiFi is stopped for a transfer, the command adds "Applies when WiFi comes back after the transfer."
 - `wifi` status gains an `access pt` line. `wifi forget` says the access point comes up now when AP mode is on.
 
@@ -693,15 +709,15 @@ Conventions (M3b):
 - `POST /staging` uploads an image into the staging partition (§8) with no manifest and no target: the application `.bin` as the raw body with `Content-Length`, and in the query `dat=<hex>` (the init packet, 1–64 bytes), `version=` (1–63 bytes), and optionally `board=` (compared with the target's board at flash time, as for any staged image), `sha256=<hex>` (checked against what arrives) and `name=` (recorded as `upload:<name>`). Text values are %-decoded (`+` is a space); the URI limit is raised to 1 KB (`CONFIG_HTTPD_MAX_URI_LEN`; esp_http_server reads the request line against it and the headers separately against `CONFIG_HTTPD_MAX_REQ_HDR_LEN`), and the UI and the tool clip the file name so the query stays well inside it. Like the firmware upload it runs on the slow-request task and holds the BLE lease (`409` during a job, a scan or a console flash). The image isn't bound to the target, but when the uploader gives a board and the target has one, they must match (`staged_board_ok`): `422 BOARD_MISMATCH` before anything is erased, rather than at flash time. It answers `400` for a bad query (before anything is erased), `422` with the §13.3 code for an image that fails its checks, `500 STAGING_IO`, or `200` with the new header (the `GET /staging` fields); on an early error it reads and discards the rest of the body, as the firmware upload does. A failure once writing has begun leaves nothing staged, and the detail says so.
 - `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.
 - `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
-- `PUT /config` takes `ap_enabled`, `ap_delay_s` and a write-only `ap_password` (absent = keep, `""` = open); `GET /config` reports `ap_password_set`, never the password, plus the read-only `ap_active` and `ap_clients`, so as before a `GET` result isn't sent back verbatim; AP changes apply 1.5 s after the reply, without a reboot.
+- `PUT /config` takes `ap_enabled`, `ap_delay_s`, `ap_idle_s` (0 = never, else 300–86400; anything else, including `null`, a string, a fraction or a value past 32 bits, is `400` "ap_idle_s must be 0 (never) or 300-86400") and a write-only `ap_password` (absent = keep, `""` = open); `GET /config` reports `ap_password_set`, never the password, plus the read-only `ap_active` and `ap_clients`, so as before a `GET` result isn't sent back verbatim; AP changes apply 1.5 s after the reply, without a reboot.
 - `POST /system/reboot` is refused during a job unless `?force=1`.
 - `GET /` serves the web UI (§10.2), token or not.
-- `GET /status` is public, so it leaves out the WiFi SSID and the running OTA partition; `GET /config` (authenticated) reports them as `wifi_ssid` and `partition`. `device.ap.ssid` is DFU32's own broadcast name, which is public anyway; the home network's SSID stays out of `/status`.
+- `GET /status` is public, so it leaves out the WiFi SSID and the running OTA partition; `GET /config` (authenticated) reports them as `wifi_ssid` (sanitised for JSON like a scan's `ssid`) and `partition`. `device.ap.ssid` is DFU32's own broadcast name, which is public anyway; the home network's SSID stays out of `/status`.
 - `POST /system/ota` (M4b) takes `dfu32.bin` as the raw body with `Content-Length` (not the merged image). It runs on the slow-request task, holds the BLE lease (`409` during a job), and:
   - checks the first 328 bytes before writing anything (`dfu32_core/ota_image.hpp`, host-tested): the ESP image magic, the chip ID, the project name (`dfu32`), and DFU32's **board tag**, a 40-byte custom app descriptor (`.rodata_custom_desc`, right after `esp_app_desc_t`) naming the board profile. Another board's build (same chip, different flash layout or pins) or an untagged image is refused with `422 IMAGE_REJECTED` unless `?force=1`. An upload that isn't an app image at all is refused too, and if it is a merged flash image (a bootloader at `0x0`, `0x1000` or `0x2000` with only `0xFF` before it, and the partition table magic at `0x8000`; the handler reads on to `0x8002`, which it would drain anyway) the refusal says so; either way it names `dfu32-<board>.bin` for this device's board;
   - streams into the other OTA slot (`esp_ota_begin` with sequential writes), lets `esp_ota_end` verify the image, sets the boot partition, answers `200` with the new version, and reboots a second later;
   - it keeps the BLE lease until the reboot, so no job can start in that last second; on an early error it reads (and discards, up to 4 MB) the rest of the upload before answering, so the client gets the JSON error rather than a connection reset;
-  - rollback (§12.3): a failed boot self-check, or an HTTP API that doesn't start, rolls back at once. Then WiFi decides, but only for faults the new image could have caused: an address within 90 s confirms it; no stored network confirms it without a network test; a working radio that can't reach the network (the driver reported a disconnect: network not found, wrong passphrase) confirms it with a warning, so a router that is down during the update doesn't discard a good image; an access point that started since boot confirms it too (§9.5); no sign of WiFi activity at all rolls back.
+  - rollback (§12.3): a failed boot self-check, or an HTTP API that doesn't start, rolls back at once. Then WiFi decides, but only for faults the new image could have caused: an address within 90 s confirms it; no stored network confirms it without a network test; a working radio that can't reach the network (the driver reported a disconnect: network not found, wrong passphrase) confirms it with a warning, so a router that is down during the update doesn't discard a good image; otherwise it rolls back. DFU32's own access point never confirms a provisioned image, even with phones on it: a working SoftAP proves nothing about the station path (§9.5).
   - CI runs `tools/check_board_tag.py` on every built `dfu32.bin`, so a toolchain change that moved the tag fails the build instead of making every upload "untagged".
 
 | Method & path | Purpose |
@@ -722,8 +738,8 @@ Conventions (M3b):
 | **`GET /api/v1/ble/monitor`** | Live advertiser list with RSSI, one JSON line per second (NDJSON stream), or one snapshot with `?once=1`. Filters on by default; `all=1` shows everything. Not refused during a job (§10.4). |
 | `GET /api/v1/logs?since=<seq>` | Log ring entries, newest last |
 | `GET /api/v1/config` · `PUT /api/v1/config` | Device-level settings (§9.1), the access point's among them (§9.5) |
-| `POST /api/v1/wifi/scan` | WiFi networks seen by the station: `{"networks":[{"ssid","rssi","secured"}]}`, strongest first, at most 20. Slow-request task. `409` while joining or stopped, or while a flash, console operation or connection attempt holds the radio. |
-| `PUT /api/v1/wifi` | Body `{"ssid":"…","password":"…"}` (SSID 1–32 bytes; password empty, 8–63, or 64 hex) → `202 {"poll":"/api/v1/status"}`. Starts a station connection attempt 1.5 s later (lease `wifi-setup`, rollback on failure); the result is in `/status` `device.wifi.attempt`. |
+| `POST /api/v1/wifi/scan` | WiFi networks seen by the station: `{"networks":[{"ssid","rssi","secured"}]}`, strongest first, at most 20. `ssid` is sanitised for JSON; an entry whose name sanitising changed (invalid UTF-8, NUL) also has `ssid_hex`, the raw bytes as lowercase hex (§9.5). Slow-request task. `409` while joining or stopped, or while a flash, console operation or connection attempt holds the radio. |
+| `PUT /api/v1/wifi` | Body `{"ssid":"…","password":"…"}` (SSID 1–32 bytes; password empty, 8–63, or 64 hex), or `ssid_hex` (the SSID's 1–32 raw bytes as 2–64 hex digits, either case, as the scan gives it, no `00`) in place of `ssid`; both is `400` "give ssid or ssid_hex, not both" → `202 {"poll":"/api/v1/status"}`. Starts a station connection attempt 1.5 s later (lease `wifi-setup`, rollback on failure); the result is in `/status` `device.wifi.attempt`. |
 | `POST /api/v1/system/ota` | Upload DFU32 firmware (raw body, `esp_ota_*`). Rollback-protected. |
 | `POST /api/v1/system/reboot` · `POST /api/v1/system/token/rotate` | |
 | `POST /api/v1/system/token/clear` | Turn token auth off → `{"claimed":false}` |
@@ -750,7 +766,7 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 {
   "device": {"version":"0.3.0","uptime_s":8123,"claimed":true,
              "wifi":{"connected":true,"rssi":-58,"ip":"192.168.1.40","paused":false,"attempt":{"state":"none","detail":null}},
-             "ap":{"supported":true,"enabled":true,"active":false,"ssid":"dfu32-ab12","ip":"192.168.4.1","clients":0,"open":false,"standby_s":null,"via_ap":false,"warning":null}},
+             "ap":{"supported":true,"enabled":true,"active":false,"ssid":"dfu32-ab12","ip":"192.168.4.1","clients":0,"open":false,"idle_s":1800,"standby_s":null,"via_ap":false,"warning":null}},
   "job": {"state":"DFU_RUNNING","target":"attic-repeater","attempt":1,"max_attempts":3,
           "phase":"STREAM","bytes_acked":412672,"bytes_total":786432,"rate_bps":21400,
           "target_erased":true,"bootloader":"otafix 0.9.2-OTAFIX2.3 s140 6.1.1"},
@@ -764,12 +780,12 @@ On a phone joined to DFU32's access point while the station is down (§9.5), the
 
 ```json
 "wifi":{"connected":false,"rssi":0,"ip":"","paused":true,"attempt":{"state":"joining","detail":null}},
-"ap":{"supported":true,"enabled":true,"active":true,"ssid":"dfu32-ab12","ip":"192.168.4.1","clients":1,"open":true,"standby_s":null,"via_ap":true,"warning":"…"}
+"ap":{"supported":true,"enabled":true,"active":true,"ssid":"dfu32-ab12","ip":"192.168.4.1","clients":1,"open":true,"idle_s":1800,"standby_s":null,"via_ap":true,"warning":"…"}
 ```
 
 - `wifi.paused`: automatic station retries are paused while a phone is on the access point (§9.5).
 - `wifi.attempt.state` is `none|pending|joining|joined|failed`, for the last web UI connection attempt (`PUT /wifi`), kept until the next one. `detail` is the reason a failed one gave ("wrong password", "network not found", "could not connect", or "busy" when it was refused), else `null`.
-- `ap.standby_s`: seconds until the access point comes up if the station stays down, else `null`. `ap.via_ap`: this request arrived over the access point. `ap.warning`: the open-AP-without-token text, else `null`.
+- `ap.idle_s`: the idle limit in seconds, `0` = never (§9.5 rule 2a). `ap.standby_s`: seconds until the access point comes up if the station stays down (also after an idle take-down), else `null`. `ap.via_ap`: this request arrived over the access point. `ap.warning`: the open-AP-without-token text, else `null`.
 
 ### 10.2 Web UI (decided: full config UI)
 
@@ -780,7 +796,7 @@ A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget
 - **Target:** config form, MAC first (only the MAC is needed to flash). One optional **ID** stands in for the API's id, name and board: it is saved as `board`, the API id stays `target` (or whatever an existing target has), and `name` isn't shown. The manifest URL is only for fetching images from a server. Tuning holds the knobs of §9.1, the connection interval among them. Plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
 - **Runs:** history table, with run detail and log tail.
 - **Logs:** live tail by polling `/logs?since=`.
-- **WiFi:** the station (network, state, IP, signal; "paused while a phone is on the access point"), **Scan** → pick a network → password → **Connect**, with progress across the channel switch and the result, plus the access-point settings (on/off, start delay, password set or open, **Make it open**). It is the default view when the page was reached over the access point and the station has no IP (§9.5).
+- **WiFi:** the station (network, state, IP, signal; "paused while a phone is on the access point"), **Scan** → pick a network → password → **Connect**, with progress across the channel switch and the result, plus the access-point settings (on/off, start delay, idle limit in seconds with 0 = off, password set or open, **Make it open**). A scanned network whose name isn't valid UTF-8 shows "(non-UTF-8 name)" and is joined by its `ssid_hex`. A failed connection says whether the previous network was put back, no network is stored as before, or DFU32 was busy and nothing changed. It is the default view when the page was reached over the access point and the station has no IP (§9.5).
 - **System:** WiFi and access-point info, hostname, DFU32 firmware upload, reboot, tuning defaults, and Access: require a token, or rotate it and turn it off.
 
 Every option has a **?** beside its label that opens a short note: what the option is and where its value comes from.
@@ -789,7 +805,7 @@ A page-wide warning banner (outside the view) shows `/status` `device.ap.warning
 
 The UI polls `/status` every 1 s while a job is active and every 10 s otherwise.
 
-Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` inlines `web/staging.js` (a `/* @dfu32-include */` line, so the device's Image view and the installer page share one DFU package reader, tested against the Python tool) and gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first; about 24 KB (58%) with the WiFi view, §9.5). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a sign-in screen, used only while the device requires a token; a `401` returns to sign-in. A new token (from **Require a token** or **Rotate token**) is shown once under Access. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
+Implemented in M4b as one file, `components/api/ui/index.html` (vanilla JS and CSS, no framework, no external resources). `tools/dfu32_ui.py` inlines `web/staging.js` (a `/* @dfu32-include */` line, so the device's Image view and the installer page share one DFU package reader, tested against the Python tool) and gzips it deterministically at build time, and the API component embeds it; CI checks the gzipped size against the 40 KB budget (about 10 KB at first; about 24 KB (60%) with the WiFi view, §9.5). Everything the device or a BLE advertiser supplies is inserted as text, never as HTML. Besides the views above, it has a sign-in screen, used only while the device requires a token; a `401` returns to sign-in. A new token (from **Require a token** or **Rotate token**) is shown once under Access. Firmware upload shows upload progress, then waits for the device to come back and says whether it is on the new version or rolled back.
 
 ### 10.3 Home Assistant
 
@@ -954,7 +970,7 @@ There is one manifest per target URL. It describes exactly one image. Channels s
 - **App size budget:** CI fails a build above **1.30 MB**, which is 90% of a slot.
 - Estimated footprint: WiFi + NimBLE (central + peripheral) + httpd + http_client (no TLS) + cJSON + mDNS + UI comes to about 1.0–1.2 MB **[bench]**.
 - If the budget is blown, the levers are: trim NimBLE roles, drop mDNS, move the UI into its own partition.
-- **M4a:** Improv BLE (NimBLE GATT server and advertising), `led_indicator` + `led_strip` (RMT) and `button` added about 97 KB and took the Feather S3 to 92.4%. Pulled in first, because DFU32 used none of it then: Wi-Fi soft-AP (back since 2026-11, below), WPA2/3-Enterprise (and its GMAC suites), OWE, and lwIP IPv6 (`sdkconfig.defaults`). WPA3-Personal stays. That saved about 80 KB: the Feather S3 app went from 1,392,064 B to 1,312,144 B (87.1%, about 44 KB under budget). CI prints `idf.py size-components` before the budget check. Then **WPA3-Personal off** as well (decided 2026-11-08, to leave room for the M4b UI): with SAE and OWE gone nothing calls mbedTLS's elliptic-curve code (most of TF-PSA crypto's 107 KB), so the linker drops it. `ESP_WIFI_MBEDTLS_CRYPTO` stays on, because in IDF 6.1 the supplicant's built-in crypto doesn't link (undefined `sha1_vector`). Measured: Feather S3 1,312,144 → 1,282,992 B (85.1%, about 73 KB under budget). TF-PSA crypto is still about 112 KB, because PSA keeps every enabled algorithm reachable; trimming its algorithm set (`MBEDTLS_*` / `PSA_WANT_*`) is the next crypto lever. WPA2/WPA3 transition-mode networks still connect over WPA2; WPA3-only networks are not supported. Further levers: mDNS (33 KB), or fewer INFO log strings (the merged string pool, about 137 KB, which the size tool charges to `esp_stdio`). **Soft-AP back (§9.5, decided 2026-11):** `ESP_WIFI_SOFTAP_SUPPORT` adds 41,792 B on the Feather S3 (libnet80211 +29.4 KB, libwpa_supplicant's hostap authenticator +11.2 KB; no Kconfig trims them), which took the 1,334,288 B app 19,485 B over the 1,356,595 B budget. `ENABLE_WPA3_OWE_SOFTAP` stays off: it saves about 3 KB and keeps mbedTLS EC code out. Paid for with `COMPILER_OPTIMIZATION_ASSERTIONS_SILENT` (decided 2026-11; −56,048 B: an assert still aborts with a backtrace and core dump, only the `file:line: expr` text goes; `sdkconfig.debug` keeps full asserts): Feather S3 1,320,032 B, RAK11200 1,304,928 B before the AP code itself. The soft-AP is in every board profile. Measured with the feature (the AP, captive DNS and WiFi-view code add about 23 KB more): Feather S3 1,343,248 B (89.1% of the slot, 13,347 B under budget), RAK11200 1,328,624 B (88.1%, 27,971 B under). Reserve lever: `ESP_ERR_TO_NAME_LOOKUP=n` (−7.5 KB).
+- **M4a:** Improv BLE (NimBLE GATT server and advertising), `led_indicator` + `led_strip` (RMT) and `button` added about 97 KB and took the Feather S3 to 92.4%. Pulled in first, because DFU32 used none of it then: Wi-Fi soft-AP (back since 2026-11, below), WPA2/3-Enterprise (and its GMAC suites), OWE, and lwIP IPv6 (`sdkconfig.defaults`). WPA3-Personal stays. That saved about 80 KB: the Feather S3 app went from 1,392,064 B to 1,312,144 B (87.1%, about 44 KB under budget). CI prints `idf.py size-components` before the budget check. Then **WPA3-Personal off** as well (decided 2026-11-08, to leave room for the M4b UI): with SAE and OWE gone nothing calls mbedTLS's elliptic-curve code (most of TF-PSA crypto's 107 KB), so the linker drops it. `ESP_WIFI_MBEDTLS_CRYPTO` stays on, because in IDF 6.1 the supplicant's built-in crypto doesn't link (undefined `sha1_vector`). Measured: Feather S3 1,312,144 → 1,282,992 B (85.1%, about 73 KB under budget). TF-PSA crypto is still about 112 KB, because PSA keeps every enabled algorithm reachable; trimming its algorithm set (`MBEDTLS_*` / `PSA_WANT_*`) is the next crypto lever. WPA2/WPA3 transition-mode networks still connect over WPA2; WPA3-only networks are not supported. Further levers: mDNS (33 KB), or fewer INFO log strings (the merged string pool, about 137 KB, which the size tool charges to `esp_stdio`). **Soft-AP back (§9.5, decided 2026-11):** `ESP_WIFI_SOFTAP_SUPPORT` adds 41,792 B on the Feather S3 (libnet80211 +29.4 KB, libwpa_supplicant's hostap authenticator +11.2 KB; no Kconfig trims them), which took the 1,334,288 B app 19,485 B over the 1,356,595 B budget. `ENABLE_WPA3_OWE_SOFTAP` stays off: it saves about 3 KB and keeps mbedTLS EC code out. Paid for with `COMPILER_OPTIMIZATION_ASSERTIONS_SILENT` (decided 2026-11; −56,048 B: an assert still aborts with a backtrace and core dump, only the `file:line: expr` text goes; `sdkconfig.debug` keeps full asserts): Feather S3 1,320,032 B, RAK11200 1,304,928 B before the AP code itself. The soft-AP is in every board profile. Measured with the feature (the AP, captive DNS and WiFi-view code add about 26 KB more): Feather S3 1,345,776 B (89.3% of the slot, 10,819 B under budget), RAK11200 1,331,120 B (88.3%, 25,475 B under). Reserve lever: `ESP_ERR_TO_NAME_LOOKUP=n` (−7.5 KB).
 
 ### 12.2 `partitions/8mb.csv` (8 MB and 16 MB boards)
 
@@ -965,7 +981,7 @@ nvs 60 KB, otadata, phy, runlog 64 KB (16 slots), ota_0/ota_1 3 MB each, staging
 ```
 # Partitions / app
 CONFIG_PARTITION_TABLE_CUSTOM=y                 # CSV chosen by board profile
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y         # DFU32 self-OTA; a new image confirms itself once WiFi + HTTP are up (90 s; an access point that started since boot also confirms), else rolls back
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y         # DFU32 self-OTA; a new image confirms itself once WiFi + HTTP are up (90 s, §10.1; DFU32's own access point never confirms), else rolls back
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_COMPILER_CXX_EXCEPTIONS=n

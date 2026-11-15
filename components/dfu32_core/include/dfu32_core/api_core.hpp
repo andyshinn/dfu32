@@ -130,6 +130,7 @@ struct DeviceConfig {
     bool ap_enabled = false;      // access-point fallback (§9.5); off by default
     std::string ap_password;      // "" = open AP; write-only over the API
     uint32_t ap_delay_s = ap::kDefaultDelayS;  // station without an IP this long -> AP up
+    uint32_t ap_idle_s = ap::kDefaultIdleS;    // AP with no client this long -> down; 0 = never
 };
 
 inline constexpr uint32_t kMinDeadlineMaxS = 120;
@@ -167,6 +168,8 @@ std::string parse_fault_request(std::string_view body, FaultRequest& out);
 // ---- WiFi station setup (SPEC.md §9.5) ----------------------------------------------
 
 /// PUT /api/v1/wifi body {"ssid":"…","password":"…"} (password optional = open). Unknown fields refused.
+/// Instead of "ssid", "ssid_hex" carries the raw SSID bytes as 2-64 hex digits (either case), for a
+/// name that isn't valid UTF-8 (the scan's ssid_hex); giving both, or a NUL byte, is refused.
 /// "" on success (outputs set), else the reason (outputs untouched). Uses ap::validate_wifi_credentials.
 std::string parse_wifi_request(std::string_view body, std::string& ssid, std::string& password);
 
@@ -179,7 +182,9 @@ struct WifiNet {
 /// Replaces invalid UTF-8 (and NUL, which would cut the C string) with U+FFFD so the JSON is valid and
 /// whole; other control chars are escaped by the writer.
 std::string sanitize_ssid(std::string_view raw);
-/// {"networks":[{"ssid":s,"rssi":n,"secured":b},...]} in the given order, SSIDs sanitized.
+/// {"networks":[{"ssid":s,"rssi":n,"secured":b},...]} in the given order, SSIDs sanitized. An entry
+/// whose SSID sanitising changed also carries "ssid_hex" (lowercase hex of the raw bytes), so the
+/// UI can still join it (SPEC.md §9.5).
 void write_wifi_scan(json::ObjectWriter& w, std::span<const WifiNet> nets);
 
 /// What the advertiser probably is, from its name and services. Only a

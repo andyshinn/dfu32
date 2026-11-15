@@ -114,8 +114,10 @@ void Attempt::give_up() {
     ESP_LOGW(TAG, "could not join \"%s\"; %s", trying_ssid_.c_str(),
              had_previous_ ? "going back to the previous network" : "clearing it again");
     // The new network was saved by begin(), so this restore is all that keeps
-    // the previous one: say so if it fails.
-    const bool restored = had_previous_ ? net::set_credentials(previous_ssid_, previous_password_) : net::forget();
+    // the previous one: say so if it fails. Not a user's join (user_join =
+    // false): with a phone on the AP, the strict pause holds (SPEC.md §9.5).
+    const bool restored =
+        had_previous_ ? net::set_credentials(previous_ssid_, previous_password_, false) : net::forget();
     if (!restored) {
         ESP_LOGE(TAG, "%s failed: \"%s\" is still the saved network; set WiFi again (Improv or `wifi`)",
                  had_previous_ ? "restoring the previous network" : "clearing the network", trying_ssid_.c_str());

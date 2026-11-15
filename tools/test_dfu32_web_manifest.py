@@ -287,6 +287,15 @@ class ApPage(unittest.TestCase):
             self.assertEqual(int(re.search(rf"export const {js} = (\d+);", self.AP_JS).group(1)), want)
             self.assertIn(f'{"minlength" if js == "MIN_PW" else "maxlength"}="{want}"', Page.HTML)
 
+    def test_stated_defaults_match_firmware(self):
+        # The checkbox text names the default start delay and idle limit (SPEC §9.5).
+        hpp = (REPO / "components" / "dfu32_core" / "include" / "dfu32_core" / "ap.hpp").read_text()
+        text = re.search(r'<span class="muted">Off by default\. DFU32 then broadcasts(.*?)</span>', Page.HTML, re.S).group(1)
+        delay = int(re.search(r"kDefaultDelayS = (\d+);", hpp).group(1))
+        idle = int(re.search(r"kDefaultIdleS = (\d+);", hpp).group(1))
+        self.assertIn(f"loses it for {delay // 60} minutes", text)
+        self.assertIn(f"goes off after {idle // 60} minutes and comes back {delay // 60} minutes later", text)
+
     def test_console_replies_match(self):
         # The page matches these first lines and the plain prompt (SPEC §9.5).
         console = (REPO / "main" / "console.cpp").read_text()

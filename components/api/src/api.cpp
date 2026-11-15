@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -123,7 +124,18 @@ std::string header(httpd_req_t* req, const char* name) {
 captive::Action captive_action(httpd_req_t* req) {
     const char* method = http_method_str(static_cast<http_method>(req->method));
     if (!net::is_ap_socket(httpd_req_to_sockfd(req))) return captive::decide(false, method, {}, req->uri, {});
-    return captive::decide(true, method, header(req, "Host"), req->uri, net::status().hostname);
+    // Our longest name is a 31-character hostname + ".local.:80" (41), so nothing of ours
+    // is cut. No Host (HTTP/1.0) or an empty one (httpd reports both as length 0) is
+    // nullopt, which is ours. One too long for the buffer, or unreadable, fails closed
+    // as a foreign name (never ours: .invalid, RFC 2606), so the API answers 421 (§9.5).
+    char buf[64];
+    std::optional<std::string_view> host;
+    if (const size_t len = httpd_req_get_hdr_value_len(req, "Host"); len > 0) {
+        host = len < sizeof(buf) && httpd_req_get_hdr_value_str(req, "Host", buf, sizeof(buf)) == ESP_OK
+                   ? std::string_view(buf, len)
+                   : std::string_view("unreadable.invalid");
+    }
+    return captive::decide(true, method, host, req->uri, net::status().hostname);
 }
 
 /// 302 to the UI's one origin. The OS connectivity probes never get their "online"
@@ -374,7 +386,8 @@ esp_err_t h_status(httpd_req_t* req) {
         .add("ssid", ns.hostname)
         .add("ip", ap::kIpText)
         .add("clients", int64_t{ns.ap.clients})
-        .add_bool("open", ns.ap.open);
+        .add_bool("open", ns.ap.open)
+        .add("idle_s", int64_t{ns.ap.idle_s});  // the idle limit, 0 = never (§9.5)
     if (ns.ap.up_in_s >= 0) {
         apw.add("standby_s", ns.ap.up_in_s);
     } else {
@@ -768,8 +781,8 @@ esp_err_t h_config(httpd_req_t* req) {
         // on the AP being changed first. Only on an AP change (a new password re-applies the
         // AP config and deauthenticates its clients, §9.5).
         if (c.ap_enabled != before.ap_enabled || c.ap_password != before.ap_password ||
-            c.ap_delay_s != before.ap_delay_s) {
-            net::ApSettings s{c.ap_enabled, c.ap_password, c.ap_delay_s};
+            c.ap_delay_s != before.ap_delay_s || c.ap_idle_s != before.ap_idle_s) {
+            net::ApSettings s{c.ap_enabled, c.ap_password, c.ap_delay_s, c.ap_idle_s};
             net::set_ap(s);
             improv::wipe(s.password);
         }
@@ -782,7 +795,8 @@ esp_err_t h_config(httpd_req_t* req) {
     improv::wipe(c.ap_password);
     // Read-only details that /status (unauthenticated) leaves out.
     const net::Status ns = net::status();
-    w.add("hostname_active", ns.hostname).add_bool("reboot_required", reboot).add("wifi_ssid", ns.ssid);
+    // The stored SSID may be any bytes (PUT /wifi ssid_hex); sanitised like the scan so the JSON stays valid.
+    w.add("hostname_active", ns.hostname).add_bool("reboot_required", reboot).add("wifi_ssid", sanitize_ssid(ns.ssid));
     w.add_bool("ap_active", ns.ap.active).add("ap_clients", int64_t{ns.ap.clients});
     if (const esp_partition_t* running = esp_ota_get_running_partition()) w.add("partition", running->label);
     return send_obj(req, "200 OK", w);

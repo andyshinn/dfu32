@@ -116,12 +116,13 @@ RestoreStep restore_step(bool expect_connect, bool sta_ip, bool fault, bool radi
 
 /// The first-boot WiFi test of a pending OTA image (SPEC.md §10.1 rollback,
 /// §12.3), decided once the 90 s window ends: it rolls back only for faults
-/// the new image could have caused. In order: a station IP confirms; an
-/// access point started since boot confirms (§9.5: the radio works); no
-/// stored network confirms without a network test; a disconnect reason
+/// the new image could have caused. In order: a station IP confirms; no stored
+/// network confirms without a network test; a disconnect reason
 /// (`last_reason` != 0: network not found, wrong passphrase) confirms, since the
-/// radio works and the router is at fault; no WiFi activity at all rolls back.
-enum class OtaVerdict : uint8_t { Confirm, ConfirmAccessPoint, ConfirmNoNetwork, ConfirmRadioWorks, Rollback };
+/// radio works and the router is at fault; no station activity at all rolls
+/// back. `ap_started` never confirms (§9.5): a working SoftAP proves nothing
+/// about the station path, which is what a provisioned image must show.
+enum class OtaVerdict : uint8_t { Confirm, ConfirmNoNetwork, ConfirmRadioWorks, Rollback };
 OtaVerdict ota_verdict(bool sta_ip, bool ap_started, bool provisioned, uint8_t last_reason) noexcept;
 
 /// What GET /api/v1/status shows about the current (or last) job.

@@ -184,6 +184,7 @@ TEST_CASE("Job: restore step (SPEC §7.3 layer 4)", "[job]") {
 }
 
 TEST_CASE("Job: OTA verdict (SPEC §12.3)", "[job]") {
+    // Full truth table: ap_started never changes the verdict.
     for (const bool ip : {false, true}) {
         for (const bool ap : {false, true}) {
             for (const bool prov : {false, true}) {
@@ -192,28 +193,26 @@ TEST_CASE("Job: OTA verdict (SPEC §12.3)", "[job]") {
                     OtaVerdict want = OtaVerdict::Rollback;
                     if (ip) {
                         want = OtaVerdict::Confirm;
-                    } else if (ap) {
-                        want = OtaVerdict::ConfirmAccessPoint;
                     } else if (!prov) {
                         want = OtaVerdict::ConfirmNoNetwork;
                     } else if (reason != 0) {
                         want = OtaVerdict::ConfirmRadioWorks;
                     }
                     CHECK(ota_verdict(ip, ap, prov, reason) == want);
+                    CHECK(ota_verdict(ip, ap, prov, reason) == ota_verdict(ip, !ap, prov, reason));
                 }
             }
         }
     }
-    // An access point that started confirms without an IP, stored network or not.
-    for (const bool prov : {false, true}) {
-        for (const uint8_t reason : {uint8_t{0}, uint8_t{201}}) {
-            CHECK(ota_verdict(false, true, prov, reason) == OtaVerdict::ConfirmAccessPoint);
-        }
-    }
-    // A stored network, no IP, no AP and no disconnect reason: no WiFi activity at all.
+    // A working SoftAP proves nothing about the station path (§9.5): a
+    // provisioned image with no IP and no disconnect reason rolls back.
+    CHECK(ota_verdict(false, true, true, 0) == OtaVerdict::Rollback);
     CHECK(ota_verdict(false, false, true, 0) == OtaVerdict::Rollback);
+    CHECK(ota_verdict(false, true, true, 201) == OtaVerdict::ConfirmRadioWorks);
     CHECK(ota_verdict(false, false, true, 201) == OtaVerdict::ConfirmRadioWorks);
+    CHECK(ota_verdict(false, true, false, 0) == OtaVerdict::ConfirmNoNetwork);
     CHECK(ota_verdict(false, false, false, 0) == OtaVerdict::ConfirmNoNetwork);
+    CHECK(ota_verdict(true, true, true, 0) == OtaVerdict::Confirm);
     CHECK(ota_verdict(true, false, true, 0) == OtaVerdict::Confirm);
 }
 

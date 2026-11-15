@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -58,6 +59,27 @@ TEST_CASE("Captive: our host names", "[captive]") {
     }
     CHECK_FALSE(host_is_ours(".local", ""));
     CHECK(host_is_ours("192.168.4.1", ""));
+}
+
+TEST_CASE("Captive: absent, empty and unreadable Host", "[captive]") {
+    // No Host header (HTTP/1.0) and an empty value are both ours.
+    CHECK(host_is_ours(std::nullopt, kHostname));
+    CHECK(host_is_ours(std::string_view{}, kHostname));
+    CHECK(host_is_ours(std::nullopt, ""));
+    CHECK(decide(true, "GET", std::nullopt, "/api/v1/status", kHostname) == Action::Serve);
+    CHECK(decide(true, "POST", std::nullopt, "/api/v1/claim", kHostname) == Action::Serve);
+    CHECK(decide(true, "GET", std::nullopt, "/", kHostname) == Action::Serve);
+    CHECK(decide(true, "GET", std::string_view{}, "/api/v1/status", kHostname) == Action::Serve);
+    CHECK(decide(true, "GET", std::nullopt, "/generate_204", kHostname) == Action::Redirect);
+    CHECK(decide(false, "GET", std::nullopt, "/", kHostname) == Action::Serve);
+    // A foreign Host is still foreign; an oversize one (which the glue can't read
+    // whole and passes on as a foreign value) is refused on the API, never served.
+    CHECK_FALSE(host_is_ours(std::string_view{"evil.example"}, kHostname));
+    CHECK(decide(true, "GET", std::string_view{"evil.example"}, "/api/v1/status", kHostname) == Action::Misdirected);
+    const std::string oversize = std::string(kHostname) + ".local" + std::string(300, 'a');
+    CHECK_FALSE(host_is_ours(oversize, kHostname));
+    CHECK(decide(true, "POST", oversize, "/api/v1/claim", kHostname) == Action::Misdirected);
+    CHECK(decide(true, "GET", oversize, "/", kHostname) == Action::Redirect);
 }
 
 TEST_CASE("Captive: HTTP decision", "[captive]") {
