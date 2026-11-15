@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "config/config.hpp"
+#include "dfu32_core/ap.hpp"
 #include "dfu32_core/api_core.hpp"
+#include "dfu32_core/captive.hpp"
 #include "dfu32_core/job.hpp"
 #include "dfu32_core/json.hpp"
 #include "dfu32_core/manifest.hpp"
@@ -30,6 +32,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "improv/improv.hpp"
 #include "job/job.hpp"
 #include "net/net.hpp"
 #include "psa/crypto.h"
@@ -113,6 +116,38 @@ std::string header(httpd_req_t* req, const char* name) {
     return v;
 }
 
+// ---- captive portal (SPEC.md §9.5) ----------------------------------------------------
+
+/// What the captive portal does with this request (captive::decide). "On the AP" is the
+/// socket's local address; off the AP only the path matters, so the Host header and the
+/// hostname aren't read there.
+captive::Action captive_action(httpd_req_t* req) {
+    const char* method = http_method_str(static_cast<http_method>(req->method));
+    if (!net::is_ap_socket(httpd_req_to_sockfd(req))) return captive::decide(false, method, {}, req->uri, {});
+    return captive::decide(true, method, header(req, "Host"), req->uri, net::status().hostname);
+}
+
+/// 302 to the UI's one origin. The OS connectivity probes never get their "online"
+/// answer, so the phone opens its sign-in sheet; iOS wants a body.
+esp_err_t send_captive_redirect(httpd_req_t* req) {
+    static constexpr char kBody[] = "<a href=\"http://192.168.4.1/\">DFU32</a>";
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Location", ap::kUrl);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, kBody, sizeof(kBody) - 1);
+    return ESP_OK;
+}
+
+/// httpd's 404 handler, so the captive portal takes no URI handler slot. On the LAN
+/// (and for non-GET/HEAD requests on the AP) it is the plain 404 it always was.
+esp_err_t h_not_found(httpd_req_t* req, httpd_err_code_t) {
+    if (captive_action(req) == captive::Action::Redirect) return send_captive_redirect(req);
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, nullptr);
+    return ESP_FAIL;  // httpd's default: close the socket
+}
+
 /// Reads the request body (bodies are optional: none means "defaults").
 /// Sends the error response itself and returns false when it can't.
 bool read_body(httpd_req_t* req, std::string& out, esp_err_t& sent) {
@@ -156,11 +191,6 @@ bool sha256(std::string_view text, std::array<uint8_t, 32>& out) {
 void load_token() {
     std::lock_guard<std::mutex> lk(g_auth_mu);
     g_claimed = config::load_token_hash(g_token_hash);
-}
-
-bool claimed() {
-    std::lock_guard<std::mutex> lk(g_auth_mu);
-    return g_claimed;
 }
 
 enum class Issued { Ok, AlreadySet, Failed };
@@ -234,6 +264,46 @@ std::string busy_detail() {
     return std::string("busy: ") + (h != nullptr ? h : "another operation") + " is using BLE/staging";
 }
 
+/// /status device.wifi.attempt (SPEC.md §10.1): the last PUT /wifi attempt, kept in RAM
+/// until the next one, so a phone that rejoined the AP after the channel switch can read it.
+void write_web_attempt(json::ObjectWriter& wifi) {
+    static constexpr const char* kStates[] = {"none", "pending", "joining", "joined", "failed"};
+    const improv::WebAttempt a = improv::web_attempt();
+    const auto i = static_cast<size_t>(a.state);
+    const char* detail = nullptr;
+    if (a.refused) {
+        detail = "busy";
+    } else if (a.state == improv::WebAttemptState::Failed) {
+        // No reason recorded (e.g. the driver refused the credentials): still say it failed.
+        detail = ap::describe_sta_reason(a.reason);
+        if (detail == nullptr) detail = "could not connect";
+    }
+    json::ObjectWriter o;
+    o.add("state", i < std::size(kStates) ? kStates[i] : "none");
+    if (detail != nullptr) {
+        o.add("detail", detail);
+    } else {
+        o.add_null("detail");
+    }
+    wifi.add("attempt", std::move(o));
+}
+
+/// PUT /wifi and POST /wifi/scan (SPEC.md §9.5): refused while a job, a console
+/// operation or a scan holds the radio, or while a connection attempt runs. An open
+/// Improv BLE window holds the lease too but doesn't stop either.
+bool wifi_busy(std::string& why) {
+    const char* h = job::holder();
+    if (job::busy() || (h != nullptr && std::strcmp(h, "improv") != 0)) {
+        why = busy_detail();
+        return true;
+    }
+    if (improv::attempt_running()) {
+        why = "a WiFi connection attempt is running";
+        return true;
+    }
+    return false;
+}
+
 esp_err_t send_no_target(httpd_req_t* req, const std::string& id) {
     return send_error(req, "404 Not Found", "NOT_FOUND", "no target '" + id + "'");
 }
@@ -294,17 +364,44 @@ bool run_matches(const std::string& json, const TargetConfig& t) {
 esp_err_t h_status(httpd_req_t* req) {
     const esp_app_desc_t* app = esp_app_get_description();
     const net::Status ns = net::status();
+    const bool is_claimed = claimed();
     json::ObjectWriter dev;
     dev.add("name", "DFU32")
         .add("version", app->version)
         .add("board", CONFIG_DFU32_BOARD_NAME)
         .add("uptime_s", int64_t{uptime_s()})
-        .add_bool("claimed", claimed())
+        .add_bool("claimed", is_claimed)
         .add("hostname", ns.hostname)
         .add("unix_time", static_cast<int64_t>(net::unix_time()));
+    // The home network's SSID stays out of this public view (§10.1); the AP's own SSID is
+    // broadcast anyway. The AP password is never reported, only whether the AP is open.
     json::ObjectWriter wifi;
-    wifi.add_bool("connected", ns.connected).add("rssi", int64_t{ns.rssi}).add("ip", ns.ip);
+    wifi.add_bool("connected", ns.connected)
+        .add("rssi", int64_t{ns.rssi})
+        .add("ip", ns.ip)
+        .add_bool("paused", ns.ap.sta_paused);
+    write_web_attempt(wifi);
     dev.add("wifi", std::move(wifi));
+    json::ObjectWriter apw;
+    apw.add_bool("supported", ns.ap.supported)
+        .add_bool("enabled", ns.ap.enabled)
+        .add_bool("active", ns.ap.active)
+        .add("ssid", ns.hostname)
+        .add("ip", ap::kIpText)
+        .add("clients", int64_t{ns.ap.clients})
+        .add_bool("open", ns.ap.open);
+    if (ns.ap.up_in_s >= 0) {
+        apw.add("standby_s", ns.ap.up_in_s);
+    } else {
+        apw.add_null("standby_s");
+    }
+    apw.add_bool("via_ap", net::is_ap_socket(httpd_req_to_sockfd(req)));
+    if (const char* warn = ap::ap_warning(ns.ap.enabled, ns.ap.open, is_claimed, ns.ap.active)) {
+        apw.add("warning", warn);
+    } else {
+        apw.add_null("warning");
+    }
+    dev.add("ap", std::move(apw));
     if (const char* h = job::holder()) {
         dev.add("busy", h);
     } else {
@@ -655,6 +752,25 @@ esp_err_t h_scan(httpd_req_t* req, const ScanRequest& sr) {
     return send_obj(req, "200 OK", w);
 }
 
+/// POST /api/v1/wifi/scan (SPEC.md §9.5), on the slow-request task: net::scan blocks
+/// for about 2 s. It says why it refused rather than answering an empty list.
+esp_err_t h_wifi_scan(httpd_req_t* req) {
+    std::vector<net::ScanResult> found;
+    net::ScanRefused why = net::ScanRefused::None;
+    if (!net::scan(found, 20, &why)) {
+        const char* detail = why == net::ScanRefused::Stopped   ? "WiFi is stopped for a transfer"
+                             : why == net::ScanRefused::Joining ? "DFU32 is joining a network; try again in a few seconds"
+                                                                : "the WiFi scan failed";
+        return send_error(req, "409 Conflict", "BUSY", detail);
+    }
+    std::vector<WifiNet> nets;
+    nets.reserve(found.size());
+    for (net::ScanResult& f : found) nets.push_back({std::move(f.ssid), f.rssi, f.secured});
+    json::ObjectWriter w;
+    write_wifi_scan(w, nets);
+    return send_obj(req, "200 OK", w);
+}
+
 esp_err_t h_logs(httpd_req_t* req) {
     uint64_t end = 0;
     std::string text;
@@ -678,24 +794,80 @@ esp_err_t h_logs(httpd_req_t* req) {
 
 esp_err_t h_config(httpd_req_t* req) {
     DeviceConfig c;
-    if (!config::load_device(c)) return send_error(req, "500 Internal Server Error", "INTERNAL");
     bool reboot = false;
     if (req->method == HTTP_PUT) {
         std::string body;
         esp_err_t body_err = ESP_OK;
         if (!read_body(req, body, body_err)) return body_err;
-        const DeviceConfig before = c;
-        if (auto e = apply_json(body, c); !e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
-        if (!config::save_device(c)) return send_error(req, "500 Internal Server Error", "INTERNAL");
+        // One read-modify-write under config's lock, so a console `ap` change made
+        // meanwhile isn't lost (SPEC.md §9.5).
+        DeviceConfig before;
+        std::string bad;
+        const std::string e = config::update_device(
+            [&](DeviceConfig& d) {
+                before = d;
+                bad = apply_json(body, d);
+                return bad;
+            },
+            &c);
+        improv::wipe(body);  // may carry ap_password
+        if (!e.empty()) {
+            improv::wipe(before.ap_password);
+            // Only an NVS failure is ours. A refused edit (apply_json, or turning AP mode on
+            // while the stored AP password is invalid, §9.5) is the request's: 400.
+            const bool nvs = e == "NVS write failed" || e == "cannot read settings";
+            return nvs ? send_error(req, "500 Internal Server Error", "INTERNAL", e)
+                       : send_error(req, "400 Bad Request", "BAD_REQUEST", e);
+        }
         reboot = c.hostname != before.hostname || c.ntp_server != before.ntp_server;
+        // net applies AP settings kApplyGraceMs (1.5 s) later, so this 200 reaches a phone
+        // on the AP being changed first. Only on an AP change (a new password re-applies the
+        // AP config and deauthenticates its clients, §9.5).
+        if (c.ap_enabled != before.ap_enabled || c.ap_password != before.ap_password ||
+            c.ap_delay_s != before.ap_delay_s) {
+            net::ApSettings s{c.ap_enabled, c.ap_password, c.ap_delay_s};
+            net::set_ap(s);
+            improv::wipe(s.password);
+        }
+        improv::wipe(before.ap_password);
+    } else if (!config::load_device(c)) {
+        return send_error(req, "500 Internal Server Error", "INTERNAL");
     }
     json::ObjectWriter w;
-    write_json(w, c);
+    write_json(w, c);  // ap_password_set only, never the password (§9.5)
+    improv::wipe(c.ap_password);
     // Read-only details that /status (unauthenticated) leaves out.
     const net::Status ns = net::status();
     w.add("hostname_active", ns.hostname).add_bool("reboot_required", reboot).add("wifi_ssid", ns.ssid);
+    w.add_bool("ap_active", ns.ap.active).add("ap_clients", int64_t{ns.ap.clients});
     if (const esp_partition_t* running = esp_ota_get_running_partition()) w.add("partition", running->label);
     return send_obj(req, "200 OK", w);
+}
+
+/// PUT /api/v1/wifi (SPEC.md §9.5): station setup from a phone on the AP. Answers 202
+/// first; the attempt (an Improv-style one: lease "wifi-setup", 30 s, the previous
+/// network put back on failure) starts kApplyGraceMs later on the Improv Serial task,
+/// so the reply leaves before the AP follows the station to the router's channel.
+esp_err_t h_wifi(httpd_req_t* req) {
+    std::string body;
+    esp_err_t body_err = ESP_OK;
+    if (!read_body(req, body, body_err)) return body_err;
+    std::string ssid, pw;
+    const std::string e = parse_wifi_request(body, ssid, pw);
+    improv::wipe(body);
+    if (!e.empty()) return send_error(req, "400 Bad Request", "BAD_REQUEST", e);
+    std::string why;
+    bool ok = !wifi_busy(why);
+    if (ok && !improv::web_connect(ssid, pw, ap::kApplyGraceMs)) {
+        ok = false;
+        why = "a WiFi connection attempt is running";
+    }
+    improv::wipe(pw);
+    if (!ok) return send_error(req, "409 Conflict", "BUSY", why);
+    ESP_LOGI(TAG, "WiFi setup over HTTP: joining a network in %u ms", static_cast<unsigned>(ap::kApplyGraceMs));
+    json::ObjectWriter w;
+    w.add("poll", "/api/v1/status");
+    return send_obj(req, "202 Accepted", w);
 }
 
 void reboot_cb(void*) { esp_restart(); }
@@ -1050,7 +1222,7 @@ esp_err_t h_stage_upload(httpd_req_t* req) {
     return send_obj(req, "200 OK", o);
 }
 
-// ---- slow requests (check, scan, firmware upload) on their own task ---------------
+// ---- slow requests (check, BLE and WiFi scans, uploads) on their own task ----------
 // esp_http_server has one worker thread. A manifest fetch or a BLE scan can
 // take many seconds, so those requests are handed to this task through
 // httpd's async-request API and the server keeps answering /status and
@@ -1078,8 +1250,13 @@ void slow_task(void*) {
             h_ota(r->req, r->force);
         } else if (r->route == Route::Staging) {
             h_stage_upload(r->req);
-        } else {
+        } else if (r->route == Route::BleScan) {
             h_scan(r->req, r->scan);
+        } else if (r->route == Route::WifiScan) {
+            h_wifi_scan(r->req);
+        } else {
+            // Never a BLE scan by default: a new slow route must be routed explicitly.
+            send_error(r->req, "500 Internal Server Error", "INTERNAL", "unhandled slow request");
         }
         httpd_req_async_handler_complete(r->req);
         g_slow_busy = false;
@@ -1089,7 +1266,7 @@ void slow_task(void*) {
 esp_err_t start_slow(httpd_req_t* req, std::unique_ptr<SlowRequest> r) {
     if (g_slow_q == nullptr) return send_error(req, "500 Internal Server Error", "INTERNAL", "worker not running");
     if (g_slow_busy.exchange(true)) {
-        return send_error(req, "409 Conflict", "BUSY", "another check, scan or upload is still running");
+        return send_error(req, "409 Conflict", "BUSY", "another check, BLE or WiFi scan, or upload is still running");
     }
     if (httpd_req_async_handler_begin(req, &r->req) != ESP_OK) {
         g_slow_busy = false;
@@ -1144,6 +1321,14 @@ esp_err_t queue_scan(httpd_req_t* req) {
     return start_slow(req, std::move(r));
 }
 
+esp_err_t queue_wifi_scan(httpd_req_t* req) {
+    std::string why;
+    if (wifi_busy(why)) return send_error(req, "409 Conflict", "BUSY", why);
+    auto r = std::make_unique<SlowRequest>();
+    r->route = Route::WifiScan;
+    return start_slow(req, std::move(r));
+}
+
 Method method_of(httpd_req_t* req) {
     switch (req->method) {
         case HTTP_GET: return Method::Get;
@@ -1155,6 +1340,12 @@ Method method_of(httpd_req_t* req) {
 }
 
 esp_err_t dispatch(httpd_req_t* req) {
+    // DNS-rebinding guard (SPEC.md §9.5): the captive DNS resolves every name to us, so on
+    // the AP the API answers only to our own Host names. Before auth: no token is checked
+    // for a request that isn't meant for us.
+    if (captive_action(req) == captive::Action::Misdirected) {
+        return send_error(req, "421 Misdirected Request", "MISDIRECTED", "use http://192.168.4.1/");
+    }
     const RouteMatch m = match_route(req->uri);
     if (m.route == Route::NotFound) return send_error(req, "404 Not Found", "NOT_FOUND", "no such endpoint");
     if (!method_allowed(m.route, method_of(req))) {
@@ -1184,6 +1375,8 @@ esp_err_t dispatch(httpd_req_t* req) {
         case Route::Reboot: return h_reboot(req);
         case Route::TokenRotate: return h_rotate(req);
         case Route::TokenClear: return h_token_clear(req);
+        case Route::Wifi: return h_wifi(req);
+        case Route::WifiScan: return queue_wifi_scan(req);
         case Route::DebugFault: return h_fault(req);
         case Route::NotFound: break;
     }
@@ -1197,6 +1390,8 @@ extern "C" const uint8_t ui_gz_start[] asm("_binary_index_html_gz_start");
 extern "C" const uint8_t ui_gz_end[] asm("_binary_index_html_gz_end");
 
 esp_err_t h_root(httpd_req_t* req) {
+    // A foreign Host on the AP gets the captive 302, so the UI loads from one origin (§9.5).
+    if (captive_action(req) == captive::Action::Redirect) return send_captive_redirect(req);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
@@ -1205,6 +1400,11 @@ esp_err_t h_root(httpd_req_t* req) {
 }
 
 }  // namespace
+
+bool claimed() {
+    std::lock_guard<std::mutex> lk(g_auth_mu);
+    return g_claimed;
+}
 
 std::string rotate_token() {
     std::string token;
@@ -1245,6 +1445,9 @@ bool start() {
     root.method = HTTP_GET;
     root.handler = &h_root;
     httpd_register_uri_handler(g_server, &root);
+    // Captive portal (SPEC.md §9.5): unknown paths on the AP redirect to the UI. An error
+    // handler rather than a "/*" URI, so it takes no handler slot.
+    httpd_register_err_handler(g_server, HTTPD_404_NOT_FOUND, &h_not_found);
     net::advertise_http(static_cast<uint16_t>(cfg.server_port));
     ESP_LOGI(TAG, "HTTP API on port %u (%s)", cfg.server_port, claimed() ? "token required" : "open: no token set");
     return true;

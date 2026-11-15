@@ -132,39 +132,71 @@ void stop_deadline() { esp_timer_stop(g_deadline_timer); }
 // ---- WiFi restore with verification (SPEC.md §7.3 layer 4) ---------------------------
 
 /// net::restore() and wait for an IP in 1 s slices, beating for the stall
-/// watchdog (which stays armed until the job ends).
-bool restart_and_wait(bool fault) {
+/// watchdog (which stays armed until the job ends). `radio_alive` reports
+/// whether the driver showed a sign of life since this restore: a disconnect
+/// or failed connect (the counters moved), or DFU32's access point is up
+/// (§7.3 layer 4, §9.5). net::restore() opens the join window, so a phone
+/// that rejoined the access point doesn't pause the station meanwhile.
+bool restart_and_wait(bool& radio_alive) {
     job_beat();
+    // Captured right before the restore: a stale reason from before the
+    // handover must not count as activity.
+    const net::Status before = net::status();
     bool ok = net::restore(0);
     for (uint32_t waited = 0; !ok && waited < kRestoreWaitMs; waited += 1000) {
         job_beat();
         ok = net::wait_connected(1000);
     }
     job_beat();
-    return ok && !fault;
+    const net::Status after = net::status();
+    radio_alive = after.reconnects != before.reconnects ||
+                  after.last_disconnect_reason != before.last_disconnect_reason || after.ap.active;
+    return ok;
 }
 
 void restore_wifi(bool expect_connect, bool fault) {
-    if (fault) ESP_LOGW(TAG, "fault injection: treating WiFi restore as failed");
-    bool ok = restart_and_wait(fault);
-    if (ok) {
-        ESP_LOGI(TAG, "WiFi restored");
-        return;
-    }
     if (!expect_connect) {
-        ESP_LOGW(TAG, "WiFi restarted; it was not connected before the transfer either, so not insisting");
+        // The station had no IP at the handover (offline re-flash, or a device
+        // running only its access point): restart the driver and return. No
+        // wait, and never a reboot, since restore_step() would say Done
+        // whatever happens and the missing network isn't the restore's fault.
+        net::restore(0);
+        if (fault) {
+            ESP_LOGW(TAG, "fault injection: treating WiFi restore as failed (station was down before the transfer, "
+                          "so not insisting)");
+        }
+        ESP_LOGI(TAG, "WiFi restarted; the station was not connected before the transfer (the access point, if on, "
+                      "is back)");
         return;
     }
-    ESP_LOGW(TAG, "WiFi not connected %" PRIu32 " s after restore; retrying once", kRestoreWaitMs / 1000);
-    net::stop();
-    ok = restart_and_wait(fault);
-    if (ok) {
-        ESP_LOGI(TAG, "WiFi restored on the second try");
-        return;
+    // restore_fail stands for a dead radio, so the bench reaches the reboot.
+    if (fault) ESP_LOGW(TAG, "fault injection: treating WiFi restore as failed");
+    for (uint8_t attempt = 1;; ++attempt) {
+        bool alive = false;
+        const bool ip = restart_and_wait(alive);
+        switch (restore_step(true, ip, fault, alive, attempt)) {
+            case RestoreStep::Done:
+                if (ip) {
+                    ESP_LOGI(TAG, "WiFi restored%s", attempt > 1 ? " on the second try" : "");
+                } else {
+                    // The driver works and only the home network is gone: a
+                    // reboot wouldn't fix that and would drop the phones on the
+                    // access point. The station keeps retrying (§9.5 rules).
+                    ESP_LOGW(TAG, "WiFi still not connected after a retry, but the radio works: not rebooting "
+                                  "(the network may be down; the station keeps retrying)");
+                }
+                return;
+            case RestoreStep::Retry:
+                ESP_LOGW(TAG, "WiFi not connected %" PRIu32 " s after restore; retrying once", kRestoreWaitMs / 1000);
+                net::stop();
+                break;
+            case RestoreStep::Reboot:
+                ESP_LOGE(TAG, "WiFi still down after a retry and the radio shows no sign of life: rebooting so the "
+                              "network comes back (SPEC.md §7.3)");
+                vTaskDelay(pdMS_TO_TICKS(300));
+                esp_restart();
+        }
     }
-    ESP_LOGE(TAG, "WiFi still down after a retry: rebooting so the network comes back (SPEC.md §7.3)");
-    vTaskDelay(pdMS_TO_TICKS(300));
-    esp_restart();
 }
 
 // ---- the flash part of a job -----------------------------------------------------------
@@ -242,8 +274,14 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
             if (since_submit_ms < kReplyGraceMs) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(kReplyGraceMs - since_submit_ms)));
             }
+            // §7.3 layer 4 insists on an IP after the transfer only if the
+            // station had one now; an IP on the access point doesn't count.
             wifi_was_connected = ns.connected;
             wifi_stopped = net::stop();
+            if (wifi_stopped && ns.ap.active) {
+                ESP_LOGI(TAG, "WiFi and the access point stop for the transfer; phones on the access point rejoin "
+                              "afterwards");
+            }
         }
         update([&](Snapshot& s) { s.wifi_off = wifi_stopped; });
         ESP_LOGI(TAG, "target seen; WiFi %s, run deadline %" PRIu32 " s", wifi_stopped ? "stopped" : "kept up",
@@ -349,8 +387,10 @@ void run(const Request& q) {
 
     if (st == State::Fetching) {
         set_phase("FETCH");
-        if (!net::status().connected) {
-            fail("HTTP_ERROR: WiFi is not connected");
+        if (const net::Status ns = net::status(); !ns.connected) {
+            // A phone on the access point may think DFU32 is online (§9.5).
+            fail(ns.ap.active ? "HTTP_ERROR: WiFi is not connected (DFU32's access point has no internet)"
+                              : "HTTP_ERROR: WiFi is not connected");
             return;
         }
         fetch::StageOptions o;
