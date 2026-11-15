@@ -1,3 +1,6 @@
 # Bench-only additions, applied with -DDFU32_DEBUG_ENDPOINTS=ON on top of --preset <profile>
 # (see CMakeLists.txt). Never ship a build made with this file.
 CONFIG_DFU32_DEBUG_ENDPOINTS=y
+# Full asserts (file:line: expr) on the bench; release builds keep them silent
+# (sdkconfig.defaults, SPEC.md §12.1).
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y

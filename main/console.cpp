@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Bench console (USB serial): target, wifi, check, stage, scan, staged, probe,
-// flash, runs, run, logs, blreset, job, token, improv. The HTTP API and the web UI (M4)
+// flash, runs, run, logs, blreset, job, token, improv, ap. The HTTP API and the web UI (M4)
 // cover the same ground; the console stays as a debug tool. Commands that use
 // BLE or the staging partition take the job lease, so they can't run while an
 // API job does (and vice versa). Ctrl+C or Ctrl+D aborts the BLE commands
@@ -28,6 +28,7 @@
 #include "net/net.hpp"
 #include "dfu_proto/protocol.hpp"
 #include "dfu_proto/retry.hpp"
+#include "dfu32_core/ap.hpp"
 #include "esp_console.h"
 #include "linenoise/linenoise.h"
 #include "esp_log.h"
@@ -175,6 +176,8 @@ bool acquire(job::Lease& lease) {
     const char* h = job::holder();
     if (h != nullptr && std::strcmp(h, "improv") == 0) {
         std::printf("Busy: Improv BLE provisioning is open. Set WiFi first, or `improv stop`.\n");
+    } else if (h != nullptr && std::strcmp(h, "wifi-setup") == 0) {
+        std::printf("Busy: WiFi setup from the web page is running; try again in half a minute.\n");
     } else {
         std::printf("Busy: %s is using BLE/staging. Wait for it (see `job`), or `job abort`.\n", h ? h : "something");
     }
@@ -262,18 +265,27 @@ int cmd_target(int argc, char** argv) {
 
 // ---- networking (M3) -------------------------------------------------------------
 
+/// The open-AP-without-token warning (SPEC.md §9.5) and its fix, when it applies.
+void print_ap_warning(const char* label, bool enabled, bool open, bool claimed, bool active) {
+    const char* w = ap::ap_warning(enabled, open, claimed, active);
+    if (w != nullptr) std::printf("%s%s Set `ap password <pw>` or `token rotate`.\n", label, w);
+}
+
 int cmd_wifi(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "forget") == 0) {
         const bool ok = net::forget();
         std::printf("%s\n", ok ? "WiFi credentials cleared. `improv start` opens Improv BLE to set new ones."
                                 : "Failed to clear WiFi credentials.");
+        // No network stored: an enabled AP comes up at once (§9.5 rule 3).
+        if (ok && net::status().ap.enabled) std::printf("AP mode is on, so the access point comes up now.\n");
         return ok ? 0 : 1;
     }
     if (argc >= 2) {
         const std::string ssid = argv[1];
         const std::string pass = argc >= 3 ? argv[2] : "";
-        if (ssid.size() > 32 || pass.size() > 64 || (!pass.empty() && pass.size() < 8)) {
-            std::printf("SSID must be 1-32 characters and the password 8-64 (or none for an open network).\n");
+        // The same rules as PUT /api/v1/wifi (dfu32_core, host-tested).
+        if (const std::string e = ap::validate_wifi_credentials(ssid, pass); !e.empty()) {
+            std::printf("Not saved: %s\n", e.c_str());
             return 1;
         }
         if (!net::set_credentials(ssid, pass)) {
@@ -296,12 +308,20 @@ int cmd_wifi(int argc, char** argv) {
     }
     std::printf("  reconnects %" PRIu32 "\n", st.reconnects);
     std::printf("  clock      %s\n", st.time_synced ? "synced (SNTP)" : "not synced");
+    if (st.ap.active) {
+        std::printf("  access pt  up, \"%s\", %u client(s) (see `ap`)\n", st.hostname.c_str(), st.ap.clients);
+    } else if (st.ap.supported) {
+        std::printf("  access pt  %s (see `ap`)\n", st.ap.enabled ? "standby" : "off");
+    }
     return 0;
 }
 
 bool require_network() {
-    if (net::status().connected) return true;
-    std::printf("WiFi is not connected (see `wifi`).\n");
+    const net::Status st = net::status();
+    if (st.connected) return true;
+    // A phone on DFU32's access point may well be online itself; DFU32 isn't (no uplink, §9.5).
+    std::printf(st.ap.active ? "WiFi is not connected (the access point has no internet; see `wifi`).\n"
+                             : "WiFi is not connected (see `wifi`).\n");
     return false;
 }
 
@@ -513,7 +533,10 @@ int cmd_flash(int argc, char** argv) {
     // 47 s vs 39 s for the T096 image, no failures either way); `--wifi off`
     // stops it. The console is attended, so it skips the M3b run deadline and
     // simply restores WiFi afterwards.
+    // A station that had no IP before (offline, or AP only) has nothing to wait
+    // for: restore() then just restarts the driver, with the AP (§7.3, §9.5).
     bool wifi_off = false;
+    bool was_connected = false;
     const char* wifi_opt = nullptr;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--wifi") == 0) wifi_opt = argv[i + 1];
@@ -521,6 +544,7 @@ int cmd_flash(int argc, char** argv) {
     if (wifi_opt != nullptr && std::strcmp(wifi_opt, "off") == 0 && net::status().initialised) {
         std::printf("WiFi is off until the flash finishes.\n");
         std::fflush(stdout);
+        was_connected = net::status().connected;
         wifi_off = net::stop();
     }
 
@@ -531,8 +555,10 @@ int cmd_flash(int argc, char** argv) {
     }
 
     if (wifi_off) {
-        const bool back = net::restore(30000);
-        std::printf("WiFi %s.\n", back ? "restored" : "restarted; still reconnecting in the background");
+        const bool back = net::restore(was_connected ? 30000 : 0);
+        std::printf("WiFi %s%s.\n",
+                    back ? "restored" : was_connected ? "restarted; still reconnecting in the background" : "restarted",
+                    net::status().ap.active ? " (access point up; phones on it rejoin)" : "");
     }
 
     uint32_t recorded = 0;
@@ -718,6 +744,10 @@ int cmd_token(int argc, char** argv) {
         const bool ok = api::clear_token();
         std::printf("%s\n", ok ? "Token cleared: the API is open (no token needed). `token rotate` sets one again."
                               : "Failed to clear the token.");
+        if (ok) {
+            const net::Status st = net::status();
+            print_ap_warning("Warning: ", st.ap.enabled, st.ap.open, false, st.ap.active);
+        }
         return ok ? 0 : 1;
     }
     std::array<uint8_t, 32> h{};
@@ -726,12 +756,15 @@ int cmd_token(int argc, char** argv) {
     return 0;
 }
 
+void (*g_on_improv_start)() = nullptr;  // start_console()'s hook
+
 int cmd_improv(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "start") == 0) {
         if (!improv::open(improv::Window::Console)) {
             std::printf("Could not open Improv BLE (disabled in this build, or BLE is busy: see `job`).\n");
             return 1;
         }
+        if (g_on_improv_start != nullptr) g_on_improv_start();
         std::printf("Improv BLE open: set WiFi from Home Assistant or https://www.improv-wifi.com/ "
                     "(`improv stop` closes it).\n");
         return 0;
@@ -750,6 +783,101 @@ int cmd_improv(int argc, char** argv) {
         std::printf("Improv BLE closed (`improv start` opens it)\n");
     }
     std::printf("Improv Serial always on, on this port (the installer page uses it)\n");
+    return 0;
+}
+
+// ---- access-point fallback (SPEC.md §9.5) -------------------------------------------
+
+/// The `ap` status table. Mode, password and delay are the saved settings (a
+/// change applies 1.5 s later, or after a transfer); state, clients and the
+/// pause are net's live view. Never prints the password.
+void print_ap_status(const api::DeviceConfig& dc) {
+    const net::Status st = net::status();
+    const bool open = dc.ap_password.empty();
+    std::printf("  ap mode    %s\n", !dc.ap_enabled ? "off" : open ? "on, open" : "on, WPA2");
+    std::printf("  delay      %" PRIu32 " s\n", dc.ap_delay_s);
+    std::printf("  state      ");
+    if (st.stopped) {
+        std::printf("stopped for a transfer");
+    } else if (st.ap.active) {
+        std::printf("up: \"%s\", %s, %u of %u clients", st.hostname.c_str(), ap::kUrl, st.ap.clients,
+                    ap::kMaxClients);
+    } else if (!dc.ap_enabled) {
+        std::printf("off");
+    } else if (st.ap.up_in_s >= 0) {
+        std::printf("standby: comes up in %" PRId64 " s if WiFi stays down", st.ap.up_in_s);
+    } else {
+        std::printf("standby%s", st.connected ? " (station connected)" : "");
+    }
+    // "netif": the AP can't run this boot; "start": retried every 10 s.
+    if (st.ap.fault != nullptr) std::printf(" [fault: %s]", st.ap.fault);
+    std::printf("\n");
+    if (st.ap.sta_paused) std::printf("  station    retries paused while a phone is on the access point\n");
+    std::array<uint8_t, 32> h{};
+    print_ap_warning("  warning    ", dc.ap_enabled, open, config::load_token_hash(h), st.ap.active);
+}
+
+int cmd_ap(int argc, char** argv) {
+    ap::Command c = ap::parse_command(argc, argv);
+    if (c.kind == ap::Command::Kind::Usage) {
+        std::printf("Usage: ap [on | off | password <pw>|clear | delay <seconds>]\n");
+        return 1;
+    }
+    if (c.kind == ap::Command::Kind::Invalid) {
+        std::printf("Not saved: %s\n", c.error.c_str());
+        return 1;
+    }
+    if (!net::status().ap.supported) {
+        improv::wipe(c.password);
+        std::printf("AP mode is not in this build.\n");
+        return 1;
+    }
+    api::DeviceConfig dc;
+    if (c.kind == ap::Command::Kind::Status) {
+        if (!config::load_device(dc)) {
+            std::printf("Failed to read settings from NVS\n");
+            return 1;
+        }
+    } else {
+        // One read-modify-write under config's lock that changes only this
+        // field, so a PUT /config made meanwhile isn't lost.
+        const std::string e = config::update_device(
+            [&c](api::DeviceConfig& d) {
+                switch (c.kind) {
+                    case ap::Command::Kind::On: d.ap_enabled = true; break;
+                    case ap::Command::Kind::Off: d.ap_enabled = false; break;
+                    case ap::Command::Kind::SetPassword: d.ap_password = c.password; break;
+                    case ap::Command::Kind::ClearPassword: d.ap_password.clear(); break;
+                    case ap::Command::Kind::Delay: d.ap_delay_s = c.delay_s; break;
+                    default: break;
+                }
+                return std::string();
+            },
+            &dc);
+        improv::wipe(c.password);
+        if (!e.empty()) {
+            std::printf("Not saved: %s\n", e.c_str());
+            return 1;
+        }
+        // Saved first, applied 1.5 s later by net (no reboot); while stopped,
+        // at restore(). Only a password change deauthenticates clients.
+        net::ApSettings s{dc.ap_enabled, dc.ap_password, dc.ap_delay_s};
+        net::set_ap(s);
+        improv::wipe(s.password);
+        // Fixed first lines: the installer page and scripts match them (§9.5).
+        switch (c.kind) {
+            case ap::Command::Kind::On: std::printf("AP mode on.\n"); break;
+            case ap::Command::Kind::Off: std::printf("AP mode off.\n"); break;
+            case ap::Command::Kind::SetPassword: std::printf("AP password set.\n"); break;
+            case ap::Command::Kind::ClearPassword:
+                std::printf("AP password cleared: the access point is open.\n");
+                break;
+            default: std::printf("AP delay %" PRIu32 " s.\n", dc.ap_delay_s); break;
+        }
+        if (net::status().stopped) std::printf("Applies when WiFi comes back after the transfer.\n");
+    }
+    print_ap_status(dc);
+    improv::wipe(dc.ap_password);
     return 0;
 }
 
@@ -842,7 +970,8 @@ void repl_task(void*) {
 
 }  // namespace
 
-void start_console() {
+void start_console(void (*on_improv_start)()) {
+    g_on_improv_start = on_improv_start;
     esp_console_config_t cc = ESP_CONSOLE_CONFIG_DEFAULT();
     cc.max_cmdline_length = kMaxLine;
 #if CONFIG_LOG_COLORS
@@ -886,6 +1015,8 @@ void start_console() {
     reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
     reg("token", "API token: show whether one is required, set one, or turn it off.", "[rotate | clear]", &cmd_token);
     reg("improv", "Improv WiFi provisioning: show state, open or close Improv BLE.", "[start | stop]", &cmd_improv);
+    reg("ap", "WiFi access-point fallback: show it, turn it on or off, set its password or start delay.",
+        "[on | off | password <pw>|clear | delay <seconds>]", &cmd_ap);
 
     // HTTP client and manifest parsing run on this task.
     if (xTaskCreate(&repl_task, "console_repl", 12288, nullptr, 2, nullptr) != pdPASS) {

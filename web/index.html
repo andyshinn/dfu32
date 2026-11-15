@@ -16,6 +16,7 @@
 <!-- "Stage nRF52 image" in the device dialog: staging.js builds the image, esptool-js writes it.
      "Custom build" in the version list loads custom-build.js when a zip is chosen. -->
 <script type="module" src="stage-dialog.js"></script>
+<!-- "Enable AP mode": ap-console.js types the ap commands into DFU32's console once that dialog closes (module script at the end). -->
 <style>
 :root {
   --bg: #fff; --surface: #fff; --surface-2: #f1f3f4;
@@ -117,6 +118,18 @@ esp-web-install-button { display: block; }
 .erase { flex: 1 1 260px; padding-left: 16px; border-left: 1px solid var(--border); font-size: 13.5px; line-height: 1.5; }
 .erase strong { display: block; font-weight: 600; margin-bottom: 4px; }
 .erase p { margin: 0; color: var(--muted); }
+.apmode { display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.apmode label { display: flex; gap: 10px; align-items: baseline; cursor: pointer; }
+.apmode label b { font-weight: 600; }
+.apmode input[type="checkbox"] { accent-color: var(--accent); margin: 0; flex: none; transform: translateY(2px); }
+.apmode .muted { display: block; font-weight: 400; }
+.apmode .pw { display: flex; flex-direction: column; gap: 6px; padding-left: 23px; }
+.apmode .pw[hidden], .apmode p[hidden] { display: none; }
+.apmode input[type="password"] { box-sizing: border-box; width: 100%; max-width: 360px; font: inherit; font-size: 14.5px; color: var(--text); padding: 9px 12px; border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); }
+.apmode input[type="password"]:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.apmode p { margin: 0; color: var(--muted); }
+.apmode p.warn, .apmode p.error { color: var(--danger); }
+.apmode code { font: 12.5px var(--mono); color: var(--text); }
 
 .unsupported > div { padding: 20px; display: flex; flex-direction: column; gap: 6px; }
 .unsupported > div + div { border-top: 1px solid var(--border); gap: 12px; }
@@ -244,6 +257,17 @@ footer a { color: var(--muted); }
       </div>
     </div>
 
+    <div class="apmode web-only" id="apmode">
+      <label><input type="checkbox" id="ap-on"><span><b>Enable AP mode</b>
+        <span class="muted">Off by default. DFU32 then broadcasts its own WiFi network, dfu32-xxxx, when it has no WiFi or loses it for 2 minutes, so a phone can open its page at <code>http://192.168.4.1/</code>. Open unless you set a password.</span></span></label>
+      <div class="pw" id="ap-pw-box" hidden>
+        <input type="password" id="ap-pw" autocomplete="new-password" minlength="8" maxlength="63" aria-label="Access point password (WPA2)" aria-describedby="ap-pw-note" placeholder="optional: blank keeps the current one, or open">
+        <p class="warn" id="ap-pw-note">Open: anyone nearby can join and, until you turn on an API token, use DFU32.</p>
+        <p>Tick this before you connect: the page turns AP mode on over USB when you close the installer’s dialog.</p>
+      </div>
+      <p id="ap-status" role="status" hidden></p>
+    </div>
+
     <div class="plain notallowed-only">This page needs HTTPS to reach USB devices. Open <a class="mono" href="https://dfu32.app/">https://dfu32.app</a> instead.</div>
 
     <p class="note web-only"><strong>Already installed?</strong> Connect without choosing a board: DFU32 tells the page which board it is, so you can update it, change WiFi or open its page. Settings are kept unless you erase.</p>
@@ -265,7 +289,10 @@ footer a { color: var(--muted); }
       <div><dt>WiFi failed</dt><dd>DFU32 joins WPA2-Personal and open networks on 2.4 GHz, and on 5 GHz too with the XIAO ESP32C5 (WPA2/WPA3 mixed works, WPA3-only doesn’t). Check the password and retry.</dd></div>
       <div><dt>Staging stops or times out</dt><dd>Open this page as <code>dfu32.app/?trace=1</code> and stage again: the browser console (DevTools) then shows every serial exchange, which is what a bug report needs. Meanwhile, <code>tools/dfu32_stage_image.py</code> builds the same image for esptool, or stage over WiFi from DFU32’s own page.</dd></div>
       <div><dt>No “Stage nRF52 image” option</dt><dd>It appears only when the connected device runs DFU32 and answers over Improv. Install or update DFU32 first, then connect again.</dd></div>
-      <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network.</dd></div>
+      <div><dt>Can’t reach the device afterwards</dt><dd>Try <code>http://dfu32-xxxx.local</code> from a computer on the same network. If its WiFi isn’t working and AP mode is on, join its own network, <code>dfu32-xxxx</code>, and open <code>http://192.168.4.1/</code>.</dd></div>
+      <div><dt>AP mode didn’t turn on</dt><dd>The page turns it on after you close the installer’s dialog, so tick <strong>Enable AP mode</strong> first, then click <strong>Connect device</strong> and close the dialog when you’re done. Close any serial monitor using the port. A board that restarted has to be connected again. Over a serial monitor, type <code>ap on</code> (and <code>ap password "&lt;password&gt;"</code> first for a protected one) instead.</dd></div>
+      <div><dt>Can’t find the dfu32-xxxx network</dt><dd>It isn’t always on: it comes up only when DFU32 has no WiFi network stored, or after its start delay (2 minutes by default) without WiFi, and goes away again once DFU32 is back on WiFi and no phone is using it. On the XIAO ESP32C5, a 2.4 GHz-only phone can’t see it while DFU32’s WiFi is on 5 GHz.</dd></div>
+      <div><dt>Reach it at http://192.168.4.1/</dt><dd>Once a phone has joined <code>dfu32-xxxx</code>, a sign-in sheet usually opens DFU32’s page by itself. If not, open <code>http://192.168.4.1/</code> (plain http). Some phones switch to mobile data on a network without internet: keep the WiFi connection when asked.</dd></div>
     </dl>
   </details>
 
@@ -756,6 +783,86 @@ footer a { color: var(--muted); }
     if (savedId !== null) forgetBoard();  // a board this page no longer lists
     refresh();
   }
+</script>
+<script type="module">
+  // "Enable AP mode" (SPEC §9.4): once ESP Web Tools closes its dialog (not a
+  // hand-off to "Stage nRF52 image"), reopen its port and type the ap commands
+  // into DFU32's console. Neither the box nor the password is stored.
+  import { validateApPassword, apCommands, runCommands } from './ap-console.js';
+  import { onDialogClosed, waitForPortRelease, PORT_BUSY } from './stage-dialog.js';
+
+  const box = document.getElementById('ap-on');
+  const pwBox = document.getElementById('ap-pw-box');
+  const pw = document.getElementById('ap-pw');
+  const pwNote = document.getElementById('ap-pw-note');
+  const status = document.getElementById('ap-status');
+  const OPEN_NOTE = pwNote.textContent;
+  let busy = false;
+
+  function say(text, error = false) {
+    status.textContent = text;
+    status.className = error ? 'error' : '';
+    status.hidden = !text;
+  }
+  // The note under the field: why the typed password can't be used, else the open-AP warning while it is blank.
+  function refreshNote() {
+    pwBox.hidden = !box.checked;
+    const bad = validateApPassword(pw.value);
+    pwNote.textContent = bad || OPEN_NOTE;
+    pwNote.hidden = !bad && pw.value !== '';
+  }
+  box.addEventListener('change', () => { refreshNote(); if (!busy) say(''); });
+  pw.addEventListener('input', refreshNote);
+
+  onDialogClosed(async ({ dlg, port, leaving }) => {
+    if (!box.checked || leaving || !port || busy) return;
+    const password = pw.value;
+    const bad = validateApPassword(password);
+    if (bad) return say(`AP mode wasn’t turned on: ${bad}`, true);
+    busy = true;
+    say('Turning AP mode on…');
+    let opened = false;
+    try {
+      if (!await waitForPortRelease(dlg, port)) return say(PORT_BUSY, true);
+      // A native-USB board re-enumerates when it restarts: this port is gone.
+      if (port.connected === false) return say('The board restarted; click Connect device again and close the dialog to turn AP mode on.', true);
+      try {
+        await port.open({ baudRate: 115200, bufferSize: 8192 });  // as ESP Web Tools opens it
+        opened = true;
+      } catch (e) {
+        return say(e && e.name === 'InvalidStateError' ? PORT_BUSY : `Couldn’t open the serial port: ${e.message}`, true);
+      }
+      // Let the board run: asserted DTR/RTS hold some boards in reset or in the bootloader.
+      // RTS first: Chrome on Windows applies the two one at a time, DTR first, and
+      // DTR low with RTS high is the auto-reset circuit's (and USB-JTAG's) reset.
+      try {
+        await port.setSignals({ requestToSend: false });
+        await port.setSignals({ dataTerminalReady: false });
+      } catch (e) { /* not supported */ }
+      const r = await runCommands(port, apCommands(password));
+      pw.value = '';
+      refreshNote();
+      if (r.ok) {
+        const security = r.security || (password ? 'WPA2' : '');
+        say(`AP mode on${security ? ` (${security})` : ''}. DFU32 broadcasts dfu32-xxxx when it has no WiFi or loses it for its start delay; join it from a phone and open http://192.168.4.1/.` +
+          (security === 'open' ? ' It is open: anyone nearby can join and, until you turn on an API token, use DFU32.' : ''));
+      } else if (r.error === 'old') {
+        say('This DFU32 is too old for AP mode: install the latest version first.', true);
+      } else if (r.error === 'timeout') {
+        say('DFU32’s console didn’t answer, so AP mode wasn’t turned on. Check the board runs DFU32, then click Connect device and close the dialog to try again.', true);
+      } else if (r.error === 'gone') {
+        say('The board disconnected before AP mode was turned on. Click Connect device and close the dialog to try again.', true);
+      } else {
+        say(`AP mode wasn’t turned on: ${r.error}`, true);
+      }
+    } catch (e) {
+      say(`AP mode wasn’t turned on: ${e.message}`, true);
+    } finally {
+      if (opened) { try { await port.close(); } catch (e) { /* unplugged */ } }
+      busy = false;
+    }
+  });
+  refreshNote();
 </script>
 </body>
 </html>

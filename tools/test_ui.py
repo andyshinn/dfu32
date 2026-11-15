@@ -91,9 +91,10 @@ class TestPage(unittest.TestCase):
             self.assertNotIn(sink, self.js, sink)
 
     def test_uses_only_known_endpoints(self):
-        paths = set(re.findall(r'"(/(?:status|claim|targets|jobs|runs|staging|ble|logs|config|system)[^"]*)"', self.js))
+        paths = set(re.findall(r'"(/(?:status|claim|targets|jobs|runs|staging|ble|logs|config|system|wifi)[^"]*)"', self.js))
         allowed = ("/status", "/claim", "/targets", "/jobs/current/abort", "/runs", "/staging", "/ble/scan",
-                   "/logs", "/config", "/system/reboot", "/system/token/rotate", "/system/token/clear", "/system/ota")
+                   "/logs", "/config", "/system/reboot", "/system/token/rotate", "/system/token/clear", "/system/ota",
+                   "/wifi", "/wifi/scan")
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
 
@@ -128,6 +129,21 @@ class TestPage(unittest.TestCase):
         self.assertEqual((want["prn"], want["interval_ms"]), (4, 30))
         got = {k: int(v) for k, v in re.findall(r"(\w+): (\d+)", re.search(r"const kDef = \{(.*?)\}", self.js).group(1))}
         self.assertEqual(got, want)
+
+    def test_ap_bounds_are_the_firmware_constants(self):
+        # The WiFi view's access-point limits (SPEC §9.5) come from dfu32_core/ap.hpp.
+        hdr = (ROOT / "components" / "dfu32_core" / "include" / "dfu32_core" / "ap.hpp").read_text()
+
+        def const(name):
+            return int(re.search(r"inline constexpr uint32_t %s = (\d+);" % name, hdr).group(1))
+        want = {"delay": const("kDefaultDelayS"), "min": const("kMinDelayS"), "max": const("kMaxDelayS"),
+                "pwMin": const("kMinPasswordLen"), "pwMax": const("kMaxPasswordLen")}
+        got = {k: int(v) for k, v in re.findall(r"(\w+): (\d+)", re.search(r"const kAp = \{(.*?)\}", self.js).group(1))}
+        self.assertEqual(got, want)
+
+    def test_wifi_view_is_routed(self):
+        self.assertIn('href="#wifi"', self.html)
+        self.assertIn("wifi: viewWifi", re.search(r"const VIEWS = \{(.*?)\}", self.js).group(1))
 
 
 if __name__ == "__main__":

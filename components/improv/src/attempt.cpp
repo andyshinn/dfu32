@@ -14,10 +14,10 @@ namespace dfu32::improv {
 namespace {
 
 constexpr const char* TAG = "improv";
-constexpr const char* kLeaseName = "improv-serial";
 
-// One attempt at a time, from either transport, and whether it holds the BLE
-// lease: its own ("improv-serial"), or Improv BLE's, adopted when the BLE
+// One attempt at a time, from any source (Improv BLE, Improv Serial, the web
+// UI: SPEC.md §9.2, §9.5), and whether it holds the BLE lease: its own
+// ("improv-serial" or "wifi-setup"), or Improv BLE's, adopted when the BLE
 // window closed under it (release_ble_lease()).
 std::mutex g_mu;
 bool g_running = false;     // guarded by g_mu
@@ -33,9 +33,9 @@ bool Attempt::any_running() {
 void release_ble_lease() {
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_running && !g_owns_lease) {
-        // A Serial attempt relied on the BLE window's lease: keep it held for
-        // the attempt (it releases it when it ends), or a flash could start
-        // and stop WiFi underneath it.
+        // A Serial or web attempt relied on the BLE window's lease: keep it
+        // held for the attempt (it releases it when it ends), or a flash could
+        // start and stop WiFi underneath it.
         g_owns_lease = true;
         ESP_LOGI(TAG, "Improv BLE closed during a WiFi attempt; the attempt keeps the BLE lease");
         return;
@@ -48,7 +48,7 @@ bool Attempt::begin(const std::string& ssid, const std::string& password, int64_
     {
         std::lock_guard<std::mutex> lk(g_mu);
         if (g_running) {
-            ESP_LOGW(TAG, "WiFi settings refused: another Improv client is connecting");
+            ESP_LOGW(TAG, "WiFi settings refused: another WiFi setup is connecting");
             return false;
         }
         // Improv BLE holds the lease while it is open (and hands it over if it
@@ -59,7 +59,7 @@ bool Attempt::begin(const std::string& ssid, const std::string& password, int64_
             ESP_LOGW(TAG, "WiFi settings refused: %s is using the radio", holder);
             return false;
         }
-        g_owns_lease = holder == nullptr && job::try_acquire(kLeaseName);
+        g_owns_lease = holder == nullptr && job::try_acquire(lease_name_);
         if (holder == nullptr && !g_owns_lease) {
             ESP_LOGW(TAG, "WiFi settings refused: a job just started");
             return false;
@@ -67,6 +67,9 @@ bool Attempt::begin(const std::string& ssid, const std::string& password, int64_
         g_running = true;
     }
     had_previous_ = net::stored_credentials(previous_ssid_, previous_password_);
+    // Only a disconnect counted from here on belongs to this attempt; the
+    // reason net still holds from before (the old network's drop) does not.
+    reconnects_at_begin_ = net::status().reconnects;
     // Saved to flash now, as the console's `wifi` command does; a failed
     // attempt puts the previous network back (give_up). An earlier version
     // tried the network from RAM (esp_wifi_set_storage(RAM)) and re-applied
@@ -79,6 +82,8 @@ bool Attempt::begin(const std::string& ssid, const std::string& password, int64_
         return false;
     }
     active_ = true;
+    timed_out_ = false;
+    last_reason_ = 0;
     trying_ssid_ = ssid;
     deadline_us_ = esp_timer_get_time() + timeout_us;
     ESP_LOGI(TAG, "WiFi settings received for \"%s\"; connecting", ssid.c_str());
@@ -87,8 +92,14 @@ bool Attempt::begin(const std::string& ssid, const std::string& password, int64_
 
 Attempt::Poll Attempt::poll() const {
     if (!active_) return Poll::Idle;
-    if (net::status().connected) return Poll::Joined;
-    return esp_timer_get_time() >= deadline_us_ ? Poll::TimedOut : Poll::Pending;
+    const net::Status st = net::status();
+    if (st.connected) return Poll::Joined;
+    if (esp_timer_get_time() < deadline_us_) return Poll::Pending;
+    if (!timed_out_) {
+        timed_out_ = true;
+        last_reason_ = st.reconnects != reconnects_at_begin_ ? st.last_disconnect_reason : 0;
+    }
+    return Poll::TimedOut;
 }
 
 std::string Attempt::keep() {

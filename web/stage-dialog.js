@@ -37,7 +37,7 @@ const LOGS_ITEM = 'Logs & Console';  // the device dialog's last fixed item; HOO
 // write (console.log, "TRACE ..." lines) plus its debug messages, for debugging a
 // stage that fails; on a failure the whole trace is also printed in one block.
 const TRACE = typeof location !== 'undefined' && new URLSearchParams(location.search).get('trace') === '1';
-const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
+export const PORT_BUSY = 'The serial port is still open, in another tab or program (a serial monitor?). Close it, or unplug the board and plug it back in, then try again.';
 
 
 // ---- the item in ESP Web Tools' device dialog ----
@@ -47,7 +47,13 @@ const PORT_BUSY = 'The serial port is still open, in another tab or program (a s
 // overrides.checkSameFirmware() (its public hook) whenever it renders the
 // device's options; the page's own override still decides the answer. The
 // entry goes when that dialog closes, so a later dialog never sees old info.
-let current = null;  // { dlg, info, warned }
+let current = null;  // { dlg, info, warned, leaving }
+
+// Called with { dlg, port, leaving } whenever ESP Web Tools' dialog closes;
+// leaving: it closed to hand its port to "Stage nRF52 image". The page's
+// "Enable AP mode" (ap-console.js, SPEC §9.4) uses the port then.
+const closedHooks = [];
+export const onDialogClosed = cb => { closedHooks.push(cb); };
 
 function wrapOverrides(button) {
   const base = button.overrides || {};
@@ -88,31 +94,43 @@ function addItem(dlg) {
   item.id = ITEM_ID;
   item.type = 'button';
   item.innerHTML = `${ICON_UPLOAD}<div slot="headline">Stage nRF52 image</div>`;
-  item.addEventListener('click', () => leaveFor(dlg, c.info));
+  item.addEventListener('click', () => leaveFor(c));
   logs.before(item);
 }
 
 const portOpen = port => !!(port && (port.readable || port.writable));
 
-// Close ESP Web Tools' dialog, wait for it to release the port, open ours on it.
-async function leaveFor(dlg, info) {
-  const port = dlg.port || null;
-  const md = dlg.shadowRoot.querySelector('ew-dialog');
-  if (md) md.close();
+/** Waits up to 5 s for ESP Web Tools' closed dialog to go and release `port`; true once it has. */
+export async function waitForPortRelease(dlg, port) {
   const until = Date.now() + 5000;
   while (Date.now() < until && (dlg.isConnected || portOpen(port))) await sleep(50);
+  return !dlg.isConnected && !portOpen(port);
+}
+
+// Close ESP Web Tools' dialog, wait for it to release the port, open ours on it.
+async function leaveFor(c) {
+  const { dlg, info } = c;
+  const port = dlg.port || null;
+  const md = dlg.shadowRoot.querySelector('ew-dialog');
+  c.leaving = true;  // before the close, so "Enable AP mode" leaves this port alone
+  if (md) md.close();
+  await waitForPortRelease(dlg, port);
   // Still held: say so now rather than fail later with a bootloader error. Without
   // a port, Stage asks for one again.
   if (portOpen(port)) openStageDialog({ info, error: PORT_BUSY });
   else openStageDialog({ port, info });
 }
 
-function hook(dlg) {
+function hook(c) {
+  const dlg = c.dlg;
   const obs = new MutationObserver(() => addItem(dlg));
   obs.observe(dlg.shadowRoot, { childList: true, subtree: true });
   dlg.addEventListener('closed', () => {
     obs.disconnect();
-    if (current && current.dlg === dlg) current = null;
+    if (current === c) current = null;
+    for (const cb of closedHooks) {
+      try { cb({ dlg, port: dlg.port || null, leaving: !!c.leaving }); } catch (e) { console.error(e); }
+    }
   }, { once: true });
   addItem(dlg);
 }
@@ -123,11 +141,11 @@ function watch(button) {
     for (const r of records) {
       for (const n of r.addedNodes) {
         if (n.localName !== 'ewt-install-dialog') continue;
-        current = { dlg: n, info: null, warned: false };  // info arrives once its Improv answers
+        const c = current = { dlg: n, info: null, warned: false, leaving: false };  // info arrives once its Improv answers
         // ESP Web Tools can append the dialog before its module has loaded;
         // it gets its shadow root when the element is upgraded.
-        if (n.shadowRoot) hook(n);
-        else customElements.whenDefined('ewt-install-dialog').then(() => { if (n.shadowRoot) hook(n); });
+        if (n.shadowRoot) hook(c);
+        else customElements.whenDefined('ewt-install-dialog').then(() => { if (n.shadowRoot) hook(c); });
       }
     }
   }).observe(document.body, { childList: true });

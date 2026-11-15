@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS "src/api.cpp"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES app_update config dfu32_core dfu_ble esp_app_format esp_http_server esp_timer fetch job mbedtls
-                  net runlog staging
+    PRIV_REQUIRES app_update config dfu32_core dfu_ble esp_app_format esp_http_server esp_timer fetch improv job
+                  lwip mbedtls net runlog staging
 )
 
 # The web UI (SPEC.md §10.2): one HTML file, gzipped at build time (same bytes
