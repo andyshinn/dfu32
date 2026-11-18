@@ -433,7 +433,7 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 4. **Happy path from the UI only:** **Check** shows the version and board match; **Flash**, then `start ota` over LoRa from the companion app. The job card shows armed (countdown), then the progress bar and rate, then succeeded, with a link to the run. This is the M4 "done when" (after joining WiFi over Improv).
 5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
 6. **Runs:** the list shows the flashes; a run's page has the attempts and the log. **Logs** tails live while a flash runs.
-7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
+7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the targets and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
 8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards, and the page shows that error (not a connection reset). The merged `.bin`, on any chip: refused as "this is the merged image, for a fresh install over USB", naming `dfu32-<board>.bin` to upload instead.
 9. **Rollback rules:**
    - With the router on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
@@ -470,7 +470,7 @@ Once `main` has it, the installer page itself (MILESTONES M5 bench):
     - b. **Wrong passphrase:** give Improv a wrong passphrase. It reports "unable to connect"; after a RESET, the previous network is still the one in use.
     - c. **Corrected passphrase:** give Improv the same SSID with the right passphrase, then RESET. It rejoins (a config that differs only in the password is saved).
     - d. **Wrong passphrase on an erased board:** on a board with no network (installed with "Erase device"), give a wrong passphrase. It reports "unable to connect"; after a RESET the boot log says there are no WiFi credentials and Improv BLE opens by itself.
-11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
+11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the targets and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.
 14. **Earlier version:** choose an earlier release under **Choose a version** and update a configured device without erasing: `/api/v1/status` reports that version, and settings are kept. Choose the latest again to go back.

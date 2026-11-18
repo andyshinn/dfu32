@@ -193,6 +193,17 @@ class TestPage(unittest.TestCase):
         view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
         self.assertIn('a.detail === "busy" ? "DFU32 was busy, so nothing was changed.', view)
 
+    def test_status_does_not_redraw_another_view(self):
+        # viewStatus()'s GET (or a Check) can finish after the user moved to another view.
+        body = self.js[self.js.index("function renderStatus()"):]
+        self.assertIn('if (view !== "status") return;', body[:body.index("const j = status.job")])
+
+    def test_wifi_station_part_has_no_null_child(self):
+        # replaceChildren() turns null into the text "null" (h() drops it, replaceChildren doesn't).
+        body = self.js[self.js.index("function renderWifi()"):]
+        call = body[body.index('$("#wsta")?.replaceChildren('):body.index("\n}")]
+        self.assertNotRegex(call, r":\s*null\s*\);")
+
     def test_wifi_view_is_routed(self):
         self.assertIn('href="#wifi"', self.html)
         self.assertIn("wifi: viewWifi", re.search(r"const VIEWS = \{(.*?)\}", self.js).group(1))

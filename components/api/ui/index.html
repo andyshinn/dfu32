@@ -246,6 +246,8 @@ async function viewStatus() {
   renderStatus();
 }
 function renderStatus() {
+  // A GET or Check that finishes after the user left Status must not redraw #main.
+  if (view !== "status") return;
   const j = status.job || {}, tid = targetId(), busy = active(j);
   if (tcfgFor !== tid) return viewStatus();  // the selection moved (a target was added or deleted)
   const out = [];
@@ -596,7 +598,7 @@ function renderWifi() {
   $("#wsta")?.replaceChildren(h("h2", "WiFi"), dl([["Network", ssid || "not set"],
     ["State", w.connected ? badge("connected", "ok") : cfg && !ssid ? badge("not set") : w.paused ? badge("paused while a phone is on the access point", "warn") : badge("not connected", "bad")],
     ["IP", w.connected ? w.ip : ""], ["Signal", w.connected ? w.rssi + " dBm" : ""], ["Access point", apState()]]),
-    ap.via_ap ? note("info", "You're on DFU32's own access point (" + ap.ssid + "). It has no internet.") : null);
+    ap.via_ap ? note("info", "You're on DFU32's own access point (" + ap.ssid + "). It has no internet.") : "");
 }
 async function viewWifi() {
   cfg = await api("GET", "/config", undefined, 4000).catch(() => cfg);

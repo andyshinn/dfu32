@@ -80,6 +80,12 @@ class Parsers(unittest.TestCase):
         self.assertEqual((f["run"], f["throughput_kBps"]), (11, 12.4))
         self.assertEqual([a["kind"] for a in f["attempts"]], ["LINK_OR_OVERRUN", "NONE"])
 
+    def test_flash_wifi_restored_with_access_point_up(self):
+        # cmd_flash adds the access-point note when the AP is up after the restore.
+        f = parse.parse_flash("WiFi restored (access point up; phones on it rejoin).\nFLASH OK in 1.0 s.\n")
+        self.assertTrue(f["wifi_restored"])
+        self.assertFalse(parse.parse_flash("WiFi restarted.\nFLASH OK in 1.0 s.\n")["wifi_restored"])
+
     def test_flash_failed(self):
         out = ("FLASH FAILED after 3 attempt(s): link lost\nRecorded as run #4 (`run 4` for details and log).\n"
                "The target's app was erased. The staged image is intact; run `flash --yes` again.\n")

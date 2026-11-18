@@ -53,6 +53,15 @@ __attribute__((section(".rodata_custom_desc"), used)) const dfu32::ota::BoardTag
 namespace dfu32::api {
 namespace {
 
+/// ESP-IDF error code as hex: release builds drop the error-name table
+/// (CONFIG_ESP_ERR_TO_NAME_LOOKUP=n, SPEC.md §12.1), so the name lookup
+/// would only say "UNKNOWN ERROR".
+std::string err_hex(esp_err_t e) {
+    char b[12];
+    std::snprintf(b, sizeof(b), "0x%x", static_cast<unsigned>(e));
+    return b;
+}
+
 constexpr const char* TAG = "api";
 constexpr size_t kMaxBody = 4096;
 constexpr size_t kLogChunk = 8192;
@@ -1066,14 +1075,14 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
                 return fail("422 Unprocessable Content", "IMAGE_REJECTED", why);
             }
             const esp_err_t e = esp_ota_begin(next, OTA_WITH_SEQUENTIAL_WRITES, &h);
-            if (e != ESP_OK) return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_begin: ") + esp_err_to_name(e));
+            if (e != ESP_OK) return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_begin: ") + err_hex(e));
             begun = true;
             ESP_LOGI(TAG, "firmware upload: \"%s\" (%s) into %s, %u B", info.version.c_str(),
                      info.board.empty() ? "untagged" : info.board.c_str(), next->label,
                      static_cast<unsigned>(req->content_len));
         }
         if (const esp_err_t e = esp_ota_write(h, buf.data(), want); e != ESP_OK) {
-            return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_write: ") + esp_err_to_name(e));
+            return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_write: ") + err_hex(e));
         }
         const unsigned decile = static_cast<unsigned>((req->content_len - remaining) * 10 / req->content_len);
         if (decile > last_decile && decile < 10) {
@@ -1086,10 +1095,10 @@ esp_err_t h_ota(httpd_req_t* req, bool force) {
         const bool invalid = e == ESP_ERR_OTA_VALIDATE_FAILED || e == ESP_ERR_INVALID_SIZE;
         return fail(invalid ? "422 Unprocessable Content" : "500 Internal Server Error",
                     invalid ? "IMAGE_REJECTED" : "STAGING_IO",
-                    std::string("image failed verification: ") + esp_err_to_name(e));
+                    std::string("image failed verification: ") + err_hex(e));
     }
     if (const esp_err_t e = esp_ota_set_boot_partition(next); e != ESP_OK) {
-        return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_set_boot_partition: ") + esp_err_to_name(e));
+        return fail("500 Internal Server Error", "STAGING_IO", std::string("esp_ota_set_boot_partition: ") + err_hex(e));
     }
     const auto ms = static_cast<uint32_t>((esp_timer_get_time() - t0) / 1000);
     ESP_LOGW(TAG, "firmware \"%s\" written to %s in %u ms; rebooting into it", info.version.c_str(), next->label,
