@@ -236,6 +236,12 @@ class Ctx:
         self.debug_build = False
         self.ota_pending = False  # `start ota` sent and no flash has consumed it yet
         self._primed = False  # prime_repeater() already put the repeater in OTA mode for this flash
+        # The owner's targets, put back by restore_targets() when the run ends: their default
+        # (noted the first time the bench changes it) and any target deleted to make room.
+        self.original_default: Optional[str] = None
+        self._default_noted = False
+        self.deleted_targets: list[dict] = []
+        self.end_notes: list[str] = []  # what restore_targets() did, for the report
         if args.repeater_port:
             self.repeater = Repeater(args.repeater_port, args.repeater_baud, self.con.note)
         if self.device_ip:
@@ -416,7 +422,13 @@ class Ctx:
             return None
         if r.status != 200:
             return None
-        return any(d.get("matches_target") == self.tid for d in (r.get("devices") or []))
+        return any(d.get("matches_target") == self.tid or self.is_repeater_addr(d.get("addr") or "")
+                   for d in (r.get("devices") or []))
+
+    def is_repeater_addr(self, addr: str) -> bool:
+        """The repeater's MAC, or MAC+1 (its bootloader). Another target with the same MAC can come
+        first in matches_target, so the address is the surer test."""
+        return bool(self.mac) and mac_matches(addr, self.mac)
 
     def ensure_repeater_idle(self) -> None:
         """Checks that expect DFU32 *not* to find the repeater need it out of OTA mode."""
@@ -539,6 +551,11 @@ class Ctx:
         return self.site.url(self.host_ip, variant)
 
     def need_mac(self) -> str:
+        """--mac, else the MAC stored for the bench target, else the default target's."""
+        if not self.mac:
+            rows = self.console_targets() or []
+            mine = next((r for r in rows if r["id"] == self.tid), None)
+            self.mac = mine["mac"] if mine else ""
         if not self.mac:
             t = parse_target(self.con.cmd("target", 10))
             self.mac = t.get("mac", "")
@@ -546,12 +563,69 @@ class Ctx:
             raise TestSkipped("no repeater MAC: pass --mac XX:XX:XX:XX:XX:XX (from `start ota`'s reply)")
         return self.mac
 
-    def ensure_target_console(self, *, url: bool = True) -> None:
-        """Target set from the console (sections 1-2; also what the API sees)."""
-        mac = self.need_mac()
+    def console_targets(self) -> Optional[list[dict]]:
+        """`target list` as rows {id, mac, board, last_ok, default}; None if the firmware has no `target list`."""
+        out = self.con.cmd("target list", 10)
+        if "No targets yet" in out:
+            return []
+        if " of " not in out or "* = default" not in out:
+            return None
+        return parse_target_list(out)
+
+    def use_bench_target_console(self) -> None:
+        """Makes the bench target (--target-id) the default, so the console's commands act on it.
+
+        A missing one is added (other targets are kept). When DFU32 is full, one other target is
+        deleted to make room, but only with --allow-delete-target (it is put back when the run
+        ends). The owner's default comes back then too. On firmware with a single target, that
+        target is renamed instead.
+        """
         cur = parse_target(self.con.cmd("target", 10))
-        if cur.get("id") != self.tid:
+        if cur.get("id") == self.tid:
+            return
+        out = self.con.cmd(f"target use {self.tid}", 10)
+        if "Default target:" in out:
+            self.remember_default(cur.get("id"))
+            self.say(f"made '{self.tid}' the default target (it was '{cur.get('id', '')}'); console commands act on it")
+            return
+        if f"No target '{self.tid}'" not in out:  # firmware with one target: no `target use`
             self.con.cmd(f"target id {self.tid}", 10)
+            return
+        add = f"target add {self.tid} {self.need_mac()} {self.args.addr_type}"
+        out = self.con.cmd(add, 10)
+        if "Not saved" in out and "at most" in out:
+            rows = self.console_targets() or []
+            m = re.search(r"at most (\d+)", out)
+            full = f"DFU32 is full ({len(rows)} of {m.group(1) if m else '?'} targets)"
+            if not self.allow_delete_target:
+                raise TestSkipped(full + FULL_HINT)
+            victim = pick_target_to_delete(rows, self.tid)
+            if victim is None:
+                raise TestFailed(f"DFU32 is full and has no target to make room with: {out.strip()}")
+            try:
+                api = self.ensure_token()
+            except (TestSkipped, TestFailed, ApiUnreachable) as e:
+                raise TestSkipped(f"{full}, and without the API the bench can't save target '{victim}' to put it "
+                                  f"back afterwards ({e}): free a slot, or get WiFi working") from e
+            saved = self.save_target(api, victim)
+            self.remember_default(cur.get("id"))
+            self.say(f"DFU32 is full ({len(rows)} targets): deleting target '{victim}' to make room for "
+                     f"'{self.tid}' (--allow-delete-target; it is put back when the run ends)")
+            d = self.con.cmd(f"target delete {victim}", 10)
+            if "deleted" not in d:
+                raise TestFailed(f"could not delete target '{victim}': {d.strip().splitlines()[:1]}")
+            self.deleted_targets.append(saved)
+            out = self.con.cmd(add, 10)
+        if "added" not in out:
+            raise TestFailed(f"could not add the bench target '{self.tid}': {out.strip().splitlines()[:1]}")
+        self.remember_default(cur.get("id"))
+        self.say(f"added target '{self.tid}' on the console; it is now the default target")
+
+    def ensure_target_console(self, *, url: bool = True) -> None:
+        """The bench target set from the console and made the default (sections 1-2; also what the API sees)."""
+        mac = self.need_mac()
+        self.use_bench_target_console()
+        cur = parse_target(self.con.cmd("target", 10))
         if cur.get("mac") != mac:
             self.con.cmd(f"target {mac} {self.args.addr_type}", 10)
         if cur.get("board") != self.args.board:
@@ -572,14 +646,132 @@ class Ctx:
         body = self.target_body(**over)
         r = api.put(f"/targets/{self.tid}", body)
         if r.status == 409 and r.error == "TARGET_LIMIT":
-            for t in (api.get("/targets").get("targets") or []):
-                if t.get("id") and t["id"] != self.tid:
-                    self.say(f"deleting the other target '{t['id']}' (v1 allows one)")
-                    api.delete(f"/targets/{t['id']}")
+            # DFU32 is full: with --allow-delete-target, delete one other target (never the bench
+            # one) and try again; it is put back when the run ends.
+            lst = api.get("/targets")
+            rows = [{"id": t.get("id", ""), "default": bool(t.get("default"))} for t in (lst.get("targets") or [])]
+            full = f"DFU32 is full ({len(rows)} of {lst.get('max_targets', '?')} targets)"
+            if not self.allow_delete_target:
+                raise TestSkipped(full + FULL_HINT)
+            victim = pick_target_to_delete(rows, self.tid)
+            if victim is None:
+                raise TestFailed(f"PUT /targets/{self.tid} -> TARGET_LIMIT and no other target to delete: {r.short()}")
+            saved = self.save_target(api, victim)
+            self.remember_default(lst.get("default"))
+            self.say(f"{full}: deleting target '{victim}' to make room for '{self.tid}' (--allow-delete-target; "
+                     "it is put back when the run ends)")
+            d = api.delete(f"/targets/{victim}")
+            if d.status != 204:
+                raise TestFailed(f"DELETE /targets/{victim} failed: {d.short()}")
+            self.deleted_targets.append(saved)
             r = api.put(f"/targets/{self.tid}", body)
         if r.status not in (200, 201):
             raise TestFailed(f"PUT /targets/{self.tid} failed: {r.short()}")
         return r.body
+
+    # ---- the owner's targets -----------------------------------------------------------
+
+    @property
+    def allow_delete_target(self) -> bool:
+        return bool(getattr(self.args, "allow_delete_target", False))
+
+    def remember_default(self, old: Optional[str]) -> None:
+        """Notes the owner's default target the first time the bench changes it."""
+        if not self._default_noted:
+            self._default_noted = True
+            self.original_default = old or None
+
+    def save_target(self, api: ApiClient, tid: str) -> dict:
+        """Target `tid` as GET /targets/{id} returns it, so restore_targets() can put it back."""
+        g = api.get(f"/targets/{tid}")
+        if g.status != 200 or not isinstance(g.body, dict):
+            raise TestFailed(f"could not save target '{tid}' before deleting it, so it was left alone: "
+                             f"GET /targets/{tid} -> {g.short()}")
+        return dict(g.body)
+
+    def end_note(self, msg: str, *, bad: bool = False) -> None:
+        self.end_notes.append(("WARN: " if bad else "") + msg)
+        if bad:
+            print("    " + _c(YELLOW, "WARN: " + msg), flush=True)
+            self.con.note("WARN: " + msg)
+        else:
+            self.say(msg)
+
+    def restore_targets(self) -> None:
+        """Puts back what the bench changed in the owner's targets: deleted targets, then the default.
+
+        Best effort: each failure is noted (in end_notes and the report) and the rest still runs.
+        """
+        if not self.deleted_targets and not self.original_default:
+            return
+        print("\n" + _c(BOLD, "putting the owner's targets back"), flush=True)
+        api: Optional[ApiClient] = None
+        try:
+            api = self.ensure_token()
+        except Exception as e:  # noqa: BLE001 - no WiFi, no token: fall back to the console for the default
+            if self.deleted_targets:
+                self.end_note(f"the API is not available ({type(e).__name__}: {e})", bad=True)
+        for saved in list(self.deleted_targets):
+            tid = saved.get("id", "")
+            if api is None:
+                self.end_note(f"could not put target '{tid}' back: no API. Its settings were: "
+                              f"{json.dumps(restore_body(saved))}", bad=True)
+                continue
+            try:
+                self._restore_target(api, saved)
+                self.deleted_targets.remove(saved)
+            except Exception as e:  # noqa: BLE001
+                self.end_note(f"could not put target '{tid}' back ({type(e).__name__}: {e}). Its settings were: "
+                              f"{json.dumps(restore_body(saved))}", bad=True)
+        if self.original_default:
+            try:
+                self._restore_default(api, self.original_default)
+            except Exception as e:  # noqa: BLE001
+                self.end_note(f"could not make '{self.original_default}' the default target again "
+                              f"({type(e).__name__}: {e})", bad=True)
+
+    def _restore_target(self, api: ApiClient, saved: dict) -> None:
+        tid = saved["id"]
+        body = restore_body(saved)
+        r = api.put(f"/targets/{tid}", body)
+        if r.status == 409 and r.error == "TARGET_LIMIT":
+            ids = [t.get("id") for t in (api.get("/targets").get("targets") or [])]
+            if self.tid not in ids:
+                raise TestFailed(f"DFU32 is full and the bench target '{self.tid}' isn't there to make room")
+            d = api.delete(f"/targets/{self.tid}")
+            if d.status != 204:
+                raise TestFailed(f"DELETE /targets/{self.tid} to make room -> {d.short()}")
+            self.end_note(f"deleted the bench target '{self.tid}' to make room for '{tid}'")
+            r = api.put(f"/targets/{tid}", body)
+        if r.status not in (200, 201):
+            raise TestFailed(f"PUT /targets/{tid} -> {r.short()}")
+        self.end_note(f"put target '{tid}' back with its saved settings")
+
+    def _restore_default(self, api: Optional[ApiClient], tid: str) -> None:
+        if api is not None:
+            lst = api.get("/targets")
+            if lst.status == 200:
+                ids = [t.get("id") for t in (lst.get("targets") or [])]
+                if tid not in ids:
+                    self.end_note(f"the owner's default target '{tid}' no longer exists: default left as "
+                                  f"'{lst.get('default')}'")
+                    return
+                if lst.get("default") == tid:
+                    self.end_note(f"'{tid}' is the default target, as before the run")
+                    return
+                r = api.post(f"/targets/{tid}/default")
+                if r.status != 200:
+                    raise TestFailed(f"POST /targets/{tid}/default -> {r.short()}")
+                self.end_note(f"made '{tid}' the default target again")
+                return
+        rows = self.console_targets()
+        if rows is not None and not any(r["id"] == tid for r in rows):
+            self.end_note(f"the owner's default target '{tid}' no longer exists: default left as it is")
+            return
+        out = self.con.cmd(f"target use {tid}", 10)
+        if "Default target:" not in out:
+            raise TestFailed(f"`target use {tid}`: {out.strip().splitlines()[:1]}")
+        self.end_note(f"made '{tid}' the default target again (`target use` on the console)")
 
     def staged_matches(self) -> bool:
         st = parse_staged(self.con.cmd("staged", 60))
@@ -661,12 +853,16 @@ class Ctx:
     def console_flash(self, extra: str = "", *, wait: Optional[int] = None, start_ota: bool = True,
                       lora: bool = False, hint: str = "", until: Optional[Callable[[int], bool]] = None) -> dict:
         wait = wait or self.args.start_ota_timeout
+        # The console flashes its default target. A target made over the API (sections 3-4)
+        # doesn't become the default when the owner already has one, so make it so first.
+        self.use_bench_target_console()
         if start_ota:
             self.prime_repeater(lora=lora)
         mark = self.con.mark()
         line = f"flash --yes --wait {wait} {extra}".strip()
         start = self.con.send(line)
-        hit = self.con.wait_line(r"Waiting up to \d+ s for|failed checks|No target MAC|Busy:", 60, since=mark)
+        hit = self.con.wait_line(r"Waiting up to \d+ s for|failed checks|BOARD_MISMATCH|No target MAC|Busy:", 60,
+                                 since=mark)
         if hit and "Waiting up to" in hit[1].text:
             if start_ota:
                 self.start_ota(lora=lora, hint=hint,
@@ -876,6 +1072,53 @@ class Ctx:
         return box.get("ip")
 
 
+# ---- targets ------------------------------------------------------------------------------
+
+_TARGET_ROW = re.compile(r"^([* ]) (\S+)\s+(\S+)\s+(\S+)\s+(.*)$")
+_MAC = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+
+
+def parse_target_list(out: str) -> list[dict]:
+    """`target list` rows: `* <id> <mac|-> <board|-> <last ok|->`, `*` marking the default."""
+    rows = []
+    for line in out.splitlines():
+        m = _TARGET_ROW.match(line)
+        if not m or not (m.group(3) == "-" or _MAC.match(m.group(3))):
+            continue  # the header, the summary line, logs
+        dash = lambda v: "" if v == "-" else v  # noqa: E731
+        rows.append({"id": m.group(2), "mac": dash(m.group(3)).upper(), "board": dash(m.group(4)),
+                     "last_ok": dash(m.group(5).strip()), "default": m.group(1) == "*"})
+    return rows
+
+
+FULL_HINT = ": free a slot, or pass --allow-delete-target to let the bench delete one and put it back afterwards"
+
+# What GET /targets/{id} returns but PUT doesn't take (or takes and ignores).
+READ_ONLY_TARGET_FIELDS = ("last_ok_version", "last_ok_at", "last_run", "default")
+
+
+def restore_body(saved: dict) -> dict:
+    """A saved target (GET /targets/{id}) as a PUT body that re-creates it."""
+    return {k: v for k, v in saved.items() if k not in READ_ONLY_TARGET_FIELDS}
+
+
+def pick_target_to_delete(rows: list[dict], keep: str) -> Optional[str]:
+    """Which target to delete to make room for `keep`: the last non-default one, else any other."""
+    others = [r for r in rows if r.get("id") and r["id"] != keep]
+    if not others:
+        return None
+    plain = [r for r in others if not r.get("default")]
+    return (plain or others)[-1]["id"]
+
+
+def mac_matches(addr: str, mac: str) -> bool:
+    """addr is `mac` or `mac`+1 (the last byte wraps), as DFU32's matches_target compares them."""
+    a, m = addr.upper(), mac.upper()
+    if not (_MAC.match(a) and _MAC.match(m)):
+        return False
+    return a == m or a == f"{m[:15]}{(int(m[15:], 16) + 1) & 0xFF:02X}"
+
+
 # ---- report -----------------------------------------------------------------------------
 
 
@@ -887,7 +1130,7 @@ def write_report(ctx: Ctx, started: float, finished: bool) -> Path:
             "duration_s": round(time.time() - started), "finished": finished, "dfu32_version": ctx.fw_version,
             "layout": ctx.layout.name if ctx.layout else "", "image_version": ctx.site.version,
             "image_sha256": ctx.site.sha256, "board": ctx.args.board, "target_id": ctx.tid,
-            "debug_build_used": ctx.debug_build, "counts": counts}
+            "debug_build_used": ctx.debug_build, "counts": counts, "after_run": list(ctx.end_notes)}
     data = {"meta": meta, "results": [r.__dict__ for r in ctx.results]}
     (ctx.out / "report.json").write_text(ctx.redact(json.dumps(data, indent=2, default=str)) + "\n")
 
@@ -909,6 +1152,8 @@ def write_report(ctx: Ctx, started: float, finished: bool) -> Path:
         if r.data.get("table"):
             md += ["", *r.data["table"]]
         md.append("")
+    if ctx.end_notes:
+        md += ["## After the run: the owner's targets", ""] + [f"- {n}" for n in ctx.end_notes] + [""]
     md.append("Logs: `serial.log` (everything DFU32 printed), `http.log` (every API call), `report.json`.")
     path = ctx.out / "report.md"
     path.write_text(ctx.redact("\n".join(md)) + "\n")
@@ -989,8 +1234,25 @@ def run_checks(ctx: Ctx, selected: list[TestDef], hooks: dict) -> bool:
                 print(f"  section teardown failed: {e}", flush=True)
     except KeyboardInterrupt:
         interrupted = True
+    if not end_of_run(ctx, interrupted):
+        interrupted = True
     write_report(ctx, started, not interrupted)
     return not interrupted
+
+
+def end_of_run(ctx: Ctx, interrupted: bool) -> bool:
+    """Puts the owner's targets back (Ctx.restore_targets). Never raises; False on a second Ctrl+C."""
+    ctx.result = None  # notes from here on go to ctx.end_notes, not to the last check
+    try:
+        if interrupted and (ctx.deleted_targets or ctx.original_default):
+            cleanup(ctx, interrupted)  # the console at its prompt and no job running, so the API takes edits
+        ctx.restore_targets()
+    except KeyboardInterrupt:
+        ctx.end_note("putting the owner's targets back was interrupted with Ctrl+C", bad=True)
+        return False
+    except Exception as e:  # noqa: BLE001 - a bug here must not cost the report
+        ctx.end_note(f"putting the owner's targets back failed ({type(e).__name__}: {e})", bad=True)
+    return True
 
 
 _CRASH = re.compile(r"Guru Meditation|panic|abort\(\)|assert|Backtrace|stack overflow|overflow|Rebooting|"

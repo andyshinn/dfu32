@@ -44,6 +44,7 @@ add_executable(dfu_proto_tests
     test_stage_writer.cpp
     test_staging_format.cpp
     test_target_config.cpp
+    test_target_table.cpp
     test_transfer.cpp
     test_url.cpp
 )

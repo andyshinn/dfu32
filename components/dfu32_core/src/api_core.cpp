@@ -7,6 +7,7 @@
 #include "dfu32_core/json.hpp"
 #include "dfu32_core/manifest.hpp"
 #include "dfu32_core/target_config.hpp"
+#include "dfu32_core/target_table.hpp"
 
 namespace dfu32::api {
 
@@ -75,6 +76,7 @@ RouteMatch match_route(std::string_view uri) {
         else if (n == 3 && s[2] == "stage") m.route = Route::TargetStage;
         else if (n == 3 && s[2] == "flash") m.route = Route::TargetFlash;
         else if (n == 3 && s[2] == "runs") m.route = Route::TargetRuns;
+        else if (n == 3 && s[2] == "default") m.route = Route::TargetDefault;
         if (m.route == Route::NotFound) m.id.clear();
     }
     return m;
@@ -95,6 +97,7 @@ bool method_allowed(Route r, Method m) noexcept {
         case Route::TargetCheck:
         case Route::TargetStage:
         case Route::TargetFlash:
+        case Route::TargetDefault:
         case Route::JobAbort:
         case Route::BleScan:
         case Route::Reboot:
@@ -201,7 +204,20 @@ std::string parse_staging_upload(std::string_view uri, StagingUpload& out) {
     if (!query_text(uri, "name", name)) return "name: malformed %-escape";
     if (has_control(name)) return "name has control characters";
     out.source = clip_utf8(name.empty() ? std::string("upload") : "upload:" + name, kMaxUrlLen);
+
+    if (!query_text(uri, "target", out.target)) return "target: malformed %-escape";
+    if (auto e = validate_target_id(out.target); !e.empty()) return "target: " + e;
     return {};
+}
+
+const StoredTarget* staging_target_for(const TargetTable& table, std::string_view image_board) {
+    if (const StoredTarget* d = table.default_target(); d != nullptr && staged_board_ok(image_board, d->cfg.board)) {
+        return d;
+    }
+    for (const StoredTarget& st : table.targets()) {
+        if (staged_board_ok(image_board, st.cfg.board)) return &st;
+    }
+    return nullptr;
 }
 
 // ---- auth --------------------------------------------------------------------------
@@ -444,6 +460,13 @@ bool matches_target(const std::string& addr, const std::string& target_mac) {
     const std::string t = normalize_mac(target_mac);
     if (a.empty() || t.empty()) return false;
     return a == t || a == mac_plus_one(t);
+}
+
+std::string matching_target_id(const TargetTable& table, const std::string& addr) {
+    for (const StoredTarget& st : table.targets()) {
+        if (matches_target(addr, st.cfg.mac)) return st.id();
+    }
+    return {};
 }
 
 }  // namespace dfu32::api

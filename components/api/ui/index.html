@@ -147,7 +147,27 @@ async function act(btn, fn) {
 let status = null, cfg = null, view = "", timer = 0;
 const STATE_KIND = { IDLE: "", SUCCEEDED: "ok", STAGED: "ok", FAILED: "bad", AWAITING_TARGET: "info", DFU_RUNNING: "acc", RADIO_HANDOVER: "acc", RESTORING: "acc" };
 const active = (j) => j && !["IDLE", "SUCCEEDED", "FAILED", "STAGED"].includes(j.state);
-const targetId = () => status && status.targets && status.targets[0] ? status.targets[0].id : "";
+// The selected target: the one this page acts on, remembered per browser. It falls back
+// to the device's default target, then the first.
+const TGT_KEY = "dfu32.target";
+let selTid = "";
+try { selTid = localStorage.getItem(TGT_KEY) || ""; } catch (e) {}
+function selectTarget(id) { selTid = id; try { id ? localStorage.setItem(TGT_KEY, id) : localStorage.removeItem(TGT_KEY); } catch (e) {} }
+const targets = () => (status && status.targets) || [];
+const pickTarget = (ts) => ts.find((t) => t.id === selTid) || ts.find((t) => t.default) || ts[0] || null;
+const selTarget = () => pickTarget(targets());
+const targetId = () => { const t = selTarget(); return t ? t.id : ""; };
+const tlabel = (t) => t.name || t.id;
+const tpath = (id) => "/targets/" + encodeURIComponent(id);
+const goTo = (hash) => location.hash === hash ? route() : (location.hash = hash);
+// With 2+ targets: a select for the target this page acts on; after() redraws.
+function targetPicker(after, help) {
+  const ts = targets();
+  if (ts.length < 2) return null;
+  const sel = h("select", { onchange: () => { selectTarget(sel.value); after(); } }, ts.map((t) => h("option", { value: t.id }, tlabel(t) + (t.default ? " (default)" : ""))));
+  sel.value = targetId();
+  return h("div.row", { style: "margin-bottom:.7rem" }, opt("Target", help + " This browser remembers the choice; until one is made it is the default target.", sel));
+}
 
 async function refresh() {
   clearTimeout(timer);
@@ -199,20 +219,28 @@ function viewToken() {
 }
 
 // ---- status -----------------------------------------------------------------------------
-let checkResult = null, tcfg = null;
-// The target's own settings (authenticated): whether it has a manifest URL to fetch from.
+let checkResult = null, tcfg = null, tcfgFor = null;
+// The selected target's own settings (authenticated): whether it has a manifest URL to fetch from.
 async function viewStatus() {
-  const tid = targetId();
-  tcfg = tid ? await api("GET", "/targets/" + tid).catch(() => null) : null;
+  const tid = tcfgFor = targetId();
+  // Drop the previous target's settings at once: a status refresh during the
+  // GET would otherwise offer its source choices (manifest) for this target.
+  tcfg = null;
+  // Redraw now, so Check/Stage/Flash act on the new selection while the GET runs.
+  renderStatus();
+  const got = tid ? await api("GET", tpath(tid)).catch(() => null) : null;
+  if (tcfgFor !== tid) return;  // the selection moved again; that call renders
+  tcfg = got;
   renderStatus();
 }
 function renderStatus() {
   const j = status.job || {}, tid = targetId(), busy = active(j);
+  if (tcfgFor !== tid) return viewStatus();  // the selection moved (a target was added or deleted)
   const out = [];
   const sec = h("section", h("h2", "Job"));
   if (!j.id) sec.append(h("p.mute", "No job since boot."));
   else {
-    sec.append(h("div.row", badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]), h("span.mute", j.kind + " from " + j.source + (j.phase ? " · " + j.phase : ""))));
+    sec.append(h("div.row", badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]), h("span.mute", j.kind + (j.target && targets().length > 1 ? " of " + j.target : "") + " from " + j.source + (j.phase ? " · " + j.phase : ""))));
     if (j.bytes_total) {
       const pct = Math.min(100, Math.round(100 * j.bytes_done / j.bytes_total));
       sec.append(h("div.bar", h("i", { style: "width:" + pct + "%" })), h("div.small.mute", kB(j.bytes_done) + " of " + kB(j.bytes_total) + " (" + pct + "%)" + (j.rate_bps ? " · " + (j.rate_bps / 1000).toFixed(1) + " kB/s" : "") + (j.attempt ? " · attempt " + j.attempt + " of " + j.max_attempts : "")));
@@ -231,38 +259,40 @@ function renderStatus() {
     const c = actionControls(tid, !!(tcfg && tcfg.manifest_url));
     c.bCheck.disabled = c.bStage.disabled = c.bFlash.disabled = busy;
     c.bAbort.disabled = !busy;
-    a.append(c.row1, c.row2);
+    a.append(c.pick || "", c.row1, c.row2);
     if (!c.fetches) a.append(h("p.mute.small", "The target has no manifest URL, so it flashes the staged image. ", status.staged ? "Add a manifest URL to fetch images from a server." : [h("a", { href: "#image" }, "Upload one"), " first, or add a manifest URL to fetch images from a server."]));
-    if (checkResult) {
-      const r = checkResult;
+    if (checkResult && checkResult.tid === tid) {
+      const r = checkResult.r;
       a.append(h("h3", "Manifest"), dl([["Version", r.version + (r.update_available ? " (new)" : " (already flashed)")], ["For ID", (r.boards || []).join(", ") + (r.board_ok ? (r.target_board ? "" : " (the target has no ID: not compared)") : " — does not include " + r.target_board)], ["Image", r.bin ? kB(r.bin.size) + " · sha256 " + short(r.bin.sha256) : ""], ["Staged", r.staged_same ? "same image" : r.staged_version || "nothing"], ["Created", r.created], ["Notes", r.notes]]));
       if (!r.board_ok) a.append(note("bad", "This manifest is not for the target's ID (\"" + r.target_board + "\"): staging and flashing would stop with BOARD_MISMATCH."));
     }
   }
   out.push(a);
 
-  const s = status.staged, t = status.targets && status.targets[0];
+  const s = status.staged, t = selTarget();
   out.push(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Staged image"), h("a", { href: "#image" }, s ? "Manage" : "Upload one")), h("div", { style: "margin-top:.75rem" }, s ? stagedInfo(s) : h("p.mute", "Nothing staged."))));
-  if (t) out.push(h("section", h("h2", "Target"), dl([["ID", t.board || h("span.mute", "not set (images aren't compared with it)")], ["Last flashed", t.last_ok_version ? t.last_ok_version + (t.last_ok_at ? " · " + when(t.last_ok_at) : "") : "never (by this DFU32)"]])));
+  if (t) out.push(h("section", h("h2", "Target"), dl([["Target", tlabel(t) + (t.default ? " (default)" : "")], ["ID", t.board || h("span.mute", "not set (images aren't compared with it)")], ["Last flashed", t.last_ok_version ? t.last_ok_version + (t.last_ok_at ? " · " + when(t.last_ok_at) : "") : "never (by this DFU32)"]])));
   $("#main").replaceChildren(...out);
 }
 
-// The action controls are built once per target and reused, so the 1 s status
-// refresh never resets what someone is in the middle of choosing.
+// The action controls are built once per target (and target list) and reused, so the
+// 1 s status refresh never resets what someone is in the middle of choosing.
 let actCtl = null;
 function actionControls(tid, fetches) {
-  if (actCtl && actCtl.tid === tid && actCtl.fetches === fetches) return actCtl;
-  const c = { tid, fetches };
+  const sig = JSON.stringify(targets().map((t) => [t.id, t.name, t.default]));
+  if (actCtl && actCtl.tid === tid && actCtl.fetches === fetches && actCtl.sig === sig) return actCtl;
+  const c = { tid, fetches, sig };
+  c.pick = targetPicker(() => { checkResult = null; viewStatus(); }, "The saved repeater Check, Stage and Flash act on.");
   c.force = h("input", { type: "checkbox" });
   c.source = h("select", fetches ? h("option", { value: "manifest" }, "manifest (fetch)") : null, h("option", { value: "staged" }, "staged image"));
   c.wifiOff = h("input", { type: "checkbox", checked: cfg && cfg.wifi_off_dfu });
   c.arm = h("input", { type: "number", min: 10, max: 3600, placeholder: "default", style: "width:7rem" });
-  c.bCheck = h("button", { onclick: () => act(c.bCheck, async () => { checkResult = await api("POST", "/targets/" + tid + "/check"); renderStatus(); }) }, "Check");
-  c.bStage = h("button", { onclick: () => act(c.bStage, async () => { await api("POST", "/targets/" + tid + "/stage", { force: c.force.checked }); toast("Staging…"); refresh(); }) }, "Stage");
+  c.bCheck = h("button", { onclick: () => act(c.bCheck, async () => { checkResult = { tid, r: await api("POST", tpath(tid) + "/check") }; renderStatus(); }) }, "Check");
+  c.bStage = h("button", { onclick: () => act(c.bStage, async () => { await api("POST", tpath(tid) + "/stage", { force: c.force.checked }); toast("Staging…"); refresh(); }) }, "Stage");
   c.bFlash = h("button.pri", { onclick: () => act(c.bFlash, async () => {
     const body = { source: c.source.value, wifi_off: c.wifiOff.checked };
     if (c.arm.value) body.arm_timeout_s = Number(c.arm.value);
-    await api("POST", "/targets/" + tid + "/flash", body);
+    await api("POST", tpath(tid) + "/flash", body);
     toast("Armed: run start ota on the repeater");
     refresh();
   }) }, "Flash");
@@ -307,8 +337,13 @@ function stagedInfo(s) {
   return dl([["Version", s.version], ["ID", s.board || "not set (not compared with the target's)"], ["Size", kB(s.bin_size)], ["SHA-256", short(s.sha256)], ["Staged", when(s.staged_at)], ["From", stagedFrom(s.manifest_url)]]);
 }
 
+// The board check note for the selected target (POST /staging?target= checks against it).
+function boardNote(t) {
+  if (!t) return "No target is saved, so nothing is compared: check that it's built for the repeater's board.";
+  if (!t.board) return "The target " + tlabel(t) + " has no ID, so DFU32 can't tell whether the image fits it: check that it's built for the repeater's board.";
+  return "DFU32 checks it against the target " + tlabel(t) + ", whose ID is " + t.board + ": an image with another ID is refused. With the ID left blank nothing is compared.";
+}
 function viewImage() {
-  const t = status.targets && status.targets[0];
   const out = h("div");
   function staged() {
     const s = status.staged, msg = h("div");
@@ -326,18 +361,21 @@ function viewImage() {
     let pkg;
     try { pkg = await loadPackage(f); } catch (e) { return form.replaceChildren(note("bad", f.name + " can't be staged: " + e.message + ".")); }
     const ver = h("input", { value: window.dfu32Staging.guessVersion(f.name) });
-    const board = h("input", { placeholder: (t && t.board) || "rak4631" });
+    const board = h("input"), chk = h("p.mute.small");
+    const upd = () => { const t = selTarget(); board.placeholder = (t && t.board) || "rak4631"; chk.textContent = boardNote(t); };
+    upd();
     const prog = h("div");
     const go = h("button.pri", { onclick: () => {
       const v = ver.value.trim(), b = board.value.trim();
       if (!v || new TextEncoder().encode(v).length > 63) return toast("The version must be 1-63 bytes");
       if (active(status.job)) return toast("Wait for the job to finish");
+      const t = selTarget();
       if (status.staged && !confirm("Replace the staged image (" + status.staged.version + ")?")) return;
       go.disabled = true;
       const bar = h("i", { style: "width:0" });
       prog.replaceChildren(h("div.bar", bar), h("div.small.mute", "Uploading…"));
       const x = new XMLHttpRequest();
-      x.open("POST", "/api/v1/staging?dat=" + window.dfu32Staging.hex(pkg.dat) + "&version=" + encodeURIComponent(v) + (b ? "&board=" + encodeURIComponent(b) : "") + "&name=" + encodeURIComponent(clipName(f.name)));
+      x.open("POST", "/api/v1/staging?dat=" + window.dfu32Staging.hex(pkg.dat) + "&version=" + encodeURIComponent(v) + (b ? "&board=" + encodeURIComponent(b) : "") + "&name=" + encodeURIComponent(clipName(f.name)) + (t ? "&target=" + encodeURIComponent(t.id) : ""));
       if (token) x.setRequestHeader("Authorization", "Bearer " + token);
       x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(100 * e.loaded / e.total) + "%"; };
       x.onload = async () => {
@@ -355,7 +393,7 @@ function viewImage() {
       h("div.form", { style: "margin-top:.7rem" },
         opt("Version", ["A label for this image: DFU32 records it with each flash and shows it as the last version flashed. It is guessed from a MeshCore file name; otherwise type what the repeater's ", h("code", "ver"), " command prints for this build, such as v1.18.0-81dbae5. 1–63 characters."], ver),
         opt("ID (optional)", "What this image is built for, such as rak4631. If the target has an ID too, the two must match (capitals don't matter) or DFU32 refuses to flash. If either is blank, nothing is compared. The package doesn't carry it: type the same ID you gave the target.", board)),
-      h("p.mute.small", "Check that it's built for the repeater's board: unless both this image and the target have an ID, DFU32 can't tell."),
+      targetPicker(upd, "The saved repeater whose ID (and max app size) the image is checked against. The image isn't tied to it: it is checked again against whichever target flashes it."), chk,
       h("div.row", go), prog);
   }
   file.addEventListener("change", () => { if (file.files[0]) pick(file.files[0]); file.value = ""; });
@@ -374,31 +412,73 @@ function viewImage() {
 // The firmware's tuning defaults (dfu32_core/target_config.hpp), shown as placeholders.
 const kDef = { interval_ms: 30, prn: 4, max_attempts: 3, arm_timeout_s: 600, start_settle_ms: 500, prn_timeout_ms: 5000 };
 const NUM = ["addr_type", "max_app_size", "prn", "interval_ms", "max_attempts", "arm_timeout_s", "start_settle_ms", "prn_timeout_ms"];
-async function viewTarget() {
-  const tid = targetId();
-  let t = {};
-  if (tid) t = await api("GET", "/targets/" + tid).catch((e) => { toast(e.message); return {}; });
+// The API id for a new target: a slug of its name, else of its ID (board), else
+// "target"; made unique with -2, -3…; up to 31 of a-z, 0-9 and '-'.
+function newTargetId(name, board, taken) {
+  const slug = (s) => s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 31).replace(/-+$/, "");
+  const base = slug(name) || slug(board) || "target";
+  for (let n = 1; ; n++) {
+    const sfx = n > 1 ? "-" + n : "", id = base.slice(0, 31 - sfx.length).replace(/-+$/, "") + sfx;
+    if (!taken.includes(id)) return id;
+  }
+}
+// #target edits the selected target; #target/new (or no target yet) makes a new one.
+async function viewTarget(arg) {
+  const r = await api("GET", "/targets").catch((e) => { toast(e.message); return null; });
+  if (!r) return;
+  const ts = r.targets || [], max = r.max_targets || 1, full = ts.length >= max;
+  const cur = arg === "new" ? null : pickTarget(ts), tid = cur ? cur.id : "", t = cur || {};
+  const out = [];
+  if (ts.length) {
+    const add = h("button", { disabled: full || !cur, onclick: () => goTo("#target/new") }, "Add target");
+    out.push(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Saved targets"), h("span.mute.small", ts.length + " of " + max), add),
+      h("div", { style: "margin-top:.4rem" }, ts.map((x) => {
+        const mk = h("button", { hidden: x.default, onclick: () => act(mk, async () => {
+          await api("POST", tpath(x.id) + "/default"); toast(tlabel(x) + " is now the default target"); await refresh(); viewTarget(arg);
+        }) }, "Make default");
+        return h("div.row", { style: "padding:.5rem 0;border-bottom:1px solid var(--line)" },
+          h("div", { style: "flex:1;min-width:12rem" }, h("div", x.id === tid ? h("b", tlabel(x)) : tlabel(x), x.name ? [" ", h("span.mute.small", x.id)] : "", x.default ? [" ", badge("default", "ok")] : ""),
+            h("div.small.mute", x.mac ? h("code", x.mac) : "no MAC", " · ID " + (x.board || "not set"))),
+          h("button", { disabled: x.id === tid, onclick: () => { selectTarget(x.id); goTo("#target"); } }, "Edit"), mk);
+      })),
+      full ? h("p.mute.small", "DFU32 holds up to " + max + " targets: delete one to add another.") : null));
+  }
   const f = {};
   const field = (k, label, help, attrs = {}) => { f[k] = h("input", Object.assign({ value: t[k] ?? "" }, attrs)); return opt(label, help, f[k]); };
   // A tuning knob: blank means DFU32's default, shown as the placeholder (Save sends it).
   const knob = (k, label, def, min, max, help) => field(k, label, help, { type: "number", min, max, placeholder: def });
   f.addr_type = h("select", h("option", { value: 1 }, "random"), h("option", { value: 0 }, "public"));
   f.addr_type.value = String(t.addr_type ?? 1);
-  // The UI's one "ID" is the API's `board`; the API's own id (the {id} in the path) stays as it is.
+  // The first target is always the default, so the box is ticked and fixed then.
+  const isDef = !!t.default || !ts.length;
+  const mkDef = h("input", { type: "checkbox", checked: isDef, disabled: isDef });
+  // The UI's one "ID" is the API's `board`. The API's own id (the {id} in the path) is
+  // derived from the name for a new target and stays as it is afterwards.
+  const newId = () => newTargetId(f.name.value.trim(), f.board.value.trim(), ts.map((x) => x.id));
+  const idText = h("code", tid || "target");
   const save = h("button.pri", { onclick: () => act(save, async () => {
-    const body = {};
+    const body = {}, id = tid || newId();
     // A cleared knob goes back to its default (the placeholder it then shows); max app size to 0.
     for (const [k, el] of Object.entries(f)) { const v = el.value.trim(); body[k] = !NUM.includes(k) ? v : v === "" ? kDef[k] ?? 0 : Number(v); }
-    await api("PUT", "/targets/" + encodeURIComponent(tid || "target"), body);
-    toast("Saved"); await refresh(); viewTarget();
+    if (mkDef.checked && !t.default) body.default = true;
+    if (new TextEncoder().encode(body.name).length > 63) return toast("The name must be at most 63 bytes (letters with accents take 2, many other scripts 3)");
+    await api("PUT", tpath(id), body);
+    selectTarget(id);
+    toast(tid ? "Saved" : "Saved as " + id); await refresh(); goTo("#target");
   }) }, "Save");
-  const del = h("button.dng", { hidden: !tid, onclick: () => { if (confirm("Delete the target and its settings?")) act(del, async () => { await api("DELETE", "/targets/" + tid); toast("Deleted"); await refresh(); viewTarget(); }); } }, "Delete");
-  const form = h("section", h("h2", tid ? "Target" : "New target"),
+  const del = h("button.dng", { hidden: !tid, onclick: () => { if (confirm("Delete the target " + tlabel(t) + " and its settings?")) act(del, async () => {
+    await api("DELETE", tpath(tid)); selectTarget(""); await refresh();
+    const d = targets().find((x) => x.default);
+    toast(t.default ? "Deleted. " + (d ? tlabel(d) + " is now the default target." : "No targets are left.") : "Deleted", 6000); goTo("#target");
+  }); } }, "Delete");
+  const form = h("section", h("h2", tid ? "Target " + tlabel(t) : "New target"),
     h("div.form",
       field("mac", "App MAC (required)", ["The repeater's Bluetooth address while it runs its normal firmware: the only setting a flash needs. Run ", h("code", "start ota"), " on the repeater (USB console, or remotely from the companion app): its reply shows the address. Or run it and press Scan below, then Use as target. DFU32 finds the bootloader at this address or the next one up."], { placeholder: "AA:BB:CC:DD:EE:FF" }),
       opt("Address type", "The kind of Bluetooth address the MAC is. nRF52 boards, MeshCore repeaters among them, use random. Scan below shows the type for each device and Use as target fills it in.", f.addr_type),
       field("board", "ID (optional)", "A name for what this repeater is, such as its board: rak4631. Choose it yourself. When the staged image has an ID too (the one typed when staging it on the Image page, or the boards a manifest lists), the two must match (capitals don't matter) or DFU32 refuses to flash, which keeps another board's image off this repeater. If either is blank, nothing is compared. Up to 31 characters, no spaces.", { placeholder: "rak4631" }),
-      field("manifest_url", "Manifest URL (optional)", ["Only for fetching images from a server: the http:// address of the manifest.json that ", h("code", "tools/dfu32_pack.py"), " writes next to the image, on a web server DFU32 can reach. HTTPS isn't supported. Leave it blank to upload images on the Image page instead."], { placeholder: "http://server/rak4631/manifest.json" })),
+      field("manifest_url", "Manifest URL (optional)", ["Only for fetching images from a server: the http:// address of the manifest.json that ", h("code", "tools/dfu32_pack.py"), " writes next to the image, on a web server DFU32 can reach. HTTPS isn't supported. Leave it blank to upload images on the Image page instead."], { placeholder: "http://server/rak4631/manifest.json" }),
+      field("name", "Name (optional)", "What this page calls the target, such as attic or roof; up to 63 bytes (63 plain letters, fewer with accents or other scripts). " + (tid ? "The API and the console know it by its id, " + tid + ", which stays as it is." : "The API and the console know it by an id made from the name (or else the ID): a-z, 0-9 and '-'."), { placeholder: "attic", maxlength: 63 })),
+    h("div.row", { style: "margin-top:.7rem" }, opt("Make this the default", "The target the console's check, stage, probe and flash commands act on, and the one this page picks until a browser chooses another. The first target is always the default; deleting the default makes the first remaining target the default.", mkDef, true)),
     h("details", h("summary", "Tuning"), h("p.mute.small", "The defaults suit most repeaters. Clear a field and save to go back to its default."), h("div.form",
       knob("interval_ms", "Interval (ms)", kDef.interval_ms, 15, 100, "The BLE connection interval DFU32 asks for during the transfer, 15–100 ms, rounded down to a multiple of 1.25; default 30. Shorter is faster (about one packet per interval): on the bench 15, 20 and 30 worked, and the OTAFIX bootloader lost the link at 11.25 and below, so 15 is the floor. A run's page shows the interval each attempt used."),
       knob("prn", "PRN (1-8)", kDef.prn, 1, 8, "Packets DFU32 sends before it waits for the bootloader's receipt; default 4. Lower is slower but easier on the bootloader, which holds only 8 packets while it writes flash. After a lost link, the next attempt halves it (down to 2)."),
@@ -407,9 +487,12 @@ async function viewTarget() {
       knob("start_settle_ms", "START settle (ms)", kDef.start_settle_ms, 0, 5000, "Pause between the START command and the image size that follows it, 0–5000 ms; default 500. The bootloader silently drops the size if it arrives too soon. Raise it only if runs fail right at START."),
       knob("prn_timeout_ms", "Receipt timeout (ms)", kDef.prn_timeout_ms, 500, 60000, "How long DFU32 waits for each receipt before the attempt counts as failed, 500–60000 ms; default 5000. Raise it if a run's log shows receipt timeouts while the link is still up."),
       knob("max_app_size", "Max app size (B)", "0 = default", 0, 16777216, "The largest image DFU32 will send, in bytes. 0 (or blank) uses the default for the image's chip: 798720 for nRF52. Change it only if this repeater's bootloader leaves a different amount of room for the app; it must be a multiple of 4."))),
-    h("div.row", { style: "margin-top:.8rem" }, save, del),
-    tid ? null : h("p.mute.small", "DFU32 v1 handles one target. Saving creates it. Only the MAC is needed to flash an image you upload on the Image page; a manifest URL lets DFU32 fetch images itself."));
-  $("#main").replaceChildren(form, scanSection((mac, type) => { f.mac.value = mac; f.addr_type.value = type === "public" ? "0" : "1"; toast("Filled in the MAC: save to keep it"); }));
+    h("div.row", { style: "margin-top:.8rem" }, save, del, tid ? null : h("button", { hidden: !ts.length, onclick: () => goTo("#target") }, "Cancel")),
+    tid ? null : h("p.mute.small", "Saving creates it as ", idText, ". Only the MAC is needed to flash an image you upload on the Image page; a manifest URL lets DFU32 fetch images itself."));
+  if (!tid) { const upd = () => idText.textContent = newId(); f.name.addEventListener("input", upd); f.board.addEventListener("input", upd); upd(); }
+  if (!tid && full) form.prepend(note("warn", "DFU32 already holds " + max + " targets, the most it can: delete one first."));
+  out.push(form, scanSection((mac, type) => { f.mac.value = mac; f.addr_type.value = type === "public" ? "0" : "1"; toast("Filled in the MAC: save to keep it"); }));
+  $("#main").replaceChildren(...out);
 }
 function scanSection(use) {
   const secs = h("input", { type: "number", value: 10, min: 1, max: 30, style: "width:5rem" });
@@ -421,7 +504,7 @@ function scanSection(use) {
     if (!r.devices.length) return list.replaceChildren(h("p.mute", "Nothing found. " + (r.hint || "")));
     list.replaceChildren(h("table", h("tr", h("th", "Address"), h("th", "Name"), h("th", "RSSI"), h("th", "Looks like"), h("th", "")),
       r.devices.map((d) => h("tr", h("td", h("code", d.addr)), h("td", d.name || h("span.mute", "—")), h("td", d.rssi + " dBm"),
-        h("td", d.dfu ? d.dfu.replace("_", " ") : "", d.matches_target ? [" ", badge("target", "ok")] : ""),
+        h("td", d.dfu ? d.dfu.replace("_", " ") : "", d.matches_target ? [" ", badge("target " + d.matches_target, "ok")] : ""),
         h("td", h("button", { onclick: () => use(d.addr, d.addr_type) }, "Use as target"))))));
   }) }, "Scan");
   return h("section", h("h2", "Find the repeater"),
@@ -434,11 +517,12 @@ function scanSection(use) {
 const RESULT_KIND = { SUCCEEDED: "ok", FAILED: "bad", ABORTED_BY_REBOOT: "warn" };
 async function viewRuns(seq) {
   if (seq) return viewRun(seq);
-  const tid = targetId();
+  const t = selTarget(), tid = t ? t.id : "";
   if (!tid) return $("#main").replaceChildren(h("section", h("p", "No target yet.")));
-  const r = await api("GET", "/targets/" + tid + "/runs").catch((e) => { toast(e.message); return { runs: [] }; });
+  const r = await api("GET", tpath(tid) + "/runs").catch((e) => { toast(e.message); return { runs: [] }; });
   r.runs = r.runs || [];
-  $("#main").replaceChildren(h("section", h("h2", "Runs"), !r.runs.length ? h("p.mute", "No runs recorded yet.") :
+  $("#main").replaceChildren(h("section", h("h2", "Runs" + (targets().length > 1 ? " of " + tlabel(t) : "")),
+    targetPicker(() => viewRuns(), "The saved repeater whose runs are listed."), !r.runs.length ? h("p.mute", "No runs recorded yet.") :
     h("table", h("tr", h("th", "#"), h("th", "Result"), h("th", "When"), h("th", "Took"), h("th", "Image / error")),
       r.runs.map((x) => h("tr.click", { onclick: () => location.hash = "#runs/" + x.seq },
         h("td", x.seq), h("td", badge(String(x.result).toLowerCase().replace(/_/g, " "), RESULT_KIND[x.result]), x.target_erased === "yes" && x.result !== "SUCCEEDED" ? [" ", badge("erased", "warn")] : ""),

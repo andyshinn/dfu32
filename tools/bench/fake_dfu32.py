@@ -18,6 +18,7 @@ import secrets
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
@@ -26,14 +27,17 @@ FLASH_S = 0.8  # simulated transfer time (x3 with WiFi on, so /status can sample
 
 
 class FakeDfu32:
-    def __init__(self, *, mac: str = "F4:1C:36:A7:33:95", board_profile: str = "feather_esp32_v2") -> None:
+    def __init__(self, *, mac: str = "F4:1C:36:A7:33:95", board_profile: str = "feather_esp32_v2",
+                 max_targets: int = 5) -> None:
         self.lock = threading.RLock()
         self.out: "queue.Queue[bytes]" = queue.Queue()
         self.inbuf = b""
         self.board_profile = board_profile
-        self.mac = mac
-        self.target = {"id": "", "mac": "", "board": "", "manifest_url": "", "name": "", "last_ok_version": "",
-                       "addr_type": 1}
+        self.mac = mac  # the repeater's MAC: what it advertises in OTA mode
+        # Stored targets by id, in slot order (insertion order here), and the default's id.
+        self.targets: dict[str, dict] = {}
+        self.default_id: Optional[str] = None
+        self.max_targets = max_targets
         self.staged: Optional[dict] = None
         self.runs: list[dict] = []
         self.next_seq = 1
@@ -103,6 +107,64 @@ class FakeDfu32:
             threading.Thread(target=self.reboot, args=("hard reset",), daemon=True).start()
             return
         object.__setattr__(self, name, value)
+
+    # ---- targets (SPEC.md 9.1: up to max_targets, one of them the default) --------------------
+
+    @staticmethod
+    def blank_target(tid: str) -> dict:
+        return {"id": tid, "name": "", "mac": "", "addr_type": 1, "board": "", "manifest_url": "", "max_app_size": 0,
+                "last_ok_version": "", "last_ok_at": 0}
+
+    @property
+    def target(self) -> dict:
+        """The default target (what the console acts on); an unsaved blank one when there is none."""
+        t = self.targets.get(self.default_id or "")
+        return t if t is not None else self.blank_target("")
+
+    def full_reason(self) -> str:
+        n = self.max_targets
+        return f"this DFU32 holds at most {n} target{'' if n == 1 else 's'}: delete one first"
+
+    def add_target(self, rec: dict, *, make_default: bool = False) -> Optional[str]:
+        """Stores a new target; returns the refusal (full) or None. The first target is the default."""
+        if len(self.targets) >= self.max_targets:
+            return self.full_reason()
+        self.targets[rec["id"]] = rec
+        if make_default or self.default_id not in self.targets:
+            self.default_id = rec["id"]
+        return None
+
+    def remove_target(self, tid: str) -> bool:
+        """Deletes a target; deleting the default makes the first remaining target the default."""
+        if self.targets.pop(tid, None) is None:
+            return False
+        if self.default_id == tid:
+            self.default_id = next(iter(self.targets), None)
+        return True
+
+    def rename_target(self, old: str, new: str) -> str:
+        if new != old and new in self.targets:
+            return f"a target with id '{new}' already exists"
+        self.targets = {(new if k == old else k): v for k, v in self.targets.items()}
+        self.targets[new]["id"] = new
+        if self.default_id == old:
+            self.default_id = new
+        return ""
+
+    def target_view(self, t: dict) -> dict:
+        return {**t, "default": t["id"] == self.default_id}
+
+    @staticmethod
+    def valid_id(tid: str) -> bool:
+        return 0 < len(tid) <= 31 and all(c.islower() or c.isdigit() or c == "-" for c in tid) and tid.isascii()
+
+    @staticmethod
+    def mac_matches(addr: str, mac: str) -> bool:
+        """addr is the target's MAC or MAC+1 (its bootloader), as matches_target compares them."""
+        if len(addr) != 17 or len(mac) != 17:
+            return False
+        a, m = addr.upper(), mac.upper()
+        return a == m or a == f"{m[:15]}{(int(m[15:], 16) + 1) & 0xFF:02X}"  # the last byte wraps, as on the device
 
     def emit(self, text: str) -> None:
         self.out.put(text.encode())
@@ -202,26 +264,108 @@ class FakeDfu32:
             self.emit("  connected  no, last disconnect reason 201\n")
         self.emit("  reconnects 0\n  clock      synced (SNTP)\n")
 
+    def print_target(self, t: dict) -> None:
+        dflt = " (default target)" if t["id"] == self.default_id else ""
+        self.emit(f"  id         {t['id']}{dflt}\n")
+        typ = "random" if t["addr_type"] else "public"
+        self.emit(f"  mac        {t['mac'] or '(not set)'}" +
+                  (f" ({typ}), bootloader after reset at x or y" if t["mac"] else "") + "\n")
+        self.emit(f"  board      {t['board'] or '(not set: images are not compared with it)'}\n")
+        self.emit(f"  manifest   {t['manifest_url'] or '(not set)'}\n")
+        self.emit(f"  max app    {str(t['max_app_size']) + ' B' if t['max_app_size'] else 'default'}\n")
+
+    def show_default(self) -> None:
+        if self.default_id not in self.targets:
+            self.emit("No target yet. Use: target <MAC> [random|public]\n")
+            return
+        self.print_target(self.targets[self.default_id])
+        n = len(self.targets)
+        pos = list(self.targets).index(self.default_id) + 1
+        self.emit(f"  default    yes ({pos} of {n} target{'' if n == 1 else 's'}; max {self.max_targets})"
+                  f"{': `target list` shows all' if n > 1 else ''}\n")
+
     def c_target(self, argv) -> None:
-        t = self.target
-        if len(argv) >= 2:
-            f, v = argv[1], argv[2] if len(argv) > 2 else ""
-            if f == "board":
+        f = argv[1] if len(argv) >= 2 else ""
+        v = argv[2] if len(argv) >= 3 else ""
+        if not f:
+            self.show_default()
+        elif f == "list":
+            if not self.targets:
+                self.emit("No targets yet. Use: target <MAC> [random|public], or target add <id> [<MAC> "
+                          "[random|public]]\n")
+                return
+            self.emit(f"  {'ID':<20}  {'MAC':<17}  {'BOARD':<16}  LAST OK\n")
+            for t in self.targets.values():
+                self.emit(f"{'*' if t['id'] == self.default_id else ' '} {t['id']:<20}  {t['mac'] or '-':<17}  "
+                          f"{t['board'] or '-':<16}  {t['last_ok_version'] or '-'}\n")
+            self.emit(f"{len(self.targets)} of {self.max_targets} targets. * = default: check, stage, probe, flash "
+                      "and blreset use it (`target use <id>`).\n")
+        elif f == "use":
+            if v not in self.targets:
+                self.emit(f"No target '{v}' (`target list` shows the ids).\n")
+                return
+            self.default_id = v
+            self.emit(f"Default target: '{v}'. check, stage, probe, flash and blreset use the default target.\n")
+            self.show_default()
+        elif f == "add":
+            if not self.valid_id(v):
+                self.emit("Not saved: id may contain only a-z, 0-9 and '-'\n")
+            elif v in self.targets:
+                self.emit(f"Not saved: a target with id '{v}' already exists (`target use {v}` makes it the default).\n")
+            else:
+                rec = self.blank_target(v)
+                if len(argv) >= 4:
+                    rec.update(mac=argv[3].upper(), addr_type=0 if len(argv) >= 5 and argv[4] == "public" else 1)
+                err = self.add_target(rec, make_default=True)
+                if err:
+                    self.emit(f"Not saved: {err}\n")
+                    return
+                self.emit(f"Target '{v}' added; it is now the default target.\n")
+                self.show_default()
+        elif f in ("clear", "delete"):
+            tid = v if f == "delete" else (self.default_id or "")
+            if f == "clear" and not tid:
+                self.emit("No target to clear.\n")
+            elif not self.remove_target(tid):
+                self.emit(f"No target '{tid}' (`target list` shows the ids).\n")
+            elif not self.targets:
+                self.emit(f"Target '{tid}' deleted. No targets left.\n")
+            else:
+                self.emit(f"Target '{tid}' deleted. The default target is now '{self.default_id}'.\n")
+        else:
+            # Everything else edits the default target; with none, it creates one (id `target`).
+            t = dict(self.targets[self.default_id]) if self.default_id in self.targets else self.blank_target("target")
+            if f == "id":
+                if not self.valid_id(v):
+                    self.emit("Not saved: id may contain only a-z, 0-9 and '-'\n")
+                    return
+                if self.default_id in self.targets:
+                    err = self.rename_target(self.default_id, v)
+                    if err:
+                        self.emit(f"Not saved: {err}\n")
+                        return
+                    self.show_default()
+                    return
+                t["id"] = v
+            elif f == "board":
                 t["board"] = v
             elif f == "url":
                 t["manifest_url"] = v
-            elif f == "id":
-                t["id"] = v
-            elif f == "clear":
-                self.target = {k: "" for k in t}
-                self.emit("Target cleared.\n")
-                return
+            elif f == "maxapp":
+                t["max_app_size"] = int(v, 0)
+            elif len(f) == 17 and f.count(":") == 5:
+                t.update(mac=f.upper(), addr_type=0 if v == "public" else 1)
             else:
-                t["mac"] = f.upper()
-        self.emit(f"  id         {t['id'] or 'default'}{' (default)' if not t['id'] else ''}\n")
-        self.emit(f"  mac        {t['mac'] or '(not set)'}" + (" (random), bootloader after reset at x or y" if t["mac"] else "") + "\n")
-        self.emit(f"  board      {t['board'] or '(not set: images are not compared with it)'}\n")
-        self.emit(f"  manifest   {t['manifest_url'] or '(not set)'}\n  max app    default\n")
+                self.emit(f"Bad MAC or field '{f}'. Use: target [list | use <id> | add <id> ...]\n")
+                return
+            if t["id"] in self.targets:
+                self.targets[t["id"]].update(t)
+            else:
+                err = self.add_target(t)
+                if err:
+                    self.emit(f"Not saved: {err}\n")
+                    return
+            self.show_default()
 
     def c_check(self, argv) -> None:
         try:
@@ -303,7 +447,7 @@ class FakeDfu32:
         if not j.get("id"):
             self.emit("No job since boot.\n")
             return
-        self.emit(f"  job        #{j['id']} {j['kind']} ({j['source']}) for '{self.target['id']}'\n")
+        self.emit(f"  job        #{j['id']} {j['kind']} ({j['source']}) for '{j.get('target', '')}'\n")
         self.emit(f"  state      {j['state']}{' / ' + j['phase'] if j.get('phase') else ''}\n")
         if j.get("error"):
             self.emit(f"  error      {j['error']}\n")
@@ -315,8 +459,16 @@ class FakeDfu32:
         if self.lease:
             self.emit(f"Busy: {self.lease} is using BLE/staging. Wait for it (see `job`), or `job abort`.\n")
             return
+        if not self.target["mac"]:
+            self.emit("No target MAC set. Use: target <MAC> [random|public]\n")
+            return
         if not self.staged:
             self.emit("Staged image failed checks: nothing staged. Nothing was touched.\n")
+            return
+        t = self.target
+        if self.staged["board"] and t["board"] and self.staged["board"].lower() != t["board"].lower():
+            self.emit(f"BOARD_MISMATCH: the staged image is for ID \"{self.staged['board']}\", target "
+                      f"'{t['id'] or 'target'}' is \"{t['board']}\". Nothing was touched.\n")
             return
         interval = int(argv[argv.index("--interval") + 1]) if "--interval" in argv else 30
         wifi_on = not ("--wifi" in argv and argv[argv.index("--wifi") + 1] == "off")  # on by default
@@ -328,7 +480,8 @@ class FakeDfu32:
             if wifi_off:
                 self.emit("WiFi is off until the flash finishes.\n")
                 self.wifi_stopped = True
-            r = self.do_flash(interval, abort=self.console_abort, trigger="console", wifi_off=wifi_off)
+            r = self.do_flash(interval, abort=self.console_abort, trigger="console", wifi_off=wifi_off,
+                              t=self.target)
             if wifi_off:
                 self.wifi_stopped = False
                 self.emit("WiFi restored.\n")
@@ -350,10 +503,11 @@ class FakeDfu32:
         self.ota_mode.set()
 
     def do_flash(self, interval: int, *, abort, trigger: str, wifi_off: bool, source: str = "staged",
-                 on_progress=None, on_seen=None, seconds: float = FLASH_S) -> dict:
-        """Waits for `start ota` (or the bootloader), transfers, records the run."""
+                 on_progress=None, on_seen=None, seconds: float = FLASH_S, t: Optional[dict] = None) -> dict:
+        """Waits for `start ota` (or the bootloader), transfers, records the run against target `t`."""
+        t = t if t is not None else self.target
         gen = self.gen
-        self._job_marker = {"target": self.target["mac"], "version": self.staged["version"], "transferring": False}
+        self._job_marker = {"target": t["mac"], "version": self.staged["version"], "transferring": False}
 
         def check() -> None:
             if self.gen != gen:
@@ -388,12 +542,13 @@ class FakeDfu32:
         attempts.append({"n": len(attempts) + 1, "interval_ms": interval, "prn": 4, "outcome": "OK", "kind": "NONE",
                          "bytes_acked": 413680})
         self._job_marker = None
-        rec = self.add_run({"result": "SUCCEEDED", "error": "", "failure_kind": "NONE", "target": self.target["mac"],
+        rec = self.add_run({"result": "SUCCEEDED", "error": "", "failure_kind": "NONE", "target": t["mac"],
                             "image_version": self.staged["version"], "duration_ms": 38400, "target_erased": "yes",
-                            "wifi_off": wifi_off, "target_id": self.target["id"], "trigger": trigger, "source": source,
+                            "wifi_off": wifi_off, "target_id": t["id"], "trigger": trigger, "source": source,
                             "started_unix": int(time.time()), "rate_x10_kBps": 124 if wifi_off else 118,
                             "attempts": attempts})
-        self.target["last_ok_version"] = self.staged["version"]
+        t["last_ok_version"] = self.staged["version"]
+        t["last_ok_at"] = int(time.time())
         return rec
 
     def add_run(self, rec: dict) -> dict:
@@ -415,13 +570,14 @@ class FakeDfu32:
         raw = self.fetch(url)
         return json.loads(raw), hashlib.sha256(raw).hexdigest()
 
-    def stage(self, url: str, force: bool):
+    def stage(self, url: str, force: bool, t: Optional[dict] = None):
+        t = t if t is not None else self.target
         try:
             m, msha = self.fetch_manifest(url)
         except _FetchError as e:
             return str(e), False, 0
-        if self.target["board"] and self.target["board"] not in m["boards"]:
-            return f"BOARD_MISMATCH: manifest is for {m['boards']}, target is \"{self.target['board']}\"", False, 0
+        if t["board"] and t["board"] not in m["boards"]:
+            return f"BOARD_MISMATCH: manifest is for {m['boards']}, target is \"{t['board']}\"", False, 0
         if not force and self.staged and self.staged["sha256"] == m["bin"]["sha256"]:
             return "", True, 0
         base = url.rsplit("/", 1)[0]
@@ -432,9 +588,9 @@ class FakeDfu32:
         if hashlib.sha256(data).hexdigest() != m["bin"]["sha256"]:
             self.staged = None
             return "HASH_MISMATCH: downloaded image doesn't match the manifest", False, 0
-        board = self.target["board"] or (m["boards"][0] if len(m["boards"]) == 1 else "")
+        board = t["board"] or (m["boards"][0] if len(m["boards"]) == 1 else "")
         self.staged = {"sha256": m["bin"]["sha256"], "version": m["version"], "board": board,
-                       "target": self.target["id"], "size": len(data), "manifest_sha256": msha}
+                       "target": t["id"], "size": len(data), "manifest_sha256": msha}
         return "", False, len(data)
 
     # ---- API ----------------------------------------------------------------------------------
@@ -466,7 +622,7 @@ class FakeDfu32:
                     self.connection.close()
                     return
                 n = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(n).decode() if n else ""
+                body = self.rfile.read(n) if n else b""
                 status, obj, hdrs = dev.handle(method, self.path, body, self.headers.get("Authorization", ""))
                 raw = json.dumps(obj).encode() if obj is not None else b""
                 self.send_response(status)
@@ -522,18 +678,87 @@ class FakeDfu32:
         return 401, {"error": "UNAUTHORIZED"}, {}
 
     def status_obj(self) -> dict:
-        t = self.target
+        # Public, so never the MACs.
+        targets = [{"id": t["id"], "name": t["name"], "board": t["board"], "last_ok_version": t["last_ok_version"],
+                    "last_ok_at": t["last_ok_at"], "default": t["id"] == self.default_id}
+                   for t in self.targets.values()]
         return {"device": {"name": "DFU32", "version": "v0.3.0-sim", "uptime_s": self.uptime(), "claimed": self.claimed,
                            "hostname": self.hostname, "unix_time": int(time.time()),
                            "wifi": {"connected": True, "rssi": -52, "ip": "127.0.0.1"}, "busy": self.lease},
                 "job": dict(self.job),
-                "targets": [{"id": t["id"], "board": t["board"], "last_ok_version": t["last_ok_version"]}] if t["id"] else [],
+                "targets": targets,
+                "default_target": self.default_id if self.targets else None,
                 "staged": self.staged}
 
-    def handle(self, method: str, path: str, body: str, authz: str):
+    @staticmethod
+    def no_target(tid: str):
+        return 404, {"error": "NOT_FOUND", "detail": f"no target '{tid}'"}, {}
+
+    def put_target(self, tid: str, data: dict):
+        """PUT /targets/{id}: a new id is always a new target (409 TARGET_LIMIT when full)."""
+        if not self.valid_id(tid):
+            return 400, {"error": "BAD_REQUEST", "detail": "id may contain only a-z, 0-9 and '-'"}, {}
+        if not isinstance(data, dict) or ("default" in data and not isinstance(data["default"], bool)):
+            return 400, {"error": "BAD_REQUEST", "detail": "body must be a JSON object; default a boolean"}, {}
+        mac = data.get("mac")
+        if mac and not (isinstance(mac, str) and len(mac) == 17 and mac.count(":") == 5):
+            return 400, {"error": "BAD_REQUEST", "detail": "MAC must look like AA:BB:CC:DD:EE:FF"}, {}
+        existing = self.targets.get(tid)
+        rec = dict(existing) if existing else self.blank_target(tid)
+        rec.update({k: v for k, v in data.items() if k in rec and k not in ("id", "last_ok_version", "last_ok_at")})
+        rec["mac"] = rec["mac"].upper()
+        if existing:
+            existing.update(rec)
+            if data.get("default") is True:
+                self.default_id = tid
+            return 200, self.target_view(existing), {}
+        err = self.add_target(rec, make_default=data.get("default") is True)
+        if err:
+            return 409, {"error": "TARGET_LIMIT", "detail": err}, {}
+        return 201, self.target_view(rec), {}
+
+    def upload_staging(self, query: str, body: bytes):
+        """POST /staging: checked against target= when given, else the default or the first target that fits."""
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+        board = q.get("board", "")
+        ok = lambda t: not board or not t["board"] or board.lower() == t["board"].lower()  # noqa: E731
+        against = None
+        if q.get("target"):
+            against = self.targets.get(q["target"])
+            if against is None:
+                return self.no_target(q["target"])
+            if not ok(against):
+                return 422, {"error": "BOARD_MISMATCH", "detail": f"the image is for ID \"{board}\", target "
+                                                                  f"'{against['id']}' is \"{against['board']}\""}, {}
+        elif self.targets:
+            dflt = self.targets.get(self.default_id or "")
+            against = dflt if dflt is not None and ok(dflt) else next((t for t in self.targets.values() if ok(t)), None)
+            if against is None:
+                return 422, {"error": "BOARD_MISMATCH", "detail": f"the image is for ID \"{board}\", and no stored "
+                                                                  "target has that ID"}, {}
+        if self.lease:
+            return 409, {"error": "BUSY"}, {}
+        sha = hashlib.sha256(body).hexdigest()
+        if q.get("sha256") and q["sha256"] != sha:
+            return 422, {"error": "HASH_MISMATCH", "detail": "the body doesn't match sha256"}, {}
+        if against is not None and against["max_app_size"] and len(body) > against["max_app_size"]:
+            return 413, {"error": "IMAGE_TOO_LARGE", "detail": f"over target '{against['id']}''s max_app_size"}, {}
+        self.staged = {"sha256": sha, "version": q.get("version", ""), "board": board, "target": "",
+                       "size": len(body), "manifest_sha256": ""}
+        self.log("api", f"image upload: \"{self.staged['version']}\", {len(body)} B, checked against "
+                        f"{against['id'] if against else 'no target'}")
+        return 200, {"target": "", "board": board, "version": self.staged["version"], "bin_size": len(body),
+                     "sha256": sha, "manifest_url": "upload:" + q.get("name", "")}, {}
+
+    def handle(self, method: str, path: str, body, authz: str):
         path, _, query = path.partition("?")
         parts = [p for p in path.split("/") if p][2:]  # drop api, v1
-        data = json.loads(body) if body.strip() else {}
+        if isinstance(body, str):
+            body = body.encode()
+        if parts == ["staging"] and method == "POST":
+            data: dict = {}
+        else:
+            data = json.loads(body) if body.strip() else {}
         if parts == ["status"]:
             return 200, self.status_obj(), {}
         if parts == ["claim"]:
@@ -544,34 +769,39 @@ class FakeDfu32:
         if denied:
             return denied
         if parts == ["targets"]:
-            return 200, {"targets": [dict(self.target)] if self.target["id"] else []}, {}
+            return 200, {"targets": [self.target_view(t) for t in self.targets.values()],
+                         "default": self.default_id if self.targets else None, "max_targets": self.max_targets}, {}
         if parts[:1] == ["targets"] and len(parts) >= 2:
             tid = parts[1]
             if len(parts) == 2:
                 if method == "GET":
-                    if tid != self.target["id"]:
-                        return 404, {"error": "NOT_FOUND"}, {}
+                    if tid not in self.targets:
+                        return self.no_target(tid)
                     last = next((r for r in reversed(self.runs) if r.get("target_id") == tid), None)
-                    return 200, {**self.target, "last_run": last}, {}
+                    return 200, {**self.target_view(self.targets[tid]), "last_run": last}, {}
                 if self.lease:
                     return 409, {"error": "BUSY"}, {}
                 if method == "DELETE":
-                    self.target = {k: "" for k in self.target}
-                    return 204, None, {}
-                if self.target["id"] and self.target["id"] != tid:
-                    return 409, {"error": "TARGET_LIMIT"}, {}
-                existed = bool(self.target["id"])
-                self.target.update({k: v for k, v in data.items() if k in self.target})
-                self.target["id"] = tid
-                return (200 if existed else 201), dict(self.target), {}
+                    return (204, None, {}) if self.remove_target(tid) else self.no_target(tid)
+                return self.put_target(tid, data)
             sub = parts[2]
+            if sub == "default" and method == "POST":
+                if self.lease:
+                    return 409, {"error": "BUSY"}, {}
+                if tid not in self.targets:
+                    return self.no_target(tid)
+                self.default_id = tid
+                return 200, {"default": tid}, {}
+            t = self.targets.get(tid)
+            if t is None:
+                return self.no_target(tid)
             if sub == "check":
-                m, _ = self.fetch_manifest(self.target["manifest_url"])
+                m, _ = self.fetch_manifest(t["manifest_url"])
                 same = bool(self.staged and self.staged["sha256"] == m["bin"]["sha256"])
                 return 200, {"version": m["version"],
-                             "board_ok": not self.target["board"] or self.target["board"] in m["boards"],
-                             "staged_same": same, "last_ok_version": self.target["last_ok_version"],
-                             "update_available": m["version"] != self.target["last_ok_version"]}, {}
+                             "board_ok": not t["board"] or t["board"] in m["boards"],
+                             "staged_same": same, "last_ok_version": t["last_ok_version"],
+                             "update_available": m["version"] != t["last_ok_version"]}, {}
             if sub == "runs":
                 return 200, {"runs": [r for r in reversed(self.runs) if r.get("target_id") == tid]}, {}
             if sub in ("stage", "flash"):
@@ -583,7 +813,7 @@ class FakeDfu32:
                             "bytes_total": 0, "rate_bps": 0, "target_erased": False, "wifi_off": False}
                 self.lease = "job"
                 self.job_abort = threading.Event()
-                threading.Thread(target=self.run_job, args=(sub, data), daemon=True).start()
+                threading.Thread(target=self.run_job, args=(sub, data, t), daemon=True).start()
                 return 202, {"job": jid, "state": "FETCHING", "poll": "/api/v1/status"}, {}
         if parts == ["jobs", "current", "abort"]:
             if self.job.get("state") in ("IDLE", "STAGED", "SUCCEEDED", "FAILED"):
@@ -598,6 +828,8 @@ class FakeDfu32:
             r = next((x for x in self.runs if x["seq"] == int(parts[1])), None)
             return (200, {"run": r, "log": ""}, {}) if r else (404, {"error": "NOT_FOUND"}, {})
         if parts == ["staging"]:
+            if method == "POST":
+                return self.upload_staging(query, body)
             if method == "DELETE":
                 self.staged = None
                 return 204, None, {}
@@ -608,8 +840,10 @@ class FakeDfu32:
             time.sleep(min(2, data.get("duration_s", 8)) / 4)
             devs = []
             if self.ota_mode.is_set():
-                devs.append({"addr": self.target["mac"], "name": "T096_OTA", "rssi": -60, "dfu": "app_buttonless",
-                             "matches_target": self.target["id"]})
+                # matches_target: the first target (slot order) whose MAC is the address or address-1.
+                match = next((t["id"] for t in self.targets.values() if self.mac_matches(self.mac, t["mac"])), None)
+                devs.append({"addr": self.mac.upper(), "name": "T096_OTA", "rssi": -60, "dfu": "app_buttonless",
+                             "matches_target": match})
             return 200, {"devices": devs}, {}
         if parts == ["logs"]:
             since = int(query.split("=")[1]) if query.startswith("since=") else max(0, len(self.logs) - 20)
@@ -636,10 +870,10 @@ class FakeDfu32:
         with self.lock:
             self.job.update(kw)
 
-    def run_job(self, kind: str, data: dict) -> None:
+    def run_job(self, kind: str, data: dict, t: dict) -> None:
         try:
             if data.get("source") != "staged":
-                err, reused, _ = self.stage(data.get("url") or self.target["manifest_url"], data.get("force", False))
+                err, reused, _ = self.stage(data.get("url") or t["manifest_url"], data.get("force", False), t)
                 if err:
                     self.set_job(state="FAILED", error=err)
                     return
@@ -651,7 +885,7 @@ class FakeDfu32:
                 if not self.staged:
                     self.set_job(state="FAILED", error="NO_STAGED_IMAGE: BAD_MAGIC")
                     return
-                if self.staged["board"] and self.target["board"] and self.staged["board"] != self.target["board"]:
+                if self.staged["board"] and t["board"] and self.staged["board"] != t["board"]:
                     self.set_job(state="FAILED", error=f"BOARD_MISMATCH: staged image is for board "
                                                        f"\"{self.staged['board']}\"")
                     return
@@ -692,7 +926,7 @@ class FakeDfu32:
                     time.sleep(0.2)
 
             try:
-                rec = self.do_flash(20, abort=abort, trigger="api", wifi_off=wifi_off,
+                rec = self.do_flash(20, abort=abort, trigger="api", wifi_off=wifi_off, t=t,
                                     source=data.get("source", "manifest"), on_progress=prog, on_seen=seen,
                                     seconds=FLASH_S if wifi_off else 3 * FLASH_S)
             except _Rebooted:
@@ -703,11 +937,11 @@ class FakeDfu32:
                 src = data.get("source", "manifest")
                 if deadline.is_set():
                     rec = self.add_run({"result": "FAILED", "error": "DEADLINE_EXCEEDED: took too long",
-                                        "target_id": self.target["id"], "trigger": "api", "source": src,
+                                        "target_id": t["id"], "trigger": "api", "source": src,
                                         "started_unix": int(time.time()), "attempts": []})
                     self.set_job(state="FAILED", error="DEADLINE_EXCEEDED: took too long", run=rec["seq"])
                 elif timeout.is_set() and not self.job_abort.is_set():
-                    rec = self.add_run({"result": "FAILED", "error": "TARGET_NOT_FOUND", "target_id": self.target["id"],
+                    rec = self.add_run({"result": "FAILED", "error": "TARGET_NOT_FOUND", "target_id": t["id"],
                                         "trigger": "api", "source": src, "started_unix": int(time.time()),
                                         "attempts": []})
                     self.set_job(state="FAILED", error="TARGET_NOT_FOUND: no advert", run=rec["seq"])

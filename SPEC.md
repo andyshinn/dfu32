@@ -34,7 +34,7 @@ Statements marked **[verified]** were checked against the source of the referenc
 - On-device Tailscale (MicroLink). Dropped. Reach the device over the LAN or an existing subnet router.
 - HTTPS for artifact fetch and TLS for the API. v1 uses plain HTTP with SHA-256 integrity, which is sufficient on a trusted LAN. See §11.
 - Resuming a partial transfer. Every attempt restarts from START; the bootloader has no supported resume **[verified]**.
-- Fleet management. The data model is keyed by target ID from day one, but v1 caps it at **one target**.
+- Fleet management. DFU32 remembers several targets (up to `DFU32_MAX_TARGETS`, default 5, §9.1), one of them the default, but it flashes one at a time, from one staging slot that all of them share (§8).
 
 ## 3. System overview
 
@@ -51,7 +51,7 @@ Statements marked **[verified]** were checked against the source of the referenc
 
 ### 3.1 End-to-end flow ("arm, then wait")
 
-1. Operator: `POST /api/v1/targets/{id}/flash`. The UI has a **Flash** button.
+1. Operator: `POST /api/v1/targets/{id}/flash`. The UI has a **Flash** button for the selected target (§10.2).
 2. DFU32 fetches `manifest.json`. If its image matches what is already staged (same sha256), DFU32 reuses the staging partition. Otherwise it downloads `.bin`/`.dat` straight into the staging partition, streaming the SHA-256 as it goes, and verifies. With `source=staged`, DFU32 skips the fetch and uses the staged image after re-verifying it (works with no network, e.g. after a failed run).
 3. Prechecks run (§7.2). Any failure aborts. Nothing on the target has been touched.
 4. State becomes **AWAITING_TARGET**. The UI says "Ready, run `start ota` on the target now". DFU32 scans for up to `arm_timeout_s`, which defaults to 600 s. WiFi stays up during the scan.
@@ -297,7 +297,7 @@ A failure *before* START (scan, connect, buttonless, identify) doesn't touch the
 
 ## 7. Orchestrator (job state machine)
 
-There is one job at a time, globally. While a job is active, scan, stage and flash requests get `409 Busy`, and so do target `PUT`/`DELETE` and the console's BLE and staging commands (they share one device-wide lease, `components/job`). The live BLE monitor (§10.4) is the exception: it holds the lease as a preemptible holder and hands it over instead of causing a `409`.
+There is one job at a time, globally. While a job is active, scan, stage and flash requests get `409 Busy`, and so do target `PUT`/`DELETE`, `POST /targets/{id}/default` and the console's BLE and staging commands (they share one device-wide lease, `components/job`). The live BLE monitor (§10.4) is the exception: it holds the lease as a preemptible holder and hands it over instead of causing a `409`.
 
 ```mermaid
 stateDiagram-v2
@@ -399,9 +399,11 @@ If the manifest's `.bin` and `.dat` hashes equal the staged header's, the downlo
 
 Implemented as `dfu32::StagingWriter` (`components/dfu32_core`, host-tested against a NOR-flash model) over the partition and PSA SHA-256 adapters in `components/staging`.
 
-**Uploaded images.** The image can also be uploaded to DFU32 rather than fetched: `POST /api/v1/staging` (§10.1), which the web UI's **Image** view and `tools/dfu32_stage_image.py --upload` use. There is no manifest, so `StagingWriter::begin_upload` runs the checks that need only the `.dat` and the announced size (version 1–63 bytes, `.dat` layout and device type, word alignment, the size against the nRF52 limit — the target's `max_app_size` when set — and the staging capacity) before it erases anything. Steps 1–4 are the same. The `.bin`'s SHA-256 is optional (when the uploader gives one, a mismatch is `HASH_MISMATCH`); the `.dat`'s CRC16 over the `.bin` is the end-to-end check, and the header records the SHA-256 of what arrived. The header names no target, the board only if the uploader gave one, `manifest_url` = `upload:<file name>`, and `manifest_sha256` stays zero. Like an image staged over USB (§9.4), it isn't tied to the target, so any target can flash it with `source=staged`.
+**Uploaded images.** The image can also be uploaded to DFU32 rather than fetched: `POST /api/v1/staging` (§10.1), which the web UI's **Image** view and `tools/dfu32_stage_image.py --upload` use. There is no manifest, so `StagingWriter::begin_upload` runs the checks that need only the `.dat` and the announced size (version 1–63 bytes, `.dat` layout and device type, word alignment, the size against the nRF52 limit — the `max_app_size` of the target the upload is checked against (§10.1), when there is one — and the staging capacity) before it erases anything. Steps 1–4 are the same. The `.bin`'s SHA-256 is optional (when the uploader gives one, a mismatch is `HASH_MISMATCH`); the `.dat`'s CRC16 over the `.bin` is the end-to-end check, and the header records the SHA-256 of what arrived. The header names no target, the board only if the uploader gave one, `manifest_url` = `upload:<file name>`, and `manifest_sha256` stays zero. Like an image staged over USB (§9.4), it isn't tied to a target, so any target can flash it with `source=staged`.
 
-Before use (flash with `source=staged`), DFU32 re-verifies `header_crc32` and the bin SHA-256, and checks the header's `board` against the target's (ASCII case-insensitive, `BOARD_MISMATCH`). That check applies only when both are set: an image staged over USB from the installer page (§9.4) carries no board, and a target with no board accepts any image (`dfu32::staged_board_ok`).
+Before use (flash with `source=staged`), DFU32 re-verifies `header_crc32` and the bin SHA-256, checks the size against the `max_app_size` of the target being flashed (`IMAGE_TOO_LARGE`), and checks the header's `board` against that target's (ASCII case-insensitive, `BOARD_MISMATCH`). That check applies only when both are set: an image staged over USB from the installer page (§9.4) carries no board, and a target with no board accepts any image (`dfu32::staged_board_ok`).
+
+There is one staging partition for all targets. Staging an image for one target replaces whatever was staged for another; the header's `target_id` only records who staged it. Whichever target flashes the image, these checks run against that target.
 
 Sizes: **832 KB** on the 4 MB layout (header + 802 816 B max app + slack); **1 MB** on 8 MB+.
 
@@ -420,7 +422,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `ntp_server` | str | Default `pool.ntp.org` |
 | `wifi_off_dfu` | u8 | Default WiFi-off behaviour during the transfer. Default 0 (WiFi stays on; bench comparison in §7.1). Per-request override: `wifi_off`. |
 | `dfu_deadline` | u32 | Cap on the §7.3 run deadline (`dfu_deadline_max_s`), default 1200, 120–7200. |
-| `tgt.0.*` | — | Target 0 (v1 cap = 1). Stored as one JSON record under key `tgt0` (M3a, `components/config`), so a save is a single atomic NVS write; an M1 target (`tgt0_mac`, `tgt0_type`) is read until the first save. Keys missing from an older record take their defaults: |
+| `tgt0` … `tgt9` | str (JSON) | One target per slot, up to `DFU32_MAX_TARGETS` of them (§12.3). Each is one JSON record (`components/config`), so saving a target is a single atomic NVS write. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
 | ↳ `board` | str ≤ 31 | free-form; the web UI's one **ID** field. Compared with the image's (`manifest.boards`, the staged header's `board`) when both are set; blank on either side means no comparison |
@@ -429,6 +431,17 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | ↳ `max_app_size` | u32 | default 798 720 |
 | ↳ `prn`, `interval_ms`, `max_attempts`, `arm_timeout_s`, `start_settle_ms`, `prn_timeout_ms` | u16 | tuning knobs: 4 (1–8), 30 (15–100), 3 (1–10), 600 (10–3600), 500 (0–5000), 5000 (500–60000) |
 | ↳ `last_ok_version`, `last_ok_at` | str, u64 | updated on success |
+| `tgt_def` | str | id of the default target. When it is missing or names no stored target, the first target in slot order is the default. |
+
+**Targets.** The logic is `dfu32::TargetTable` (`components/dfu32_core`, host-tested); `components/config` only reads and writes NVS.
+- A new target takes the lowest free slot. Lists (`GET /targets`, `/status`, `target list`) are in slot order, so a new target can come before an older one.
+- The first target created becomes the default. Deleting the default makes the first remaining target the default. Renaming the default keeps it the default.
+- A change writes or erases one record, then `tgt_def` if the default changed. A power cut between the two leaves a usable default, because a stale `tgt_def` falls back to the first target. That fallback can name a different target than intended (after renaming the default, the default can move to the first target); `target`, the UI and `GET /targets` show which one is the default, so check it after an interrupted rename. A stale `tgt_def` is pinned to the current default before a new or renamed target could take its id.
+- Loading reads all ten slots, whatever the cap. Lowering `DFU32_MAX_TARGETS` in a later build hides nothing; it only stops new targets being added. A record with nothing set, a corrupt record and a second record with the same id are skipped with a log line.
+- Migration: a single-target build's `tgt0` loads as slot 0 unchanged and, with no `tgt_def`, is the default. An M1 target (`tgt0_mac`, `tgt0_type`) is read as slot 0 until slot 0 is first written or erased. A record with no id has the id `target`.
+- Size: a record is about 360 B (about 710 B with every string at its limit). Ten worst-case records take less than two of the six 4 KB pages of the 4 MB boards' 24 KB `nvs` partition.
+
+**Console.** `check`, `stage`, `probe`, `flash` and `blreset` act on the default target, and so do `target <MAC> [random|public]`, `target board`, `target url`, `target maxapp` and `target id <slug>` (which renames it). With no target stored, those create one with the id `target` (`target id <slug>` creates it with that id). `target` shows the default target and how many are stored. `target list` shows them all, with `*` on the default. `target use <id>` makes a target the default. `target add <id> [<MAC> [random|public]]` creates a target and makes it the default, so the commands after it edit the new one; it is refused when the limit is reached. `target clear` deletes the default target and says which one is the default now; `target delete <id>` deletes any target.
 
 ### 9.2 Provisioning (decided: Improv, both Serial and BLE)
 
@@ -450,7 +463,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
   - One task owns all Improv state (open, close, RPC writes, the advert, the connection attempt); NimBLE callbacks, the button and the console only post to it, and the 5-minute timer's messages carry a generation so a stale one is ignored.
   - Closing stops advertising, drops a connected client and releases the lease. The GATT service stays registered (removing it means a GATT reset); without advertising nobody finds it.
 - DFU32 joins WPA2-Personal and open networks; WPA2/WPA3 transition-mode networks connect over WPA2. WPA3-only and Enterprise networks aren't supported (left out to fit the 4 MB layout, §12.1).
-- Everything else (target, manifest URL, tuning) is set in the web UI or with `PUT /api/v1/targets/{id}`.
+- Everything else (targets, manifest URLs, tuning) is set in the web UI, with `PUT /api/v1/targets/{id}`, or with the console's `target` command (§9.1).
 
 ### 9.3 API token (decided: optional, off until turned on)
 
@@ -475,9 +488,9 @@ A static page on GitHub Pages flashes DFU32 and sets its WiFi in one session. It
 
 - **Page:** `web/index.html` plus a little CSS. No framework and no build step. ESP Web Tools is pinned to an exact version and served from Pages, not a CDN: `tools/fetch_esp_web_tools.py` downloads its npm tarball, checks a pinned SHA-256 and copies `dist/web` (and its Apache-2.0 LICENSE) to `vendor/esp-web-tools-<version>/` next to the page. An `integrity` attribute on the entry script wouldn't cover the chunks it loads with dynamic `import()`, and those include the flasher stubs. A board picker sets the button's `manifest` attribute. With no board chosen, the button still connects, using a board-less manifest built in the page (a `data:` URL with no builds). When the device answers Improv, the page reads the board from the device info's hardware variant (§9.2) and, in ESP Web Tools' `checkSameFirmware` override, fills that manifest with the board's builds (part paths made absolute) and selects the board on the page, so an installed DFU32 can be updated, re-provisioned or opened without picking its board. A device that doesn't report a board (not DFU32, or older firmware) can still be managed, but installing fails with ESP Web Tools' "not supported" error until a board is chosen. The board ids are the `DFU32_BOARD` profile names, and the page links each manifest relatively, as `manifest-<board>.json`. A board the user picks is saved in a first-party cookie, `dfu32_board` (400 days, `SameSite=Lax`, `Secure` on HTTPS), and selected again on the next visit; the page reads the cookie back and only says it's saved if it stuck. A board reported by a device is selected but never saved, so connecting a different board once doesn't replace the saved one. "Forget saved board" under the picker clears it and returns to the board-less manifest. A board reported by the device also overrides a different board selected on the page: the override replaces every key of the manifest object ESP Web Tools holds with the reported board's manifest, marked `dfu32_board`, and doesn't depend on the page's selection, because the dialog downloads its original manifest again after installing and that copy needs the same override. So a remembered board can't put another profile's image on a running DFU32.
 - **Manifests:** one per board profile (`manifest-<board>.json`), because ESP Web Tools picks a build by `chipFamily`, and two profiles are `ESP32-S3`. `tools/dfu32_web_manifest.py` generates them from each build's `flasher_args.json`:
-  - `name: "DFU32"`, `version` (the firmware's `git describe` string, as in `/api/v1/status`), and `new_install_prompt_erase: true`. ESP Web Tools also offers the erase option when reinstalling, so the page warns next to the button that erasing removes WiFi, the token and the target;
+  - `name: "DFU32"`, `version` (the firmware's `git describe` string, as in `/api/v1/status`), and `new_install_prompt_erase: true`. ESP Web Tools also offers the erase option when reinstalling, so the page warns next to the button that erasing removes WiFi, the token and the targets;
   - an optional `dfu32_erase_notice` (text), copied from the board's partition table entry in the baseline below. When present, the page shows it above the install button;
-  - the separate parts at their flash offsets (bootloader, partition table, otadata, app), **not** the merged `.bin`. They are deployed under `fw/<version>/<board>/`, so a manifest can't be paired with parts a browser cached from another build (Pages allows 10 minutes of caching). A raw merged image fills the gaps between parts with `0xFF`, so flashing it wipes NVS (WiFi, token hash, target) and `runlog`. Separate parts leave NVS, `runlog` and `staging` alone. Writing `ota_data_initial.bin` sends the next boot to `ota_0`, which holds the new app, even if a self-OTA had been running from `ota_1`.
+  - the separate parts at their flash offsets (bootloader, partition table, otadata, app), **not** the merged `.bin`. They are deployed under `fw/<version>/<board>/`, so a manifest can't be paired with parts a browser cached from another build (Pages allows 10 minutes of caching). A raw merged image fills the gaps between parts with `0xFF`, so flashing it wipes NVS (WiFi, token hash, targets) and `runlog`. Separate parts leave NVS, `runlog` and `staging` alone. Writing `ota_data_initial.bin` sends the next boot to `ota_0`, which holds the new app, even if a self-OTA had been running from `ota_1`.
 - **Partition layout is part of the update contract.** Settings survive an update only if `nvs`, `runlog` and `staging` keep their offsets and sizes. A release that moves or resizes any of them is breaking and needs an erase: its release notes and the page must say so. `tools/check_partitions.py --baseline partitions/baseline.json` checks those three partitions per table against the committed baseline, so CI fails on an accidental change. A deliberate change updates the baseline in the same PR (`--write-baseline`) and sets that table's `erase_notice`, which reaches the page through the manifest. Clear it again once devices on the old layout are no longer expected to update from the page.
 - **Versions:** the site's own build is the default, and **Choose a version** also offers the newest 20 published releases (pre-releases included, labelled). The pages job downloads each release's `dfu32-<board>-merged.bin` assets (server side: the page can't, for want of CORS) and `tools/dfu32_web_versions.py` splits each back into the four parts, found the way the ROM and ESP-IDF find them: the bootloader at the chip's offset (`0x1000` on ESP32 and S2, `0x2000` on C5, `0x0` otherwise, checked against the image header's chip id), the partition table at `0x8000`, and otadata and the first app partition (factory, else `ota_0`) from that table; the bootloader and app are cut to the lengths their image headers give. They go to `fw/<version>/<board>/` with a `manifest.json` beside them, and `versions.json` lists every version (the site's build first, then releases newest first) with its channel (`main`, `release`, `pre-release`), tag and manifest per board. The version is the app's own (`esp_app_desc_t`), as `/api/v1/status` reports it. An image that isn't DFU32 or carries another board's tag is left out with a warning, never failing the deploy. A release whose `nvs`, `runlog` or `staging` sits elsewhere than in the site's build for the same board gets a `dfu32_erase_notice`. With no board chosen, the board-less manifest carries the chosen version, and `checkSameFirmware` fills it from that version's manifest for the reported board, which the page fetches when the version is chosen. A version with no build for the chosen board is greyed out. Nothing about the version is stored.
 - **Custom build:** to try an unreleased build (a pull request's) from the page, **Custom build from a .zip…** takes the `dfu32-<board>` artifact of a CI run, or any zip of an IDF build directory. `web/custom-build.js` (loaded only then) does what `dfu32_web_manifest.py` does, in the browser: it finds the single `flasher_args.json`, reads the board from `sdkconfig` (`CONFIG_DFU32_BOARD_NAME`) and the version from `project_description.json` (else the app), checks the app's project and board tag, and lists the same four parts. The button gets a `data:` manifest whose part paths are `blob:` URLs of the parts, marked `dfu32_custom` and `dfu32_board`. It is never swapped for a published build: if the device reports another board, the override empties its builds, so ESP Web Tools refuses to install it, and the page says why. A debug build (`CONFIG_DFU32_DEBUG_ENDPOINTS`) is allowed with a warning. The page compares the build's `nvs`, `runlog` and `staging` with the site's build for that board and shows an erase notice if they moved. `tools/test_custom_build_js.py` runs it under Node against the Python tool.
@@ -512,10 +525,13 @@ Conventions (M3b):
 - Errors are `{"error":"<CODE>","detail":"…"}` with `400` (bad body: unknown fields are refused), `401` (missing or wrong token, only while a token is set), `404`, `405`, `408` (body stalled for more than about 10 s), `409` (`BUSY`, `TARGET_LIMIT`, `ALREADY_CLAIMED`, `NO_JOB`), `411` (chunked bodies aren't supported: send `Content-Length`), `413` (bodies are capped at 4 KB), `429 RATE_LIMITED`, `422` / `502` (a `check` that fails: §13.3 code, `502` for `HTTP_ERROR`), `503` (`check` without WiFi).
 - Bodies are optional: no body means all defaults.
 - `check` and `ble/scan` can take seconds, so they run on a separate task (httpd async requests), one at a time (`409` while one is running); the server keeps answering `/status` and `abort`. Both hold the device-wide lease while they work, so `check` never compares against a staging header a stage job is rewriting.
-- Target `PUT`/`DELETE` hold the lease too: `409` while a job, a console flash/probe or a scan is running.
-- `PUT /targets/{id}` merges the fields present into the stored record (a new target starts from defaults), so a `GET` result can be sent back: `last_ok_*` are read-only and ignored. A target created on the console has no id and adopts the first id it is `PUT` under.
+- Target `PUT`/`DELETE` and `POST /targets/{id}/default` hold the lease too: `409` while a job, a console flash/probe or a scan is running.
+- `PUT /targets/{id}` merges the fields present into the stored record (a new target starts from defaults), so an entry from `GET /targets` or a `GET /targets/{id}` answer can be sent back: `last_ok_*` and `last_run` are read-only and ignored, `id` must match the URL, and `"default"` is acted on as below. A `PUT` to an id that isn't stored always creates a new target: `201`, or `409 TARGET_LIMIT` when `DFU32_MAX_TARGETS` targets are already stored (the detail says so). An update answers `200`. Either way the answer is the stored record with `"default"`. A body with `"default": true` makes the target the default; `"default": false` changes nothing (make another target the default instead).
+- `GET /targets` returns `{"targets":[…],"default":"<id>","max_targets":N}`: every record with its `id` and `"default"`, in slot order; `default` is `null` with no targets. `GET /targets/{id}` is the record with `id`, `"default"` and `last_run`.
+- `DELETE /targets/{id}` answers `204`. Deleting the default makes the first remaining target the default.
+- Every `/targets/{id}` route but `PUT` answers `404 NOT_FOUND` ("no target '<id>'") when no target has that id.
 - `POST /stage` takes `{"force":bool,"url":"…"}`; `url` overrides the manifest URL for that job only.
-- `POST /staging` uploads an image into the staging partition (§8) with no manifest and no target: the application `.bin` as the raw body with `Content-Length`, and in the query `dat=<hex>` (the init packet, 1–64 bytes), `version=` (1–63 bytes), and optionally `board=` (compared with the target's board at flash time, as for any staged image), `sha256=<hex>` (checked against what arrives) and `name=` (recorded as `upload:<name>`). Text values are %-decoded (`+` is a space); the URI limit is raised to 1 KB (`CONFIG_HTTPD_MAX_URI_LEN`; esp_http_server reads the request line against it and the headers separately against `CONFIG_HTTPD_MAX_REQ_HDR_LEN`), and the UI and the tool clip the file name so the query stays well inside it. Like the firmware upload it runs on the slow-request task and holds the BLE lease (`409` during a job, a scan or a console flash). The image isn't bound to the target, but when the uploader gives a board and the target has one, they must match (`staged_board_ok`): `422 BOARD_MISMATCH` before anything is erased, rather than at flash time. It answers `400` for a bad query (before anything is erased), `422` with the §13.3 code for an image that fails its checks, `500 STAGING_IO`, or `200` with the new header (the `GET /staging` fields); on an early error it reads and discards the rest of the body, as the firmware upload does. A failure once writing has begun leaves nothing staged, and the detail says so.
+- `POST /staging` uploads an image into the staging partition (§8) with no manifest: the application `.bin` as the raw body with `Content-Length`, and in the query `dat=<hex>` (the init packet, 1–64 bytes), `version=` (1–63 bytes), and optionally `board=` (compared with the flashing target's board at flash time, as for any staged image), `target=<id>` (the target to check it against, below), `sha256=<hex>` (checked against what arrives) and `name=` (recorded as `upload:<name>`). Text values are %-decoded (`+` is a space); the URI limit is raised to 1 KB (`CONFIG_HTTPD_MAX_URI_LEN`; esp_http_server reads the request line against it and the headers separately against `CONFIG_HTTPD_MAX_REQ_HDR_LEN`), and the UI and the tool clip the file name so the query stays well inside it. Like the firmware upload it runs on the slow-request task and holds the BLE lease (`409` during a job, a scan or a console flash). The image isn't bound to a target (any target can flash it), but it is checked against one now, before anything is erased, rather than at the repeater: the target named by `target=` (`404 NOT_FOUND` if there is none); without it, the default target if its board accepts the image, else the first target in slot order whose board does. Its board must accept the image (`staged_board_ok`: the same board, or either one blank), else `422 BOARD_MISMATCH`; without `target=`, that means no stored target has the image's ID, and the detail says so. Its `max_app_size` caps the size. With no targets stored, nothing is checked against a target. It answers `400` for a bad query (before anything is erased), `422` with the §13.3 code for an image that fails its checks, `500 STAGING_IO`, or `200` with the new header (the `GET /staging` fields); on an early error it reads and discards the rest of the body, as the firmware upload does. A failure once writing has begun leaves nothing staged, and the detail says so.
 - `GET /logs?since=N` returns `{"next":M,"text":"…"}`: pass `next` back as `since`. Without `since`, the last 4 KB. If more than 8 KB was logged since `N`, the oldest part is skipped.
 - `GET /staging?verify=1` re-hashes the staged image; `PUT /config` answers `reboot_required` when `hostname` or `ntp_server` changed (both are read at boot).
 - `POST /system/reboot` is refused during a job unless `?force=1`.
@@ -530,18 +546,19 @@ Conventions (M3b):
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/v1/status` | Device state, job state, phase, progress, target summaries, staged image summary, WiFi RSSI, uptime, DFU32 version |
+| `GET /api/v1/status` | Device state, job state, phase, progress, target summaries and the default target, staged image summary, WiFi RSSI, uptime, DFU32 version |
 | `POST /api/v1/claim` | Turn token auth on → `{"token":"…"}` (once) |
-| `GET /api/v1/targets` · `GET /api/v1/targets/{id}` | Target config and the last result |
-| `PUT /api/v1/targets/{id}` | Create or update a target. `409` if creating a 2nd target in v1. |
-| `DELETE /api/v1/targets/{id}` | |
+| `GET /api/v1/targets` · `GET /api/v1/targets/{id}` | All targets, the default and `max_targets` · one target's config and its last result |
+| `PUT /api/v1/targets/{id}` | Create (`201`) or update (`200`) a target. `"default": true` makes it the default. `409 TARGET_LIMIT` when the device already holds `DFU32_MAX_TARGETS` targets. |
+| `DELETE /api/v1/targets/{id}` | `204`. Deleting the default makes the first remaining target the default. |
+| `POST /api/v1/targets/{id}/default` | Make this target the default → `{"default":"<id>"}`. The console acts on the default target, and the UI selects it first. |
 | `POST /api/v1/targets/{id}/check` | Fetch the manifest; return its version, sizes, board match, whether it equals the staged image, and `last_ok_version`. Writes nothing. |
 | `POST /api/v1/targets/{id}/stage` | Fetch, verify and stage without arming. Async; poll status. |
 | `POST /api/v1/targets/{id}/flash` | Body `{"source":"manifest"\|"staged","arm_timeout_s":600,"wifi_off":true}`. Every field is optional; `wifi_off` defaults to config `wifi_off_dfu`. Arms the job (§3.1). Async → `202`. |
 | `POST /api/v1/jobs/current/abort` | Abort the job. If the transfer has started, this leaves the target erased; the response warns about that. |
 | `GET /api/v1/targets/{id}/runs` · `GET /api/v1/runs/{seq}` | Run records (§13.2), including the log tail |
 | `GET /api/v1/staging` · `DELETE /api/v1/staging` | Staged image header / invalidate it |
-| `POST /api/v1/staging` | Upload an image (raw `.bin` body; `.dat`, version, optional board in the query). No manifest or target needed. |
+| `POST /api/v1/staging` | Upload an image (raw `.bin` body; `.dat`, version, optional board and `target=<id>` in the query). No manifest or target needed. |
 | **`POST /api/v1/ble/scan`** | Body `{"duration_s":10,"dfu_only":false}` → a list of advertisers (below). Refused during a job. |
 | **`GET /api/v1/ble/monitor`** | Live advertiser list with RSSI, one JSON line per second (NDJSON stream), or one snapshot with `?once=1`. Filters on by default; `all=1` shows everything. Not refused during a job (§10.4). |
 | `GET /api/v1/logs?since=<seq>` | Log ring entries, newest last |
@@ -560,7 +577,7 @@ Scan result entry (this backs the UI's "pick a target" tool):
   "rssi": -61,
   "services": ["00001530-1212-efde-1523-785feabcd123"],
   "dfu": "app_buttonless",          // app_buttonless | bootloader | null (inferred from name/UUID; confirmed only on connect)
-  "matches_target": null             // target id if addr == a target's mac or mac+1
+  "matches_target": null             // id of the first target (slot order) whose mac or mac+1 == addr
 }
 ```
 
@@ -580,14 +597,17 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 
 (This is visible during the transfer only when the run has `wifi_off: false`.)
 
+`/status` also lists every target, in slot order, as `{"id","name","board","last_ok_version","last_ok_at","default"}` (no MACs: it is public), and `"default_target"` names the default (`null` with no targets).
+
 ### 10.2 Web UI (decided: full config UI)
 
 A single-page app in vanilla JS plus CSS, embedded gzip-compressed with a budget of ≤ 40 KB. It uses the same JSON API. When a token is set, the browser keeps it in `localStorage` and signs in once; with none set, the UI opens straight to Status. Views:
 
-- **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort. Check and Stage (and *Flash from: manifest*) appear only when the target has a manifest URL; otherwise the target flashes the staged image.
-- **Image:** the staged image (version, ID, size, where it came from) with Verify and Clear, and **Stage a DFU package**: the operator picks (or drops) an adafruit-nrfutil `.zip`; the page reads it with `web/staging.js`, the installer page's reader (unzip with `DecompressionStream`, then the checks `dfu32_stage_image.py` runs: `.dat` layout and device type, word alignment, size, CRC16 against the `.dat`), suggests the version from a MeshCore file name, and uploads it with `POST /staging` (optional ID, sent as `board`). This is the installer page's USB staging (§9.4) over WiFi; the staged image is independent of the target.
-- **Target:** config form, MAC first (only the MAC is needed to flash). One optional **ID** stands in for the API's id, name and board: it is saved as `board`, the API id stays `target` (or whatever an existing target has), and `name` isn't shown. The manifest URL is only for fetching images from a server. Tuning holds the knobs of §9.1, the connection interval among them. Plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target".
-- **Runs:** history table, with run detail and log tail.
+- **Selected target:** the views act on one target at a time. The UI remembers the choice per browser (`localStorage`) and otherwise selects the default target, then the first.
+- **Status:** job state, progress bar, phase timeline, target-erased warning, Check / Stage / Flash / Abort. With two or more targets, a target picker above the actions changes the selection, and Check, Stage and Flash act on it. Check and Stage (and *Flash from: manifest*) appear only when the selected target has a manifest URL; otherwise it flashes the staged image.
+- **Image:** the staged image (version, ID, size, where it came from) with Verify and Clear, and **Stage a DFU package**: the operator picks (or drops) an adafruit-nrfutil `.zip`; the page reads it with `web/staging.js`, the installer page's reader (unzip with `DecompressionStream`, then the checks `dfu32_stage_image.py` runs: `.dat` layout and device type, word alignment, size, CRC16 against the `.dat`), suggests the version from a MeshCore file name, and uploads it with `POST /staging` (optional ID, sent as `board`, and `target=` the selected target, whose board the page's note compares). This is the installer page's USB staging (§9.4) over WiFi; the staged image is independent of the targets.
+- **Target:** the saved targets (name or id, MAC, ID, a *default* badge), each with **Edit** and **Make default**, and **Add target** (disabled at the limit, with "N of M"). The config form edits the selected target, MAC first (only the MAC is needed to flash). One optional **ID** stands in for the board: it is saved as `board`. A new target also has an optional **Name**; its API id is made from the name, else the ID, else `target` (a–z, 0–9 and `-`, at most 31 characters, with `-2`, `-3`… added to keep it unique). An existing target keeps its id. **Make this the default** sends `"default": true`, and **Delete** deletes the selected target. The manifest URL is only for fetching images from a server. Tuning holds the knobs of §9.1, the connection interval among them. Plus the **BLE scan picker**: since §10.4, a live list with signal bars, the target pinned, and "Use as target", which fills the MAC of the form being edited; a row whose address belongs to a stored target names that target (`matches_target`).
+- **Runs:** the selected target's history (with the same picker when there are two or more targets), with run detail and log tail.
 - **Logs:** live tail by polling `/logs?since=`.
 - **System:** WiFi info, hostname, DFU32 firmware upload, reboot, tuning defaults, and Access: require a token, or rotate it and turn it off.
 
@@ -606,7 +626,7 @@ v1 has no MQTT (the later milestone uses `espressif/mqtt`, §4.1). HA can use `r
 A live, once-a-second view of nearby BLE advertisers and their signal strength, like the device picker in Nordic's phone DFU app, on all three interfaces: the console, the web UI and the HTTP API. The RSSI is measured by DFU32's own radio, so it shows the link that will carry the flash, which a phone can't. It has two jobs:
 
 - **Picking a target:** a live list with **Use as target**, replacing the one-shot scan table in the UI.
-- **Placing the box:** the configured target is always pinned at the top, whatever the filters say, with a smoothed value and a sparkline. You can move DFU32 or its antenna and watch the number. It is **one row that follows the device** across the buttonless jump: samples from the app MAC and from MAC+1 (the bootloader) both feed it, `addr` and `target.via` (`app` / `mac_plus_one`) show whichever was heard last, and the smoothing, min/max and sparkline carry on across the switch (the UI marks the switch on the sparkline). Neither address appears again as an ordinary row.
+- **Placing the box:** the configured target is always pinned at the top (with several targets stored, the default target; §9.1), whatever the filters say, with a smoothed value and a sparkline. You can move DFU32 or its antenna and watch the number. It is **one row that follows the device** across the buttonless jump: samples from the app MAC and from MAC+1 (the bootloader) both feed it, `addr` and `target.via` (`app` / `mac_plus_one`) show whichever was heard last, and the smoothing, min/max and sparkline carry on across the switch (the UI marks the switch on the sparkline). Neither address appears again as an ordinary row.
 
 The one-shot scan (`POST /api/v1/ble/scan`, console `scan`) stays as it is: `tools/dfu32_bench.py` and scripts use it.
 
@@ -819,7 +839,7 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
 ```
 
 DFU32 Kconfig (`main/Kconfig.projbuild`):
-- `DFU32_MAX_TARGETS` (default 1)
+- `DFU32_MAX_TARGETS` (default 5, 1–10): how many targets DFU32 can store (§9.1). Lowering it never drops stored targets; it only stops new ones being added.
 - `DFU32_NEOPIXEL_GPIO`, `DFU32_NEOPIXEL_POWER_GPIO`, `DFU32_STATUS_LED_GPIO` (plain red LED), `DFU32_BUTTON_GPIO`. −1 = none; set by the board profile.
 - `DFU32_STATUS_LED_ACTIVE_LOW` (n): the plain LED is lit when its GPIO is low (`xiao_esp32s3`, `xiao_esp32c5`)
 - `DFU32_LOG_RING_KB` (default 64, in PSRAM)
@@ -960,13 +980,13 @@ dfu32/
   main/                  app_main, bench console (REPL + console_io, the console reader shared with Improv Serial), Kconfig.projbuild
   components/
     dfu_proto/           pure C++: opcodes, codecs, .dat, CRC16, chunk planner, transfer engine, retry policy, staging format
-    dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config,
+    dfu32_core/          pure C++: cJSON wrapper, URLs, manifest, §7.2 prechecks, staging writer, target config, target table,
                          job state machine, API routes / auth helpers / device settings
     dfu_ble/             ITransport on esp-nimble-cpp; scan, probe, flash with retries
     staging/             staging partition reader + partition / PSA SHA-256 adapters for the writer
     fetch/               esp_http_client: manifest, .dat, .bin streamed into staging
     net/                 WiFi STA, stop/restore, scan, mDNS, SNTP
-    config/              NVS settings: target record, device settings, token hash
+    config/              NVS settings: target records and the default target, device settings, token hash
     job/                 orchestrator task, busy lease, handover, deadline, stall watchdog, restore check
     runlog/              log ring + run-record partition
     api/                 esp_http_server routes, claim / bearer auth, firmware upload; ui/index.html (embedded web UI)

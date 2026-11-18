@@ -9,7 +9,10 @@ parttool.py or esptool (the command is printed at the end).
 With --upload, the package goes to a running DFU32 over WiFi instead
 (POST /api/v1/staging): the .bin as the body, the .dat, version, optional
 board and the .bin's SHA-256 in the query. DFU32 runs the same checks and
-writes the staging partition itself; nothing else is touched. If the DFU32
+writes the staging partition itself; nothing else is touched. With several
+stored targets, --target-id names the one whose board and size limit the image
+is checked against (by default DFU32 picks the default target, or the first
+whose board matches). If the DFU32
 requires an API token, give it with --token or the DFU32_TOKEN environment
 variable.
 
@@ -204,7 +207,8 @@ def guess_version(file_name: str) -> str:
     return out.decode("utf-8", "ignore")
 
 
-def upload_url(device: str, *, dat: bytes, version: str, board: str, sha256: bytes, name: str) -> str:
+def upload_url(device: str, *, dat: bytes, version: str, board: str, sha256: bytes, name: str,
+               target: str = "") -> str:
     """POST /api/v1/staging on `device` (a host name, or a URL)."""
     base = device if "://" in device else "http://" + device
     # The name is only a label in the header: clipped so the query stays well
@@ -215,14 +219,16 @@ def upload_url(device: str, *, dat: bytes, version: str, board: str, sha256: byt
     query = {"dat": dat.hex(), "version": version, "sha256": sha256.hex(), "name": name}
     if board:
         query["board"] = board
+    if target:
+        query["target"] = target  # the stored target to check it against (404 if there is none)
     return base.rstrip("/") + "/api/v1/staging?" + urllib.parse.urlencode(query)
 
 
 def upload(device: str, token: str, bin_data: bytes, dat: bytes, *, version: str, board: str, name: str,
-           timeout: float = 120) -> dict:
+           target: str = "", timeout: float = 120) -> dict:
     """Stages the image on a running DFU32. Returns its staged header; raises ValueError with DFU32's reason."""
     url = upload_url(device, dat=dat, version=version, board=board, sha256=hashlib.sha256(bin_data).digest(),
-                     name=name)
+                     name=name, target=target)
     headers = {"Content-Type": "application/octet-stream"}
     if token:  # only when the DFU32 requires one
         headers["Authorization"] = "Bearer " + token
@@ -254,7 +260,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="API token for --upload, if the DFU32 requires one (default: $DFU32_TOKEN)")
     ap.add_argument("--board", default="", help="board id recorded in the header (e.g. rak4631)")
     ap.add_argument("--version", default="", help="version string recorded in the header")
-    ap.add_argument("--target-id", default="", help="DFU32 target id recorded in the header")
+    ap.add_argument("--target-id", "--target", default="",
+                    help="DFU32 target id: recorded in the header (-o), or with --upload the stored target to check "
+                         "the image against (default: DFU32's default target, or the first whose board matches)")
     ap.add_argument("--layout", choices=sorted(STAGING_SIZES), default="4mb",
                     help="DFU32 partition layout, for size check and printed offsets (default 4mb)")
     ap.add_argument("--max-app-size", type=lambda s: int(s, 0), default=MAX_APP_SIZE)
@@ -291,8 +299,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def main_upload(args: argparse.Namespace) -> int:
-    if args.target_id:
-        print("note: --target-id is ignored with --upload: an uploaded image isn't tied to a target", file=sys.stderr)
     try:
         bin_data, dat = load_package(args.zip, args.bin, args.dat)
         pkt = validate(bin_data, dat, args.max_app_size)
@@ -301,7 +307,8 @@ def main_upload(args: argparse.Namespace) -> int:
         print(f"bin      {len(bin_data)} B  sha256 {hashlib.sha256(bin_data).hexdigest()}")
         print(f"dat      {len(dat)} B  device_type 0x{pkt.device_type:04X}  crc16 0x{pkt.crc16:04X} (matches)")
         print(f"uploading {version!r} to {args.upload}...")
-        staged = upload(args.upload, args.token, bin_data, dat, version=version, board=args.board, name=name)
+        staged = upload(args.upload, args.token, bin_data, dat, version=version, board=args.board, name=name,
+                        target=args.target_id)
     except (ValueError, KeyError, OSError, zipfile.BadZipFile) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

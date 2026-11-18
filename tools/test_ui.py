@@ -2,7 +2,10 @@
 """Tests for tools/dfu32_ui.py and the embedded web UI it builds."""
 import gzip
 import io
+import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -108,12 +111,36 @@ class TestPage(unittest.TestCase):
         fields = re.findall(r'(?:field|knob)\("(\w+)"|opt\("Address type".*?f\.(addr_type)', form)
         order = [a or b for a, b in fields]
         self.assertEqual(order[0], "mac")  # the one required setting comes first
-        # One ID (the API's board) stands in for id, name and board.
-        self.assertEqual(order[:4], ["mac", "addr_type", "board", "manifest_url"])
-        self.assertNotIn('field("name"', form)
+        # One ID (the API's board); the optional name comes after it. The API id is derived, not typed.
+        self.assertEqual(order[:5], ["mac", "addr_type", "board", "manifest_url", "name"])
         self.assertNotIn('field("id"', form)
         self.assertIn("interval_ms", order)
         self.assertIn('"interval_ms"', re.search(r"const NUM = \[(.*?)\]", self.js).group(1))
+
+    def test_multiple_targets(self):
+        # Every view acts on the selected target, never just the first one.
+        self.assertNotIn("targets[0]", self.js)
+        self.assertNotIn("one target", self.js)
+        # The selection is remembered in localStorage, and storage can throw.
+        for line in self.js.splitlines():
+            if "localStorage." in line:
+                self.assertIn("try {", line, line)
+        self.assertIn('tpath(x.id) + "/default"', self.js)  # Make default
+        self.assertIn('"&target=" + encodeURIComponent(t.id)', self.js)  # upload checks the selected target
+        self.assertIn("max_targets", self.js)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_new_target_id(self):
+        fn = re.search(r"^function newTargetId\(.*?^\}$", self.js, re.M | re.S).group(0)
+        cases = [["Attic", "", []], ["", "rak4631", []], ["", "", []], ["", "", ["target"]],
+                 ["Crème Brûlée!", "", []], ["  --Roof  repeater--", "x", []], ["a" * 40, "", ["a" * 31]],
+                 ["Attic", "", ["attic", "attic-2"]], ["!!!", "T1000_E", []]]
+        js = fn + "\nconsole.log(JSON.stringify(%s.map((c) => newTargetId(...c))));" % json.dumps(cases)
+        out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(out, ["attic", "rak4631", "target", "target-2", "creme-brulee", "roof-repeater",
+                               "a" * 29 + "-2", "attic-3", "t1000-e"])
+        for x in out:
+            self.assertRegex(x, r"^[a-z0-9-]{1,31}$")
 
     def test_tuning_placeholders_are_the_firmware_defaults(self):
         hdr = (ROOT / "components" / "dfu32_core" / "include" / "dfu32_core" / "target_config.hpp").read_text()

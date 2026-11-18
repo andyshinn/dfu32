@@ -4,7 +4,8 @@
 // flash, runs, run, logs, blreset, job, token, improv. The HTTP API and the web UI (M4)
 // cover the same ground; the console stays as a debug tool. Commands that use
 // BLE or the staging partition take the job lease, so they can't run while an
-// API job does (and vice versa). Ctrl+C or Ctrl+D aborts the BLE commands
+// API job does (and vice versa). The target commands act on the default
+// target (`target use <id>` picks it). Ctrl+C or Ctrl+D aborts the BLE commands
 // (scan, probe, flash, blreset); `job abort` stops an API job.
 #include "console.hpp"
 
@@ -14,13 +15,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "api/api.hpp"
 #include "console_io.hpp"
 #include "config/config.hpp"
+#include "dfu32_core/manifest.hpp"
 #include "dfu_ble/dfu_ble.hpp"
 #include "fetch/fetch.hpp"
 #include "improv/improv.hpp"
@@ -123,16 +127,37 @@ long opt_long(int argc, char** argv, const char* flag, long def) {
     return def;
 }
 
-bool load_target(ble::Mac& out) {
+/// The default target and its MAC; false (with a hint) if there is none or
+/// it has no MAC. `cfg`, if given, receives the target's settings.
+bool require_target(ble::Mac& mac, TargetConfig* cfg = nullptr) {
     TargetConfig t;
-    return config::load_target(t) && !t.mac.empty() && ble::Mac::parse(t.mac, t.addr_type, out);
+    bool found = false;
+    if (!config::load_default_target(t, found)) {
+        std::printf("Failed to read settings from NVS\n");
+        return false;
+    }
+    if (found && !t.mac.empty() && ble::Mac::parse(t.mac, t.addr_type, mac)) {
+        if (cfg != nullptr) *cfg = std::move(t);
+        return true;
+    }
+    if (found) {
+        std::printf("No target MAC set for the default target '%s'. Use: target <MAC> [random|public]\n"
+                    "(MeshCore prints the MAC in its `start ota` reply; `target use <id>` picks another target.)\n",
+                    t.effective_id().c_str());
+    } else {
+        std::printf("No target MAC set. Use: target <MAC> [random|public]\n"
+                    "(MeshCore prints the MAC in its `start ota` reply.)\n");
+    }
+    return false;
 }
 
-bool require_target(ble::Mac& mac) {
-    if (load_target(mac)) return true;
-    std::printf("No target MAC set. Use: target <MAC> [random|public]\n"
-                "(MeshCore prints the MAC in its `start ota` reply.)\n");
-    return false;
+/// The default target's settings (all defaults when there is none). Commands
+/// that only need a manifest URL or board (check, stage) work without one.
+TargetConfig default_target() {
+    TargetConfig t;
+    bool found = false;
+    if (!config::load_default_target(t, found)) std::printf("Failed to read settings from NVS\n");
+    return t;
 }
 
 void hex(const uint8_t* p, size_t n, char* out) {
@@ -183,8 +208,9 @@ bool acquire(job::Lease& lease) {
 
 // ---- commands -----------------------------------------------------------------
 
-void print_target(const TargetConfig& t) {
-    std::printf("  id         %s%s\n", t.effective_id().c_str(), t.id.empty() ? " (default)" : "");
+void print_target(const TargetConfig& t, bool is_default) {
+    // tools/bench/parse.py reads these lines (the first word after the label).
+    std::printf("  id         %s%s\n", t.effective_id().c_str(), is_default ? " (default target)" : "");
     std::printf("  mac        %s", t.mac.empty() ? "(not set)" : t.mac.c_str());
     ble::Mac mac;
     if (!t.mac.empty() && ble::Mac::parse(t.mac, t.addr_type, mac)) {
@@ -200,63 +226,230 @@ void print_target(const TargetConfig& t) {
     }
 }
 
+constexpr const char* kTargetUsage =
+    "Use: target [list | use <id> | add <id> [<MAC> [random|public]] | <MAC> [random|public] | board <ID>\n"
+    "            | url <manifest-url> | id <slug> | maxapp <bytes> | clear | delete <id>]\n";
+
+/// Prints the default target, or how to set one.
+void show_default(const TargetTable& table) {
+    const StoredTarget* def = table.default_target();
+    if (def == nullptr) {
+        std::printf("No target yet. Use: target <MAC> [random|public]\n");
+        return;
+    }
+    print_target(def->cfg, true);
+    size_t pos = 1;
+    for (const auto& st : table.targets()) {
+        if (&st == def) break;
+        ++pos;
+    }
+    std::printf("  default    yes (%u of %u target%s; max %u)%s\n", static_cast<unsigned>(pos),
+                static_cast<unsigned>(table.size()), table.size() == 1 ? "" : "s",
+                static_cast<unsigned>(table.max_targets()), table.size() > 1 ? ": `target list` shows all" : "");
+}
+
+void list_targets(const TargetTable& table) {
+    if (table.empty()) {
+        std::printf("No targets yet. Use: target <MAC> [random|public], or target add <id> [<MAC> [random|public]]\n");
+        return;
+    }
+    std::printf("  %-20s  %-17s  %-16s  %s\n", "ID", "MAC", "BOARD", "LAST OK");
+    for (const auto& st : table.targets()) {
+        const TargetConfig& c = st.cfg;
+        std::printf("%c %-20s  %-17s  %-16s  %s\n", table.is_default(st.id()) ? '*' : ' ', st.id().c_str(),
+                    c.mac.empty() ? "-" : c.mac.c_str(), c.board.empty() ? "-" : c.board.c_str(),
+                    c.last_ok_version.empty() ? "-" : c.last_ok_version.c_str());
+    }
+    std::printf("%u of %u targets. * = default: check, stage, probe, flash and blreset use it (`target use <id>`).\n",
+                static_cast<unsigned>(table.size()), static_cast<unsigned>(table.max_targets()));
+}
+
+bool commit(const TargetTable& table, const TargetWrites& w) {
+    if (w.empty() || config::commit_targets(table, w)) return true;
+    std::printf("Failed to save target to NVS\n");
+    return false;
+}
+
+/// Stores `t` (create or update by id) and reports a refusal.
+bool put_target(TargetTable& table, TargetConfig t) {
+    const auto r = table.put(std::move(t));
+    if (r.status != TargetTable::PutStatus::Created && r.status != TargetTable::PutStatus::Updated) {
+        std::printf("Not saved: %s\n", r.error.c_str());
+        return false;
+    }
+    return commit(table, r.writes);
+}
+
+/// Parses `<MAC> [random|public]` into `t`; false if the MAC is bad.
+bool set_mac(TargetConfig& t, const char* mac_arg, const char* type_arg) {
+    const std::string mac = normalize_mac(mac_arg);
+    if (mac.empty()) return false;
+    t.mac = mac;
+    t.addr_type = (type_arg != nullptr && std::strcmp(type_arg, "public") == 0) ? 0 : 1;
+    return true;
+}
+
 int cmd_target(int argc, char** argv) {
-    TargetConfig t;
-    if (!config::load_target(t)) {
+    const std::string field = argc >= 2 ? argv[1] : "";
+    const std::string value = argc >= 3 ? argv[2] : "";
+    const bool read_only = field.empty() || field == "list";
+    // Changes hold the device-wide lease like the API's target PUT/DELETE, and
+    // load the table under it: otherwise a console `target add` and an API
+    // PUT could both pick the same free slot and one target would be lost.
+    std::optional<job::Lease> lease;
+    if (!read_only) {
+        lease.emplace("config");
+        if (!acquire(*lease)) return 1;
+    }
+    TargetTable table;
+    if (!config::load_targets(table)) {
         std::printf("Failed to read settings from NVS\n");
         return 1;
     }
-    if (argc >= 2) {
-        const std::string field = argv[1];
-        const std::string value = argc >= 3 ? argv[2] : "";
-        std::string err;
-        if (field == "board") {
-            err = validate_board(value);
-            t.board = value;
-        } else if (field == "url") {
-            err = validate_manifest_url(value);
-            t.manifest_url = value;
-        } else if (field == "id") {
-            err = validate_target_id(value);
-            t.id = value;
-        } else if (field == "maxapp") {
-            uint32_t bytes = 0;
-            if (!parse_u32(value, bytes)) {
-                std::printf("Not saved: '%s' is not a number of bytes (e.g. 802816 or 0xC4000; 0 = default)\n",
-                            value.c_str());
-                return 1;
-            }
-            err = validate_max_app_size(bytes);
-            t.max_app_size = bytes;
-        } else if (field == "clear") {
-            if (!config::erase_target()) {
-                std::printf("Failed to clear the target\n");
-                return 1;
-            }
-            std::printf("Target cleared.\n");
-            return 0;
-        } else {
-            // target <MAC> [random|public]
-            const std::string mac = normalize_mac(field);
-            if (mac.empty()) {
-                std::printf("Bad MAC or field '%s'. Use: target <MAC> [random|public] | board <name> | url <manifest-url>"
-                            " | id <slug> | maxapp <bytes> | clear\n",
-                            argv[1]);
-                return 1;
-            }
-            t.mac = mac;
-            t.addr_type = (argc >= 3 && std::strcmp(argv[2], "public") == 0) ? 0 : 1;
-        }
-        if (!err.empty()) {
-            std::printf("Not saved: %s\n", err.c_str());
-            return 1;
-        }
-        if (!config::save_target(t)) {
-            std::printf("Failed to save target to NVS\n");
-            return 1;
-        }
+    if (field.empty()) {
+        show_default(table);
+        return 0;
     }
-    print_target(t);
+    if (field == "list") {
+        list_targets(table);
+        return 0;
+    }
+
+    if (field == "use") {
+        if (value.empty()) {
+            std::printf("Use: target use <id> (`target list` shows the ids)\n");
+            return 1;
+        }
+        TargetWrites w;
+        if (!table.set_default(value, w)) {
+            std::printf("No target '%s' (`target list` shows the ids).\n", value.c_str());
+            return 1;
+        }
+        if (!commit(table, w)) return 1;
+        std::printf("Default target: '%s'. check, stage, probe, flash and blreset use the default target.\n",
+                    value.c_str());
+        show_default(table);
+        return 0;
+    }
+
+    if (field == "add") {
+        if (value.empty()) {
+            std::printf("Use: target add <id> [<MAC> [random|public]]\n");
+            return 1;
+        }
+        if (auto e = validate_target_id(value); !e.empty()) {
+            std::printf("Not saved: %s\n", e.c_str());
+            return 1;
+        }
+        if (table.find(value) != nullptr) {
+            std::printf("Not saved: a target with id '%s' already exists (`target use %s` makes it the default).\n",
+                        value.c_str(), value.c_str());
+            return 1;
+        }
+        TargetConfig t;
+        t.id = value;
+        if (argc >= 4 && !set_mac(t, argv[3], argc >= 5 ? argv[4] : nullptr)) {
+            std::printf("Not saved: bad MAC '%s' (e.g. F4:1C:36:A7:33:95)\n", argv[3]);
+            return 1;
+        }
+        auto r = table.put(std::move(t));
+        if (r.status != TargetTable::PutStatus::Created) {
+            std::printf("Not saved: %s\n", r.error.empty() ? "the target was not created" : r.error.c_str());
+            return 1;
+        }
+        // The new target becomes the default, so `target board ...` etc. edit it next.
+        table.set_default(value, r.writes);
+        if (!commit(table, r.writes)) return 1;
+        std::printf("Target '%s' added; it is now the default target.\n", value.c_str());
+        show_default(table);
+        return 0;
+    }
+
+    if (field == "clear" || field == "delete") {
+        std::string id = value;
+        if (field == "clear") {
+            id = table.default_id();
+            if (id.empty()) {
+                std::printf("No target to clear.\n");
+                return 0;
+            }
+        } else if (id.empty()) {
+            std::printf("Use: target delete <id> (`target list` shows the ids)\n");
+            return 1;
+        }
+        TargetWrites w;
+        if (!table.remove(id, w)) {
+            std::printf("No target '%s' (`target list` shows the ids).\n", id.c_str());
+            return 1;
+        }
+        if (!commit(table, w)) {
+            std::printf("Failed to delete the target\n");
+            return 1;
+        }
+        if (table.empty()) {
+            std::printf("Target '%s' deleted. No targets left.\n", id.c_str());
+        } else {
+            std::printf("Target '%s' deleted. The default target is now '%s'.\n", id.c_str(),
+                        table.default_id().c_str());
+        }
+        return 0;
+    }
+
+    // Everything else edits the default target; with none, it creates one
+    // (id `target`, or the id given to `target id`).
+    const StoredTarget* def = table.default_target();
+    TargetConfig t = def != nullptr ? def->cfg : TargetConfig{};
+    if (field == "id") {
+        if (value.empty()) {
+            std::printf("Use: target id <slug>\n");
+            return 1;
+        }
+        if (def == nullptr) {
+            if (auto e = validate_target_id(value); !e.empty()) {
+                std::printf("Not saved: %s\n", e.c_str());
+                return 1;
+            }
+            t.id = value;
+            if (!put_target(table, std::move(t))) return 1;
+        } else {
+            TargetWrites w;
+            if (auto e = table.rename(def->id(), value, w); !e.empty()) {
+                std::printf("Not saved: %s\n", e.c_str());
+                return 1;
+            }
+            if (!commit(table, w)) return 1;
+        }
+        show_default(table);
+        return 0;
+    }
+
+    std::string err;
+    if (field == "board") {
+        err = validate_board(value);
+        t.board = value;
+    } else if (field == "url") {
+        err = validate_manifest_url(value);
+        t.manifest_url = value;
+    } else if (field == "maxapp") {
+        uint32_t bytes = 0;
+        if (!parse_u32(value, bytes)) {
+            std::printf("Not saved: '%s' is not a number of bytes (e.g. 802816 or 0xC4000; 0 = default)\n",
+                        value.c_str());
+            return 1;
+        }
+        err = validate_max_app_size(bytes);
+        t.max_app_size = bytes;
+    } else if (!set_mac(t, argv[1], argc >= 3 ? argv[2] : nullptr)) {
+        // target <MAC> [random|public]
+        std::printf("Bad MAC or field '%s'. %s", argv[1], kTargetUsage);
+        return 1;
+    }
+    if (!err.empty()) {
+        std::printf("Not saved: %s\n", err.c_str());
+        return 1;
+    }
+    if (!put_target(table, std::move(t))) return 1;
+    show_default(table);
     return 0;
 }
 
@@ -306,8 +499,7 @@ bool require_network() {
 }
 
 int cmd_check(int argc, char** argv) {
-    TargetConfig t;
-    config::load_target(t);
+    const TargetConfig t = default_target();
     const std::string url = argc >= 2 ? argv[1] : t.manifest_url;
     if (url.empty()) {
         std::printf("No manifest URL. Use: check <url>, or set one with `target url <url>`.\n");
@@ -340,8 +532,7 @@ int cmd_check(int argc, char** argv) {
 }
 
 int cmd_stage(int argc, char** argv) {
-    TargetConfig t;
-    config::load_target(t);
+    const TargetConfig t = default_target();
     std::string url;
     for (int i = 1; i < argc; ++i) {
         if (argv[i][0] != '-') url = argv[i];
@@ -458,7 +649,8 @@ int cmd_probe(int argc, char** argv) {
 
 int cmd_flash(int argc, char** argv) {
     ble::Mac mac;
-    if (!require_target(mac)) return 1;
+    TargetConfig tc;
+    if (!require_target(mac, &tc)) return 1;
     if (!has_flag(argc, argv, "--yes")) {
         std::printf("This ERASES the target's application and flashes the staged image.\n"
                     "Re-run as: flash --yes [--attempts N] [--prn N] [--force-prn] [--packet N] [--interval MS]\n"
@@ -468,11 +660,22 @@ int cmd_flash(int argc, char** argv) {
     }
     job::Lease lease("console");
     if (!acquire(lease)) return 1;
+    // Read the target again under the lease: target changes take it too, so
+    // this is the target the flash really goes to.
+    if (!require_target(mac, &tc)) return 1;
     StagedImage img;
     if (!img.open()) return 1;
-    const auto v = img.verify();
+    // The staged image is shared by every target, so check it against this
+    // one (size limit and ID), as an API flash does (SPEC.md §8).
+    const auto v = img.verify(tc.max_app_size);
     if (!v.ok) {
         std::printf("Staged image failed checks: %s. Nothing was touched.\n", v.error.c_str());
+        return 1;
+    }
+    if (!staged_board_ok(img.header().board, tc.board)) {
+        std::printf("BOARD_MISMATCH: the staged image is for ID \"%s\", target '%s' is \"%s\". Nothing was touched.\n"
+                    "Stage an image for this target, or `target use <id>` to flash another target.\n",
+                    img.header().board.c_str(), tc.effective_id().c_str(), tc.board.c_str());
         return 1;
     }
     ble::FlashOptions o;
@@ -489,8 +692,6 @@ int cmd_flash(int argc, char** argv) {
                 img.header().bin_size, img.header().version.c_str(), o.scan_ms / 1000, mac.str().c_str(), o.attempts);
 
     runlog::RunLog* run_log = runlog::idf::open_run_log();
-    TargetConfig tc;
-    config::load_target(tc);
     job::RunContext ctx;
     ctx.seq = run_log ? run_log->next_seq() : 0;
     ctx.target_id = tc.effective_id();
@@ -859,8 +1060,11 @@ void start_console() {
     linenoiseSetMaxLineLen(kMaxLine);
     linenoiseSetReadFunction(&console_io::linenoise_read);
 
-    reg("target", "Show or set the target: BLE MAC (app address), board, manifest URL, id, max app size.",
-        "[<MAC> [random|public] | board <name> | url <manifest-url> | id <slug> | maxapp <bytes> | clear]",
+    reg("target",
+        "Show or set the default target (BLE MAC, board, manifest URL, id, max app size); list, add, pick or delete "
+        "targets. check, stage, probe, flash and blreset use the default target.",
+        "[list | use <id> | add <id> [<MAC> [random|public]] | <MAC> [random|public] | board <ID> | url <manifest-url>"
+        " | id <slug> | maxapp <bytes> | clear | delete <id>]",
         &cmd_target);
     reg("wifi", "Show WiFi status, or join a network (stored for later boots).", "[<ssid> [password] | forget]",
         &cmd_wifi);

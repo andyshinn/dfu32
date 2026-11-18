@@ -1,6 +1,6 @@
 # Operator guide
 
-This is the everyday path: one DFU32 next to a MeshCore repeater, firmware served from your own computer or server, and updates done from the web UI. The [bench guide](BENCH.md) covers testing and the console. [RECOVERY.md](RECOVERY.md) covers what to do when something goes wrong.
+This is the everyday path: one DFU32 next to a MeshCore repeater (or a few: §4), firmware served from your own computer or server, and updates done from the web UI. The [bench guide](BENCH.md) covers testing and the console. [RECOVERY.md](RECOVERY.md) covers what to do when something goes wrong.
 
 ## 1. Put DFU32 on your network
 
@@ -50,17 +50,29 @@ In the web UI, open **Target**:
 
 The scan put the repeater into OTA mode. Reboot it (or wait for it to time out) before you flash, so the flash below starts from a repeater in normal operation.
 
+### More than one repeater
+
+DFU32 remembers up to five repeaters (a build can allow up to ten: `DFU32_MAX_TARGETS`). One of them is the **default**. The console works on the default, and the web UI picks it until you pick another.
+
+To add a second repeater, open **Target** and press **Add target**. Give it a **Name** if you like, such as `attic`; DFU32 makes its id from the name (or from the ID). Then set it up as above: `start ota` on that repeater, **Scan**, **Use as target**, the ID, **Save**. Tick **Make this the default** if it should be the default. **Add target** is greyed out when DFU32 holds as many as it can: delete one first.
+
+The list at the top of **Target** shows every saved repeater and which is the default. **Edit** opens one in the form. **Make default** makes it the default. With two or more, **Status** and **Runs** have a picker: Check, Stage and Flash act on the repeater picked there. Your browser remembers the pick; it doesn't change the default.
+
+There is one staged image for all of them. Staging for one repeater replaces the image staged for another. Before it touches a repeater, DFU32 checks the image against that repeater's ID and size limit. So give each repeater an ID, and a RAK image can't go to a Heltec.
+
+On the console, `target list` shows them all (`*` marks the default), `target use <id>` changes the default, and `target add <id> <MAC>` adds one and makes it the default. `check`, `stage`, `probe` and `flash` act on the default. From a script: `PUT /api/v1/targets/<id>` with `{"mac": "…", "default": true}`.
+
 ## 5. Update a repeater
 
 First get the image onto DFU32 (it is **staged**: kept in DFU32's flash until replaced):
 
-- **Upload it:** on **Image**, choose (or drop) the DFU `.zip`. Your browser unpacks it and checks it, you confirm the version (taken from a MeshCore file name), and **Stage** sends it to DFU32, which checks it again and writes it. The image isn't tied to the target. Without a board on it, DFU32 can't tell if it suits the repeater, so pick the right zip (or fill in **Board**, which DFU32 then compares with the target's). From a script: `python3 tools/dfu32_stage_image.py <zip> --upload dfu32-xxxx.local` (add `--token <token>` if DFU32 requires one).
+- **Upload it:** on **Image**, choose (or drop) the DFU `.zip`. Your browser unpacks it and checks it, you confirm the version (taken from a MeshCore file name), and **Stage** sends it to DFU32, which checks it again and writes it. The image isn't tied to a repeater. Without a board on it, DFU32 can't tell if it suits the repeater, so pick the right zip (or fill in **Board**, which DFU32 then compares with the selected repeater's ID). From a script: `python3 tools/dfu32_stage_image.py <zip> --upload dfu32-xxxx.local` (add `--token <token>` if DFU32 requires one).
 - **Or over USB**, with no network: on [dfu32.app](https://dfu32.app/), **Connect device**, **Stage nRF52 image**, pick the zip.
 - **Or from your server** (§3), on **Status**: **Check** fetches the manifest and shows the version, whether it suits the board, and whether it is newer than what DFU32 last flashed (it changes nothing). **Stage** downloads and verifies the image. Flashing with *Flash from: manifest* does both itself.
 
 **Image** shows what is staged, re-checks it (**Verify**) and clears it. Then, on **Status**:
 
-1. *Flash from: staged image* (the only choice when the target has no manifest URL), or *manifest* to fetch first.
+1. With more than one repeater, pick the one to flash. *Flash from: staged image* (the only choice when it has no manifest URL), or *manifest* to fetch first.
 2. **Flash** arms DFU32: it checks the image and waits up to 10 minutes for the repeater.
 3. Run `start ota` on the repeater (§6). DFU32 sees it, switches it into its bootloader and sends the image. The progress bar fills; the NeoPixel goes from cyan blinking to magenta getting brighter.
 4. **Succeeded** means the repeater has rebooted into the new firmware. Its version shows as **Last flashed**. Run `ver` on the repeater to confirm.
@@ -98,4 +110,4 @@ If the new firmware can't bring WiFi and the web UI back within 90 seconds, DFU3
 
 The plain LED (red on the Feathers, blue on the RAK11200, orange on the XIAO ESP32S3, yellow on the XIAO ESP32C5) stays on while a repeater is known to be erased, and blinks during a transfer.
 
-Hold the button and let go: 2–5 s opens Improv for 5 minutes, 5–15 s clears the API token (open access), 15 s or more erases DFU32's settings and WiFi (not the staged image or the run history). The factory reset is refused while a flash is running.
+Hold the button and let go: 2–5 s opens Improv for 5 minutes, 5–15 s clears the API token (open access), 15 s or more erases DFU32's settings, its saved repeaters and WiFi (not the staged image or the run history). The factory reset is refused while a flash is running.

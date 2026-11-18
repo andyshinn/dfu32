@@ -315,11 +315,13 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
     update([&](Snapshot& s) { s.run_seq = recorded; });
 
     if (r.ok) {
-        TargetConfig t;
-        if (config::load_target(t) && t.effective_id() == q.target.effective_id()) {
-            t.last_ok_version = img.header().version;
-            t.last_ok_at = net::unix_time();
-            if (!config::save_target(t)) ESP_LOGW(TAG, "could not record last_ok_version");
+        // Reload: the target may have been edited (or deleted) during the run.
+        TargetTable targets;
+        TargetWrites w;
+        if (config::load_targets(targets) &&
+            targets.record_success(q.target.effective_id(), img.header().version, net::unix_time(), w) &&
+            !config::commit_targets(targets, w)) {
+            ESP_LOGW(TAG, "could not record last_ok_version");
         }
     }
 
