@@ -111,7 +111,7 @@ bool setup_neopixel() {
     cfg.blink_list_num = static_cast<uint16_t>(Pattern::Count);
     const esp_err_t err = led_indicator_new_strips_device(&cfg, &strips, &g_neo);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "NeoPixel on GPIO %d unavailable: %s", CONFIG_DFU32_NEOPIXEL_GPIO, esp_err_to_name(err));
+        ESP_LOGW(TAG, "NeoPixel on GPIO %d unavailable: 0x%x", CONFIG_DFU32_NEOPIXEL_GPIO, static_cast<unsigned>(err));
         g_neo = nullptr;
         return false;
     }
@@ -133,7 +133,7 @@ bool setup_red() {
     cfg.blink_list_num = 3;
     const esp_err_t err = led_indicator_new_gpio_device(&cfg, &gpio, &g_red);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "status LED on GPIO %d unavailable: %s", CONFIG_DFU32_STATUS_LED_GPIO, esp_err_to_name(err));
+        ESP_LOGW(TAG, "status LED on GPIO %d unavailable: 0x%x", CONFIG_DFU32_STATUS_LED_GPIO, static_cast<unsigned>(err));
         g_red = nullptr;
         return false;
     }
@@ -166,7 +166,7 @@ bool setup_button() {
     if (err == ESP_OK) err = iot_button_register_cb(g_button, BUTTON_PRESS_DOWN, nullptr, &on_press_down, nullptr);
     if (err == ESP_OK) err = iot_button_register_cb(g_button, BUTTON_PRESS_UP, nullptr, &on_press_up, nullptr);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "button on GPIO %d unavailable: %s", CONFIG_DFU32_BUTTON_GPIO, esp_err_to_name(err));
+        ESP_LOGW(TAG, "button on GPIO %d unavailable: 0x%x", CONFIG_DFU32_BUTTON_GPIO, static_cast<unsigned>(err));
         return false;
     }
     ESP_LOGI(TAG, "button on GPIO %d: hold 2 s = Improv BLE, 5 s = clear the API token, 15 s = factory reset",

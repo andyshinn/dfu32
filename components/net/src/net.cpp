@@ -160,7 +160,7 @@ void connect_now() {
     const esp_err_t err = esp_wifi_connect();
     if (err == ESP_OK || err == ESP_ERR_WIFI_CONN) return;  // CONN: already connecting
     s_link = kIdle;
-    ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "esp_wifi_connect: 0x%x", static_cast<unsigned>(err));
     arm_retry(s_backoff_ms);  // e.g. a driver scan still running: try again, don't drop it
 }
 
@@ -308,7 +308,7 @@ void ap_eval_cb(void*) {
             ESP_LOGI(TAG, "access point \"%s\" up: %s", s_hostname, ap::kUrl);
         } else {
             // Logged, shown in status and retried every 10 s; the station is never affected.
-            ESP_LOGE(TAG, "access point start: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "access point start: 0x%x", static_cast<unsigned>(err));
             esp_wifi_set_mode(WIFI_MODE_STA);
             s_ap_fault = "start";
             Lock lk(s_ctrl_mu);
@@ -403,7 +403,7 @@ void reconcile_ap() {
             s_ctrl.bringup_failed(now);
         }
     }
-    if (err != ESP_OK) ESP_LOGE(TAG, "access point at restore: %s", esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGE(TAG, "access point at restore: 0x%x", static_cast<unsigned>(err));
 }
 #endif  // CONFIG_ESP_WIFI_SOFTAP_SUPPORT
 
@@ -507,20 +507,20 @@ void start_mdns() {
     esp_err_t err = mdns_init();
     if (err == ESP_OK) err = mdns_hostname_set(s_hostname);
     if (err == ESP_OK) err = mdns_instance_name_set("DFU32");
-    if (err != ESP_OK) ESP_LOGW(TAG, "mDNS unavailable: %s", esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "mDNS unavailable: 0x%x", static_cast<unsigned>(err));
 }
 
 void start_sntp() {
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(s_ntp_server);
     const esp_err_t err = esp_netif_sntp_init(&cfg);
-    if (err != ESP_OK) ESP_LOGW(TAG, "SNTP unavailable: %s", esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "SNTP unavailable: 0x%x", static_cast<unsigned>(err));
 }
 
 #define NET_CHECK(expr)                                                         \
     do {                                                                        \
         const esp_err_t err_ = (expr);                                          \
         if (err_ != ESP_OK) {                                                   \
-            ESP_LOGE(TAG, "%s failed: %s", #expr, esp_err_to_name(err_));       \
+            ESP_LOGE(TAG, "%s failed: 0x%x", #expr, static_cast<unsigned>(err_));       \
             return false;                                                       \
         }                                                                       \
     } while (0)
@@ -553,7 +553,7 @@ bool init(const ApSettings& ap_settings) {
     NET_CHECK(esp_netif_init());
     const esp_err_t loop = esp_event_loop_create_default();
     if (loop != ESP_OK && loop != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "event loop: %s", esp_err_to_name(loop));
+        ESP_LOGE(TAG, "event loop: 0x%x", static_cast<unsigned>(loop));
         return false;
     }
     s_netif = esp_netif_create_default_wifi_sta();
@@ -592,7 +592,7 @@ bool init(const ApSettings& ap_settings) {
         if (err == ESP_OK) err = apply_ap_cfg();
         s_ap_usable = err == ESP_OK;
         if (!s_ap_usable) {
-            ESP_LOGE(TAG, "access point config: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "access point config: 0x%x", static_cast<unsigned>(err));
             s_ap_fault = "start";
         }
         // AP mode on with no network stored: the AP starts with the station (§7.3 layer 5).
@@ -700,7 +700,7 @@ bool set_credentials(const std::string& ssid, const std::string& password, bool 
     }
     s_want_connect = true;  // on failure the previous network stays and is retried
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_config: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_wifi_set_config: 0x%x", static_cast<unsigned>(err));
         return false;
     }
     s_backoff_ms = kBackoffMinMs;
@@ -776,7 +776,7 @@ bool scan(std::vector<ScanResult>& out, size_t max, ScanRefused* why) {
     }
     const esp_err_t err = esp_wifi_scan_start(nullptr, true);  // IDF default scan config
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "WiFi scan: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "WiFi scan: 0x%x", static_cast<unsigned>(err));
         refused = ScanRefused::Driver;
         return false;
     }
@@ -836,7 +836,7 @@ bool stop() {
     const esp_err_t err = esp_wifi_stop();
     s_link = kIdle;
     radio.unlock();
-    if (err != ESP_OK) ESP_LOGE(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGE(TAG, "esp_wifi_stop: 0x%x", static_cast<unsigned>(err));
     else ESP_LOGI(TAG, "WiFi%s stopped for the BLE transfer", was_on ? " (and the access point)" : "");
 #if CONFIG_ESP_WIFI_SOFTAP_SUPPORT
     if (was_on) notify(ApEvent::Down);
@@ -857,7 +857,7 @@ bool restore(uint32_t timeout_ms) {
         err = esp_wifi_start();  // STA_START -> connect (and AP_START when the AP is on)
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_wifi_start: 0x%x", static_cast<unsigned>(err));
         return false;
     }
     // STA_START's connect may have found the radio mutex still held; this one
@@ -947,7 +947,7 @@ void advertise_http(uint16_t port) {
     if (!s_init) return;
     mdns_txt_item_t txt[] = {{"path", "/api/v1/"}, {"board", CONFIG_DFU32_BOARD_NAME}};
     const esp_err_t err = mdns_service_add(nullptr, "_http", "_tcp", port, txt, sizeof(txt) / sizeof(txt[0]));
-    if (err != ESP_OK) ESP_LOGW(TAG, "mDNS _http._tcp: %s", esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "mDNS _http._tcp: 0x%x", static_cast<unsigned>(err));
 }
 
 }  // namespace dfu32::net

@@ -17,6 +17,15 @@
 namespace dfu32::fetch {
 namespace {
 
+/// ESP-IDF error code as hex: release builds drop the error-name table
+/// (CONFIG_ESP_ERR_TO_NAME_LOOKUP=n, SPEC.md §12.1), so the name lookup
+/// would only say "UNKNOWN ERROR".
+std::string err_hex(esp_err_t e) {
+    char b[12];
+    std::snprintf(b, sizeof(b), "0x%x", static_cast<unsigned>(e));
+    return b;
+}
+
 constexpr const char* TAG = "fetch";
 constexpr int kTimeoutMs = 15000;
 constexpr int kMaxRedirects = 3;
@@ -54,7 +63,7 @@ public:
         if (h_ == nullptr) return http_error("bad URL " + url);
         for (int hop = 0;; ++hop) {
             const esp_err_t err = esp_http_client_open(h_, 0);
-            if (err != ESP_OK) return http_error(std::string("connect failed (") + esp_err_to_name(err) + ") for " + url);
+            if (err != ESP_OK) return http_error(std::string("connect failed (") + err_hex(err) + ") for " + url);
             length_ = esp_http_client_fetch_headers(h_);
             if (length_ < 0) return http_error("no response headers from " + url);
             const int status = esp_http_client_get_status_code(h_);

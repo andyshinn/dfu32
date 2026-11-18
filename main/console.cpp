@@ -1176,9 +1176,9 @@ void repl_task(void*) {
         if (err == ESP_ERR_NOT_FOUND) {
             std::printf("Unrecognized command\n");
         } else if (err == ESP_OK && ret != ESP_OK) {
-            std::printf("Command returned non-zero error code: 0x%x (%s)\n", ret, esp_err_to_name(ret));
+            std::printf("Command returned non-zero error code: 0x%x\n", ret);
         } else if (err != ESP_OK && err != ESP_ERR_INVALID_ARG) {  // INVALID_ARG: empty line
-            std::printf("Internal error: %s\n", esp_err_to_name(err));
+            std::printf("Internal error: 0x%x\n", static_cast<unsigned>(err));
         }
         linenoiseFree(line);
     }

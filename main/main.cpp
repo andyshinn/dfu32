@@ -62,7 +62,7 @@ bool check_data_partition(const char* label, esp_partition_subtype_t subtype, ui
 void init_nvs() {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS needs erase (%s)", esp_err_to_name(err));
+        ESP_LOGW(TAG, "NVS needs erase (0x%x)", static_cast<unsigned>(err));
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
