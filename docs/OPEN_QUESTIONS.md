@@ -23,7 +23,7 @@ Items are ranked by how much the design changes if the answer differs from the a
 | Artifact trust | HTTP + SHA-256 (signature can be added later) |
 | Manifest | One manifest per target URL, one image |
 | Web UI | Full config UI |
-| Multi-target | Data model keyed by ID, v1 cap = 1 |
+| Multi-target | Data model keyed by ID. First capped at 1; now up to `DFU32_MAX_TARGETS` (default 5, 1–10), one of them the default, all sharing one staging slot |
 | Old bootloaders | Warn only |
 | Retries | Configurable, default 3 full restarts with backoff |
 | Hardware | Portable, 4 MB flash floor, **2 MB PSRAM required**; bench on Feather ESP32-S3 #5477 (4 MB/2 MB) (+ Feather V2) |

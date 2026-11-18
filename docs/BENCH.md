@@ -257,7 +257,7 @@ TOKEN=<token from the reply>
 
 Every other call sends `-H "Authorization: Bearer $TOKEN"`. `GET /status` works without it.
 
-**Set up the target** (one target in v1; a target made on the console takes the first id you PUT):
+**Set up the target** (a `PUT` to a new id creates a target, up to `DFU32_MAX_TARGETS`; add `"default":true` to make it the default):
 
 ```bash
 curl -s -X PUT $DFU/targets/t096 -H "Authorization: Bearer $TOKEN" -d '{"name":"Bench T096","board":"heltec_t096","mac":"F4:1C:36:A7:33:95","manifest_url":"http://<pc-ip>:8000/t096/manifest.json"}'
@@ -349,7 +349,10 @@ A full run flashes the repeater about 20 times and takes roughly an hour, most o
 ### What it changes on DFU32
 
 - It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also turns the token off and on again (with `token clear` and `POST /system/token/clear`).
-- It creates or overwrites the target (`--target-id`, default `t096`). If another target id exists, it is deleted, because v1 allows only one.
+- It creates or overwrites its own target (`--target-id`, default `t096`) next to yours. It leaves it there when the run ends.
+- The console checks act on the default target, so they make the bench target the default. When the run ends, your default is the default again. This also happens after Ctrl+C.
+- When DFU32 is full, the checks that need the bench target are skipped. Free a slot, or pass `--allow-delete-target`. With it, the script saves one of your targets (not the default, if it can help it), deletes it, and puts it back with the same settings when the run ends. Saving it needs the API, so without WiFi the check is skipped anyway. If DFU32 is full then, it deletes the bench target first to make room. The target's last good flash (`last_ok_version`) is not kept.
+- Putting things back is best effort. The report lists what was done under "After the run", and anything that failed, with the settings to restore by hand.
 - 3.13 renames DFU32 to `bench-dfu`, reboots, then renames it back and reboots again (`--keep-hostname` skips the rename back).
 - The staged image ends up as the image under test.
 
@@ -430,7 +433,7 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 4. **Happy path from the UI only:** **Check** shows the version and board match; **Flash**, then `start ota` over LoRa from the companion app. The job card shows armed (countdown), then the progress bar and rate, then succeeded, with a link to the run. This is the M4 "done when" (after joining WiFi over Improv).
 5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
 6. **Runs:** the list shows the flashes; a run's page has the attempts and the log. **Logs** tails live while a flash runs.
-7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
+7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the targets and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
 8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards, and the page shows that error (not a connection reset). The merged `.bin`, on any chip: refused as "this is the merged image, for a fresh install over USB", naming `dfu32-<board>.bin` to upload instead.
 9. **Rollback rules:**
    - With the router on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
@@ -467,7 +470,7 @@ Once `main` has it, the installer page itself (MILESTONES M5 bench):
     - b. **Wrong passphrase:** give Improv a wrong passphrase. It reports "unable to connect"; after a RESET, the previous network is still the one in use.
     - c. **Corrected passphrase:** give Improv the same SSID with the right passphrase, then RESET. It rejoins (a config that differs only in the password is saved).
     - d. **Wrong passphrase on an erased board:** on a board with no network (installed with "Erase device"), give a wrong passphrase. It reports "unable to connect"; after a RESET the boot log says there are no WiFi credentials and Improv BLE opens by itself.
-11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
+11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the targets and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.
 14. **Earlier version:** choose an earlier release under **Choose a version** and update a configured device without erasing: `/api/v1/status` reports that version, and settings are kept. Choose the latest again to go back.

@@ -152,6 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--manual-reset", action="store_true", help="ask you to press RESET instead of pulsing RTS")
     g.add_argument("--power-cycle", action="store_true", help="1.4: ask you to unplug DFU32 instead of a reset")
     g.add_argument("--keep-hostname", action="store_true", help="3.13: leave the hostname as bench-dfu")
+    g.add_argument("--allow-delete-target", action="store_true",
+                   help="when DFU32 is full, delete one of its targets to make room for the bench's (its settings "
+                        "are saved first and it is put back when the run ends); without it, those checks are skipped")
     g.add_argument("--no-reset", action="store_true", help="don't reset DFU32 when the run starts")
     g.add_argument("--eol", choices=["cr", "lf", "crlf"], default="cr", help="line ending sent to the console")
     g.add_argument("--echo", action="store_true", help="also print everything DFU32 logs")

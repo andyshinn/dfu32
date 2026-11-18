@@ -8,10 +8,14 @@ menu "DFU32"
 
     config DFU32_MAX_TARGETS
         int "Maximum number of nRF52 targets"
-        range 1 1
-        default 1
+        range 1 10
+        default 5
         help
-            The data model is keyed by target id; v1 supports exactly one target.
+            How many targets (repeater MACs and their settings) DFU32 can
+            remember; one of them is the default. Each is one NVS record of
+            about 0.4 KB (0.7 KB at most), so 10 still fit comfortably in the
+            24 KB NVS partition of 4 MB boards. Lowering this never drops
+            targets already stored: it only stops new ones being added.
 
     menu "Board pins"
 

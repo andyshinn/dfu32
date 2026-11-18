@@ -348,7 +348,7 @@ def c_claim(ctx: Ctx) -> None:
     ctx.set_token(r.get("token"))
 
 
-@check("3.2", "PUT/GET target, /status, one-target limit")
+@check("3.2", "PUT/GET target, /status, target limit, default target")
 def c_target(ctx: Ctx) -> None:
     api = ctx.ensure_token()
     body = ctx.ensure_target()
@@ -361,9 +361,64 @@ def c_target(ctx: Ctx) -> None:
     st = api.status()
     ids = [t.get("id") for t in (st or {}).get("targets", [])]
     ctx.expect(ctx.tid in ids, f"GET /status lists the target ({ids})")
-    other = "other-target" if ctx.tid != "other-target" else "second-target"
-    r = api.put(f"/targets/{other}", ctx.target_body())
-    ctx.expect(r.status == 409 and r.error == "TARGET_LIMIT", f"PUT /targets/{other} -> 409 TARGET_LIMIT", r.short())
+    defaults = [t.get("id") for t in (st or {}).get("targets", []) if t.get("default")]
+    ctx.expect(len(defaults) == 1 and (st or {}).get("default_target") == defaults[0],
+               f"GET /status marks one default target ({defaults}, default_target {(st or {}).get('default_target')})")
+    lst = api.get("/targets")
+    max_targets = lst.get("max_targets")
+    ctx.expect(lst.status == 200 and isinstance(max_targets, int) and max_targets >= 1,
+               f"GET /targets reports max_targets ({max_targets})", lst.short())
+    before = lst.get("default")
+    have = [t.get("id") for t in (lst.get("targets") or [])]
+    ctx.expect(before in have, f"GET /targets names the default '{before}' ({have})")
+    ctx.data("targets_before", have)
+
+    # Fill DFU32 with throwaway targets (no MAC, so they never match a scan) up to its limit,
+    # check the 409, the default switch and that deleting the default moves it; then remove them.
+    extras: list[str] = []
+    try:
+        for i in range(1, max_targets + 2):
+            other = f"bench-extra-{i}"
+            while other in have or other == ctx.tid:
+                other += "x"
+            r = api.put(f"/targets/{other}", {"name": f"Bench limit test {i}"})
+            if r.status == 201:
+                extras.append(other)
+                continue
+            ctx.expect(r.status == 409 and r.error == "TARGET_LIMIT",
+                       f"PUT /targets/{other} with {len(have) + len(extras)} of {max_targets} stored -> 409 "
+                       "TARGET_LIMIT", r.short())
+            break
+        ctx.expect(len(have) + len(extras) == max_targets,
+                   f"DFU32 took targets up to max_targets ({len(have)} existing + {len(extras)} added)")
+        if not extras:
+            ctx.note(f"this DFU32 holds {max_targets} target(s) and was full: the default switch wasn't tested")
+            return
+        pick = extras[0]
+        r = api.post(f"/targets/{pick}/default")
+        ctx.expect(r.status == 200 and r.get("default") == pick, f"POST /targets/{pick}/default -> 200", r.short())
+        st = api.status() or {}
+        ctx.expect(st.get("default_target") == pick, f"GET /status default_target is now '{pick}'",
+                   str(st.get("default_target")))
+        g = api.get(f"/targets/{pick}")
+        ctx.expect(g.get("default") is True, f"GET /targets/{pick} says default: true", g.short())
+        r = api.post("/targets/bench-no-such-target/default")
+        ctx.expect(r.status == 404, "POST /targets/<missing>/default -> 404", r.short())
+        d = api.delete(f"/targets/{pick}")
+        ctx.expect(d.status == 204, f"DELETE /targets/{pick} (the default) -> 204", d.short())
+        extras.remove(pick)
+        now = api.get("/targets")
+        first = ((now.get("targets") or [{}])[0]).get("id")
+        ctx.expect(now.get("default") == first, f"deleting the default made the first target '{first}' the default",
+                   str(now.get("default")))
+    finally:
+        for other in extras:
+            api.delete(f"/targets/{other}")
+        if before:
+            api.post(f"/targets/{before}/default")  # put the owner's default back
+    after = api.get("/targets")
+    ctx.expect(after.get("default") == before and [t.get("id") for t in (after.get("targets") or [])] == have,
+               f"the throwaway targets are gone and '{before}' is the default again")
 
 
 @check("3.3", "POST /ble/scan right after start ota", needs=("repeater",), after="3.5")
@@ -380,6 +435,12 @@ def c_scan(ctx: Ctx) -> None:
         ctx.note(f"{d.get('addr')} {d.get('name')!r} rssi {d.get('rssi')} dfu={d.get('dfu')} "
                  f"matches_target={d.get('matches_target')}")
     hit = [d for d in devs if d.get("matches_target") == ctx.tid]
+    if not hit:
+        # Another stored target with the same MAC comes first in slot order: matches_target names it.
+        hit = [d for d in devs if ctx.is_repeater_addr(d.get("addr") or "") and d.get("matches_target")]
+        if hit:
+            ctx.warn(f"the repeater matches target '{hit[0].get('matches_target')}', which has the same MAC and "
+                     f"comes before '{ctx.tid}'")
     ctx.expect(hit, f"the repeater shows matches_target '{ctx.tid}'", f"{len(devs)} DFU advertisers seen")
     ctx.expect(hit[0].get("dfu") == "app_buttonless", "it shows dfu: app_buttonless", hit[0].get("dfu"))
     ctx.note("the repeater stays in OTA mode; the next flash may start without another `start ota`")

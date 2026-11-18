@@ -11,6 +11,9 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # goes. Pays for the soft-AP on 4 MB boards (SPEC.md §12.1, -56 KB measured).
 # sdkconfig.debug restores full asserts.
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+# Error-name table off (SPEC.md §12.1, decided 2026-11, about -7.5 KB): codes are
+# logged and reported as hex instead; sdkconfig.debug turns it back on.
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
 # C++ exceptions and RTTI stay at their IDF default (disabled).
 
 # ---- Bluetooth (NimBLE) --------------------------------------------------------

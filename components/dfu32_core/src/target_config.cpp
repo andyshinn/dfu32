@@ -257,6 +257,13 @@ std::string apply_json(std::string_view body, const std::string& id, TargetConfi
     for (const json::Node& item : v.items()) {
         bool known = false;
         for (const FieldDef& d : kFields) known = known || item.key() == d.key;
+        // "default" isn't part of the record: TargetTable::put_json acts on it.
+        if (item.key() == "default") {
+            if (!item.is_bool()) return "default must be true or false";
+            known = true;
+        }
+        // GET /targets/{id} adds the target's last run; sending it back is harmless.
+        known = known || item.key() == "last_run";
         if (!known) return "unknown field '" + std::string(item.key()) + "'";
     }
     // Start from a clean copy: a stored field that breaks a newer rule falls

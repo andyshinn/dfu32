@@ -93,7 +93,7 @@ def parse_job(out: str) -> dict:
 def parse_flash(out: str) -> dict:
     r: dict = {"ok": False, "aborted": False, "failed": False, "run": 0, "throughput_kBps": None,
                "attempts": [], "wifi_off": "WiFi is off until the flash finishes" in out,
-               "wifi_restored": bool(re.search(r"^WiFi restored\.", out, re.M)), "error": "",
+               "wifi_restored": bool(re.search(r"^WiFi restored\b", out, re.M)), "error": "",
                "erased": "target's app was erased" in out}
     if re.search(r"^FLASH OK", out, re.M):
         r["ok"] = True
