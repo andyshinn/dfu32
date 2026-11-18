@@ -282,7 +282,7 @@ footer a { color: var(--muted); }
   <details>
     <summary>Troubleshooting</summary>
     <dl>
-      <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver.</dd></div>
+      <div><dt>No serial port listed</dt><dd>Use a USB data cable; charge-only cables don’t show up. On the Feather ESP32 V2, install the CP210x or CH9102 driver; on the QuinLED ESP32, the CH340 driver.</dd></div>
       <div><dt>ESP32-S3 or ESP32-C5 not detected</dt><dd>Hold BOOT, tap RESET, then release BOOT and click Connect device again.</dd></div>
       <div><dt>RAK11200 doesn’t start flashing</dt><dd>It has no auto-reset circuit. Pull BOOT0 to GND, press RESET, then click Connect device and Install DFU32. Afterwards, release BOOT0 and press RESET again.</dd></div>
       <div><dt>“Your ESP32 board is not supported”</dt><dd>No board is chosen and the device didn’t report one (it isn’t running DFU32 yet, or runs a release from before boards were reported), so the page doesn’t know which image to install. Close the dialog, choose your board above and connect again. With a custom build, it means the build is for another board than the connected DFU32 reports (the page says which under the version list), or for another chip.</dd></div>
