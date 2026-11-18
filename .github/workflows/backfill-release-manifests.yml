@@ -1,0 +1,92 @@
+name: Backfill release manifests
+
+# Releases published before dfu32-release.json existed (SPEC §9.4) get one
+# written from their own assets: tools/dfu32_release_manifest.py from-merged
+# splits each dfu32-<board>-merged.bin back into its parts, reads the version
+# and ESP-IDF from the app, and finds the partition CSV and erase notice in
+# partitions/baseline.json as it was at that tag. A release that already has
+# a manifest is left alone, so running this again is safe.
+#
+# Run it with dry_run first: the manifests it would attach are uploaded as a
+# workflow artifact to look at. (GitHub's immutable releases, if turned on,
+# refuse new assets on a published release: this needs it off.)
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: "Release tags, space-separated (empty: every published release without a manifest)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Write the manifests but don't attach them"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backfill-release-manifests
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Backfill
+    runs-on: ubuntu-24.04
+    steps:
+      # Every tag, for each one's baseline.json and commit.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Write and attach manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ inputs.tags }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAGS" ]; then
+            TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 200 --json tagName --jq '.[].tagName')
+          fi
+          echo "### Release manifests$([ "$DRY_RUN" = true ] && echo ' (dry run)')" >> "$GITHUB_STEP_SUMMARY"
+          for tag in $TAGS; do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+                 | grep -qx dfu32-release.json; then
+              echo "- $tag: already has one" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            d="assets/$tag"
+            mkdir -p "$d"
+            # The merged images, and the app-only ones where the release has them.
+            if ! gh release download "$tag" --repo "$GITHUB_REPOSITORY" -p 'dfu32-*.bin' -D "$d"; then
+              echo "::warning::$tag: no images to describe"
+              echo "- $tag: no images, skipped" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            baseline=()
+            if git show "$tag:partitions/baseline.json" > "$d.baseline.json" 2>/dev/null; then
+              baseline=(--baseline "$d.baseline.json")
+            fi
+            if ! python3 tools/dfu32_release_manifest.py from-merged --tag "$tag" --assets "$d" \
+                   --commit "$(git rev-list -n 1 "$tag")" "${baseline[@]}" --out "$d/dfu32-release.json"; then
+              echo "::warning::$tag: couldn't be described"
+              echo "- $tag: couldn't be described, skipped" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            python3 tools/dfu32_release_manifest.py verify "$d/dfu32-release.json" --assets "$d"
+            boards=$(jq -r '.boards | keys | join(", ")' "$d/dfu32-release.json")
+            if [ "$DRY_RUN" = true ]; then
+              echo "- $tag: would attach ($boards)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              gh release upload "$tag" "$d/dfu32-release.json" --repo "$GITHUB_REPOSITORY"
+              echo "- $tag: attached ($boards)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Upload the manifests
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-manifests
+          path: assets/*/dfu32-release.json
+          if-no-files-found: ignore
