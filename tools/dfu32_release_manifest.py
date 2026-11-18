@@ -277,10 +277,12 @@ def validate(manifest: dict) -> None:
     for board, b in boards.items():
         if not BOARD_RE.match(board):
             raise ReleaseError(f"bad board name {board!r}")
+        if not isinstance(b, dict):
+            raise ReleaseError(f"{board}: must be an object")
         if not isinstance(b.get("merged"), dict) or b["merged"].get("asset") != merged_name(board):
             raise ReleaseError(f"{board}: merged must name {merged_name(board)}")
         parts = b.get("parts")
-        if not isinstance(parts, list) or sorted(p.get("role") for p in parts) != sorted(ROLES):
+        if not isinstance(parts, list) or not all(isinstance(p, dict) for p in parts) or sorted(p.get("role") for p in parts) != sorted(ROLES):
             raise ReleaseError(f"{board}: parts must be exactly {', '.join(ROLES)}")
         for p in parts:
             if not all(isinstance(p.get(k), int) and p[k] >= 0 for k in ("offset", "size")) or \
@@ -299,8 +301,12 @@ def check_parts(board: str, parts: list[dict], merged_size) -> None:
         raise ReleaseError(f"{board}: the parts run past the end of the merged image")
 
 
-def verify(manifest: dict, assets: Path, boards: list[str] | None = None) -> dict[str, dict[str, bytes]]:
-    """Check each board's assets in ASSETS against MANIFEST. Returns board -> {part sha256: bytes}."""
+def verify(manifest: dict, assets: Path, boards: list[str] | None = None,
+           require_app: bool = True) -> dict[str, dict[str, bytes]]:
+    """Check each board's assets in ASSETS against MANIFEST. Returns board -> {part sha256: bytes}.
+
+    An app-only asset the manifest names must be there too, unless REQUIRE_APP is false
+    (extract, which only needs the merged images)."""
     validate(manifest)
     unknown = sorted(set(boards or ()) - set(manifest["boards"]))
     if unknown:
@@ -323,7 +329,10 @@ def verify(manifest: dict, assets: Path, boards: list[str] | None = None) -> dic
             out[board][p["sha256"]] = data
         if b.get("app"):
             app = assets / b["app"]["asset"]
-            if app.is_file() and sha256(app.read_bytes()) != b["app"]["sha256"]:
+            if not app.is_file():
+                if require_app:
+                    raise ReleaseError(f"{board}: {app} not found")
+            elif sha256(app.read_bytes()) != b["app"]["sha256"]:
                 raise ReleaseError(f"{board}: {app.name} doesn't match the manifest")
     return out
 
@@ -331,7 +340,7 @@ def verify(manifest: dict, assets: Path, boards: list[str] | None = None) -> dic
 def extract(manifest: dict, assets: Path, out: Path, boards: list[str] | None = None) -> list[Path]:
     """Verify, then write each part to OUT/sha256/<hash>.bin. Returns the paths written."""
     written = []
-    for parts in verify(manifest, assets, boards).values():
+    for parts in verify(manifest, assets, boards, require_app=False).values():
         for digest, data in parts.items():
             dest = out / "sha256" / f"{digest}.bin"
             dest.parent.mkdir(parents=True, exist_ok=True)

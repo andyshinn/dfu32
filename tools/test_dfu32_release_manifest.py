@@ -276,6 +276,11 @@ class VerifyExtract(unittest.TestCase):
             m = r.build()
             with self.assertRaisesRegex(rm.ReleaseError, "not in the manifest: rak11200_rak19007"):
                 rm.verify(m, r.assets, ["rak11200_rak19007"])
+            # An app-only asset the manifest names must be there; extract only needs the merged image.
+            (r.assets / "dfu32-feather_esp32s3.bin").unlink()
+            with self.assertRaisesRegex(rm.ReleaseError, "dfu32-feather_esp32s3.bin not found"):
+                rm.verify(m, r.assets)
+            self.assertEqual(len(rm.extract(m, r.assets, r.assets / "out")), 4)
             (r.assets / "dfu32-feather_esp32s3-merged.bin").unlink()
             with self.assertRaisesRegex(rm.ReleaseError, "not found"):
                 rm.verify(m, r.assets)
@@ -298,6 +303,8 @@ class VerifyExtract(unittest.TestCase):
             broken(lambda m: m["boards"].update({"Bad Name": b(m)}), "bad board name")
             broken(lambda m: b(m)["merged"].update(asset="x.bin"), "merged must name")
             broken(lambda m: b(m)["parts"].pop(), "exactly")
+            broken(lambda m: m["boards"].update(feather_esp32s3=[]), "must be an object")
+            broken(lambda m: b(m)["parts"].append("x"), "exactly")
             broken(lambda m: b(m)["parts"][1].update(offset="0x8000"), "integer offset")
             broken(lambda m: b(m)["parts"].reverse(), "flash order")
             broken(lambda m: b(m)["parts"][0].update(size=0x9000), "bootloader overlaps partition-table")
