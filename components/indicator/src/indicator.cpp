@@ -51,9 +51,12 @@ const blink_step_t kIdentify[] = {COLOR(255, 255, 255), LEVEL(255, 100), LEVEL(0
 const blink_step_t kHold2[] = {COLOR(255, 110, 0), LEVEL(255, 400), LEVEL(0, 400), LOOP};
 const blink_step_t kHold5[] = {COLOR(255, 110, 0), LEVEL(255, 100), LEVEL(0, 100), LOOP};
 const blink_step_t kHold15[] = {COLOR(255, 110, 0), LEVEL(255, 0), STOP};
+// SPEC.md §13.4: DFU32's own access point is up and the station has no IP.
+// Offline's timing, in dim blue.
+const blink_step_t kAccessPoint[] = {COLOR(0, 0, 255), LEVEL(80, 1000), LEVEL(0, 1000), LOOP};
 
 const blink_step_t* kNeoLists[] = {kOff,    kIdle,    kOffline,  kImprov, kFetching, kAwaiting, kTransfer,
-                                   kSuccess, kFailed, kErased, kIdentify, kHold2,   kHold5,    kHold15};
+                                   kSuccess, kFailed, kErased, kIdentify, kHold2,   kHold5,    kHold15, kAccessPoint};
 static_assert(sizeof(kNeoLists) / sizeof(kNeoLists[0]) == static_cast<size_t>(Pattern::Count));
 
 // ---- red LED (plain GPIO) -----------------------------------------------------------
@@ -108,7 +111,7 @@ bool setup_neopixel() {
     cfg.blink_list_num = static_cast<uint16_t>(Pattern::Count);
     const esp_err_t err = led_indicator_new_strips_device(&cfg, &strips, &g_neo);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "NeoPixel on GPIO %d unavailable: %s", CONFIG_DFU32_NEOPIXEL_GPIO, esp_err_to_name(err));
+        ESP_LOGW(TAG, "NeoPixel on GPIO %d unavailable: 0x%x", CONFIG_DFU32_NEOPIXEL_GPIO, static_cast<unsigned>(err));
         g_neo = nullptr;
         return false;
     }
@@ -130,7 +133,7 @@ bool setup_red() {
     cfg.blink_list_num = 3;
     const esp_err_t err = led_indicator_new_gpio_device(&cfg, &gpio, &g_red);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "status LED on GPIO %d unavailable: %s", CONFIG_DFU32_STATUS_LED_GPIO, esp_err_to_name(err));
+        ESP_LOGW(TAG, "status LED on GPIO %d unavailable: 0x%x", CONFIG_DFU32_STATUS_LED_GPIO, static_cast<unsigned>(err));
         g_red = nullptr;
         return false;
     }
@@ -163,7 +166,7 @@ bool setup_button() {
     if (err == ESP_OK) err = iot_button_register_cb(g_button, BUTTON_PRESS_DOWN, nullptr, &on_press_down, nullptr);
     if (err == ESP_OK) err = iot_button_register_cb(g_button, BUTTON_PRESS_UP, nullptr, &on_press_up, nullptr);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "button on GPIO %d unavailable: %s", CONFIG_DFU32_BUTTON_GPIO, esp_err_to_name(err));
+        ESP_LOGW(TAG, "button on GPIO %d unavailable: 0x%x", CONFIG_DFU32_BUTTON_GPIO, static_cast<unsigned>(err));
         return false;
     }
     ESP_LOGI(TAG, "button on GPIO %d: hold 2 s = Improv BLE, 5 s = clear the API token, 15 s = factory reset",
@@ -212,6 +215,7 @@ void indicator_task(void*) {
         in.provisioned = ns.provisioned;
         in.wifi_connected = ns.connected;
         in.wifi_stopped = ns.stopped;
+        in.ap_up = ns.ap.active;  // SPEC.md §9.5: AccessPoint pattern while the AP is up and no STA IP
         in.improv_active = g_hooks.improv_active && g_hooks.improv_active();
         in.identify = g_hooks.identifying && g_hooks.identifying();
         const int64_t pressed = g_pressed_at_us.load();

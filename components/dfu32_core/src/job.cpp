@@ -154,6 +154,32 @@ uint32_t run_deadline_s(uint32_t attempts, uint32_t bin_size, uint32_t cap_s) no
     return static_cast<uint32_t>(d < cap_s ? d : cap_s);
 }
 
+RestoreStep restore_step(bool expect_connect, bool sta_ip, bool fault, bool radio_alive, uint8_t attempt) noexcept {
+    // SPEC.md §7.3 layer 4: a network that was down before the transfer is
+    // never a reason to reboot.
+    if (!expect_connect) return RestoreStep::Done;
+    // Fault injection simulates a dead radio: it ignores the IP and the
+    // driver's activity so the reboot path can be tested on the bench.
+    if (fault) return attempt < 2 ? RestoreStep::Retry : RestoreStep::Reboot;
+    if (sta_ip) return RestoreStep::Done;
+    if (attempt < 2) return RestoreStep::Retry;
+    // Out of retries: reboot only when the driver shows no sign of life. A
+    // working radio means the home network is gone, which a reboot can't fix,
+    // and the phones on DFU32's access point would lose it (§9.5).
+    return radio_alive ? RestoreStep::Done : RestoreStep::Reboot;
+}
+
+OtaVerdict ota_verdict(bool sta_ip, [[maybe_unused]] bool ap_started, bool provisioned,
+                       uint8_t last_reason) noexcept {
+    // ap_started is deliberately ignored (§9.5, §12.3): the SoftAP coming up
+    // proves nothing about the station path, so a provisioned image whose
+    // station never connects or reports a disconnect still rolls back.
+    if (sta_ip) return OtaVerdict::Confirm;
+    if (!provisioned) return OtaVerdict::ConfirmNoNetwork;
+    if (last_reason != 0) return OtaVerdict::ConfirmRadioWorks;
+    return OtaVerdict::Rollback;
+}
+
 void write_json(json::ObjectWriter& w, const Snapshot& s, uint32_t now_uptime_s) {
     w.add("id", int64_t{s.id}).add("state", to_string(s.state));
     if (s.id == 0) return;

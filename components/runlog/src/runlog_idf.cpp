@@ -2,6 +2,7 @@
 #include "runlog/runlog_idf.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -29,14 +30,19 @@ constexpr uint32_t kJobMagic = 0x4A4F4231;  // "JOB1"
 LogRing* s_ring = nullptr;
 SemaphoreHandle_t s_ring_mutex = nullptr;
 vprintf_like_t s_prev_vprintf = nullptr;
+std::atomic<bool> s_console_out{true};  // boot output always reaches the console
 
 char s_line[256];  // formatting buffer, guarded by s_ring_mutex (keeps it off small task stacks)
 
 int log_hook(const char* fmt, va_list ap) {
     // ISR context can't take a mutex; such output only goes to the console.
     // Otherwise never block a logging task for long: if a reader holds the
-    // ring, skip the capture (not the console output).
+    // ring, skip the capture (not the console output). The ring gets every
+    // line even while console output is off; a line the ring didn't get (no
+    // ring, ISR, contended mutex) goes to the console anyway, so it isn't lost.
+    bool captured = false;
     if (s_ring != nullptr && !xPortInIsrContext() && xSemaphoreTake(s_ring_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        captured = true;
         va_list copy;
         va_copy(copy, ap);
         const int n = std::vsnprintf(s_line, sizeof(s_line), fmt, copy);
@@ -52,6 +58,7 @@ int log_hook(const char* fmt, va_list ap) {
         }
         xSemaphoreGive(s_ring_mutex);
     }
+    if (captured && !s_console_out.load(std::memory_order_relaxed)) return 0;
     return s_prev_vprintf != nullptr ? s_prev_vprintf(fmt, ap) : std::vprintf(fmt, ap);
 }
 
@@ -111,6 +118,8 @@ bool log_capture_start(size_t bytes) {
     ESP_LOGI(TAG, "capturing logs in a %u KB ring", static_cast<unsigned>(bytes / 1024));
     return true;
 }
+
+void log_console_output(bool on) { s_console_out.store(on, std::memory_order_relaxed); }
 
 uint64_t log_position() {
     if (s_ring == nullptr) return 0;

@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "dfu32_core/api_core.hpp"
@@ -41,10 +42,28 @@ bool load_target(const std::string& id, TargetConfig& out, bool& found);
 bool load_default_target(TargetConfig& out, bool& found);
 
 /// Device-level settings (SPEC.md §9.1): keys hostname, ntp_server,
-/// wifi_off_dfu, dfu_deadline. net reads hostname/ntp_server at boot, so
-/// changes to those apply after a reboot.
+/// wifi_off_dfu, dfu_deadline, and the AP fallback's ap_enabled, ap_password,
+/// ap_delay, ap_idle (§9.5). net reads hostname/ntp_server at boot, so changes
+/// to those apply after a reboot. load_device sanitises the AP keys
+/// (ap::sanitize_loaded): a bad delay or idle limit loads as the default, and a bad
+/// password turns AP mode off rather than opening the AP.
 bool load_device(api::DeviceConfig& out);
 bool save_device(const api::DeviceConfig& c);
+
+/// Read-modify-write of the device settings under one mutex (console `ap` and
+/// PUT /config can't lose each other's change). edit returns "" or a reason;
+/// then validate(); then save. Returns "" or the reason ("NVS write failed").
+/// Nothing is saved on a reason. *out gets the saved settings. While the stored
+/// AP password is invalid, an edit that doesn't set it keeps it in NVS and may
+/// not turn AP mode on (§9.5); the edit then sees a stand-in password.
+std::string update_device(const std::function<std::string(api::DeviceConfig&)>& edit,
+                          api::DeviceConfig* out = nullptr);
+
+/// Live log output on the console once its prompt is up (key `console_log`,
+/// u8; the console's `logs on|off`). Unset: CONFIG_DFU32_CONSOLE_LOG. Not part
+/// of DeviceConfig, so the API neither shows nor changes it.
+bool load_console_log();
+bool save_console_log(bool on);
 
 /// SHA-256 of the API token (SPEC.md §9.3). False when none is set (the API is open).
 bool load_token_hash(std::array<uint8_t, 32>& out);
@@ -52,8 +71,10 @@ bool save_token_hash(const std::array<uint8_t, 32>& hash);
 bool clear_token();
 
 /// Factory reset (SPEC.md §9.3): erases the whole `dfu32` namespace (targets,
-/// device settings, token hash). WiFi credentials are the WiFi driver's and
-/// are cleared separately; the staging partition and run log are kept.
+/// device settings including the AP settings and console_log, token hash).
+/// WiFi credentials are the WiFi driver's and are cleared separately
+/// (net::factory_reset(), called first so the AP can't come up before the
+/// reboot); the staging partition and run log are kept.
 bool erase_all();
 
 }  // namespace dfu32::config

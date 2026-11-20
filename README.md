@@ -75,6 +75,7 @@ python3 tools/build_all.py
 | `feather_esp32_v2` | Adafruit Feather ESP32 V2 | 8 MB / 2 MB |
 | `esp32s3_n16r8` | Generic ESP32-S3 N16R8 DevKitC | 16 MB / 8 MB |
 | `rak11200_rak19007` | RAKwireless WisBlock RAK11200 on a RAK19007 base | 4 MB / 8 MB (4 MB mapped) |
+| `quinled_esp32` | QuinLED ESP32 v4 (not v1/v2: no PSRAM) | 8 MB / 2 MB |
 | `xiao_esp32s3` | Seeed Studio XIAO ESP32S3 (or XIAO ESP32S3 Sense) | 8 MB / 8 MB |
 | `xiao_esp32c5` | Seeed Studio XIAO ESP32C5 | 8 MB / 8 MB |
 

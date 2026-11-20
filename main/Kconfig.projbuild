@@ -52,6 +52,17 @@ menu "DFU32"
         range 8 256
         default 64
 
+    config DFU32_CONSOLE_LOG
+        bool "Live log output on the serial console by default"
+        default n
+        help
+            Off: once the console prompt is up, log lines go only to the log
+            ring (`logs`, GET /api/v1/logs), so they don't land in the middle
+            of what you type. Boot output before the prompt, and output while a
+            console command runs, always reach the console. `logs on|off`
+            changes it at run time and stores the choice in NVS; this is the
+            setting when nothing is stored (a new or factory-reset device).
+
     config DFU32_IMPROV_BLE
         bool "Improv Wi-Fi provisioning over BLE (only while unprovisioned)"
         default y

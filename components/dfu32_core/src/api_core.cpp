@@ -59,6 +59,8 @@ RouteMatch match_route(std::string_view uri) {
     else if (is(2, "ble", "scan")) m.route = Route::BleScan;
     else if (is(2, "system", "reboot")) m.route = Route::Reboot;
     else if (is(2, "system", "ota")) m.route = Route::SystemOta;
+    else if (is(1, "wifi")) m.route = Route::Wifi;
+    else if (is(2, "wifi", "scan")) m.route = Route::WifiScan;
     else if (is(3, "system", "token", "rotate")) m.route = Route::TokenRotate;
     else if (is(3, "system", "token", "clear")) m.route = Route::TokenClear;
     else if (is(3, "jobs", "current", "abort")) m.route = Route::JobAbort;
@@ -93,6 +95,7 @@ bool method_allowed(Route r, Method m) noexcept {
         case Route::Target: return m == Method::Get || m == Method::Put || m == Method::Delete;
         case Route::Staging: return m == Method::Get || m == Method::Post || m == Method::Delete;
         case Route::Config: return m == Method::Get || m == Method::Put;
+        case Route::Wifi: return m == Method::Put;
         case Route::Claim:
         case Route::TargetCheck:
         case Route::TargetStage:
@@ -104,6 +107,7 @@ bool method_allowed(Route r, Method m) noexcept {
         case Route::TokenRotate:
         case Route::TokenClear:
         case Route::SystemOta:
+        case Route::WifiScan:
         case Route::DebugFault: return m == Method::Post;
     }
     return false;
@@ -300,6 +304,10 @@ std::string validate_ntp_server(const std::string& s) {
     return {};
 }
 
+namespace {
+constexpr const char* kApIdleRange = "ap_idle_s must be 0 (never) or 300-86400";
+}  // namespace
+
 std::string validate(const DeviceConfig& c) {
     if (!c.hostname.empty()) {
         if (auto e = validate_hostname(c.hostname); !e.empty()) return e;
@@ -308,6 +316,9 @@ std::string validate(const DeviceConfig& c) {
     if (c.dfu_deadline_max_s < kMinDeadlineMaxS || c.dfu_deadline_max_s > kMaxDeadlineMaxS) {
         return "dfu_deadline_max_s must be 120-7200";
     }
+    if (auto e = ap::validate_ap_delay(c.ap_delay_s); !e.empty()) return e;
+    if (!ap::validate_ap_idle(c.ap_idle_s)) return kApIdleRange;
+    if (auto e = ap::validate_ap_password(c.ap_password); !e.empty()) return e;
     return {};
 }
 
@@ -315,7 +326,11 @@ void write_json(json::ObjectWriter& w, const DeviceConfig& c) {
     w.add("hostname", c.hostname)
         .add("ntp_server", c.ntp_server)
         .add_bool("wifi_off_dfu", c.wifi_off_dfu)
-        .add("dfu_deadline_max_s", int64_t{c.dfu_deadline_max_s});
+        .add("dfu_deadline_max_s", int64_t{c.dfu_deadline_max_s})
+        .add_bool("ap_enabled", c.ap_enabled)
+        .add("ap_delay_s", int64_t{c.ap_delay_s})
+        .add("ap_idle_s", int64_t{c.ap_idle_s})
+        .add_bool("ap_password_set", !c.ap_password.empty());  // the password itself is write-only (§9.5)
 }
 
 std::string apply_json(std::string_view body, DeviceConfig& c) {
@@ -337,6 +352,25 @@ std::string apply_json(std::string_view body, DeviceConfig& c) {
             int64_t i = 0;
             if (!f.integer(i) || i < 0 || i > UINT32_MAX) return "dfu_deadline_max_s must be an integer";
             next.dfu_deadline_max_s = static_cast<uint32_t>(i);
+        } else if (k == "ap_enabled") {
+            if (!f.is_bool()) return "ap_enabled must be true or false";
+            next.ap_enabled = f.boolean();
+        } else if (k == "ap_delay_s") {
+            int64_t i = 0;
+            if (!f.integer(i)) return "ap_delay_s must be an integer";
+            if (auto e = ap::validate_ap_delay(i < 0 ? 0 : static_cast<uint64_t>(i)); !e.empty()) return e;
+            next.ap_delay_s = static_cast<uint32_t>(i);
+        } else if (k == "ap_idle_s") {
+            int64_t i = 0;
+            if (!f.integer(i) || i < 0 || i > UINT32_MAX || !ap::validate_ap_idle(static_cast<uint32_t>(i))) {
+                return kApIdleRange;
+            }
+            next.ap_idle_s = static_cast<uint32_t>(i);
+        } else if (k == "ap_password") {
+            // Absent keeps the stored password; "" makes the AP open. "ap_password_set"
+            // from a GET isn't accepted back: it falls through to "unknown field".
+            if (!f.is_string()) return "ap_password must be a string";
+            next.ap_password = f.str();
         } else {
             return "unknown field '" + std::string(k) + "'";
         }
@@ -414,6 +448,104 @@ std::string parse_fault_request(std::string_view body, FaultRequest& out) {
     }
     out = r;
     return {};
+}
+
+// ---- WiFi station setup ------------------------------------------------------------
+
+std::string parse_wifi_request(std::string_view body, std::string& ssid, std::string& password) {
+    json::Doc doc;
+    if (auto e = object_body(body, doc, {"ssid", "ssid_hex", "password"}); !e.empty()) return e;
+    const json::Node s = doc.root().get("ssid");
+    const json::Node h = doc.root().get("ssid_hex");
+    std::string name;
+    if (!h.missing()) {
+        // The raw bytes of a name sanitize_ssid had to change (SPEC.md §9.5): JSON text can't carry
+        // invalid UTF-8, so the scan hands these out as hex and they come back the same way.
+        if (!s.missing()) return "give ssid or ssid_hex, not both";
+        constexpr const char* kBadHex = "ssid_hex must be 1-32 bytes as hex";
+        if (!h.is_string()) return kBadHex;
+        const std::string hex = h.str();
+        if (hex.empty() || hex.size() % 2 != 0 || hex.size() > 64) return kBadHex;
+        for (size_t i = 0; i < hex.size(); i += 2) {
+            const int hi = hex_digit(hex[i]), lo = hex_digit(hex[i + 1]);
+            if (hi < 0 || lo < 0) return kBadHex;
+            name += static_cast<char>(hi << 4 | lo);
+        }
+        // The driver's station config is a C string, so net::set_credentials() would refuse it
+        // after the 202; no scan entry holds one (the driver's scan records are C strings too).
+        if (name.find('\0') != std::string::npos) return "ssid_hex must not contain 00 (NUL)";
+    } else {
+        if (s.missing()) return "ssid is required";
+        if (!s.is_string()) return "ssid must be a string";
+        name = s.str();
+    }
+    std::string pw;
+    if (const json::Node p = doc.root().get("password"); !p.missing()) {
+        if (!p.is_string()) return "password must be a string";
+        pw = p.str();
+    }
+    if (auto e = ap::validate_wifi_credentials(name, pw); !e.empty()) return e;
+    ssid = std::move(name);
+    password = std::move(pw);
+    return {};
+}
+
+std::string sanitize_ssid(std::string_view raw) {
+    // An SSID is 32 arbitrary bytes; cJSON would print invalid UTF-8 as is. Each
+    // byte that doesn't start a well-formed sequence becomes U+FFFD (overlongs,
+    // surrogates and code points past U+10FFFF included). NUL too: the writer
+    // takes C strings and would cut the name there.
+    constexpr std::string_view kReplacement = "\xEF\xBF\xBD";
+    std::string out;
+    out.reserve(raw.size());
+    size_t i = 0;
+    while (i < raw.size()) {
+        const auto b = static_cast<unsigned char>(raw[i]);
+        const size_t n = b >= 0x01 && b < 0x80   ? 1
+                         : b >= 0xC2 && b <= 0xDF ? 2
+                         : b >= 0xE0 && b <= 0xEF ? 3
+                         : b >= 0xF0 && b <= 0xF4 ? 4
+                                                  : 0;
+        bool ok = n != 0 && n <= raw.size() - i;
+        for (size_t k = 1; ok && k < n; ++k) ok = (static_cast<unsigned char>(raw[i + k]) & 0xC0) == 0x80;
+        if (ok && n >= 3) {
+            const auto b1 = static_cast<unsigned char>(raw[i + 1]);
+            if ((b == 0xE0 && b1 < 0xA0) || (b == 0xF0 && b1 < 0x90)) ok = false;  // overlong
+            if (b == 0xED && b1 >= 0xA0) ok = false;                               // UTF-16 surrogate
+            if (b == 0xF4 && b1 >= 0x90) ok = false;                               // past U+10FFFF
+        }
+        if (ok) {
+            out.append(raw.substr(i, n));
+            i += n;
+        } else {
+            out.append(kReplacement);
+            ++i;
+        }
+    }
+    return out;
+}
+
+void write_wifi_scan(json::ObjectWriter& w, std::span<const WifiNet> nets) {
+    json::ArrayWriter arr;
+    for (const WifiNet& n : nets) {
+        json::ObjectWriter o;
+        const std::string shown = sanitize_ssid(n.ssid);
+        o.add("ssid", shown);
+        if (shown != n.ssid) {
+            // Lossy: hand out the raw bytes too, so PUT /wifi can join it (ssid_hex, SPEC.md §9.5).
+            static constexpr char kHex[] = "0123456789abcdef";
+            std::string hex;
+            hex.reserve(n.ssid.size() * 2);
+            for (const char c : n.ssid) {
+                hex += kHex[static_cast<unsigned char>(c) >> 4];
+                hex += kHex[static_cast<unsigned char>(c) & 15];
+            }
+            o.add("ssid_hex", hex);
+        }
+        o.add("rssi", int64_t{n.rssi}).add_bool("secured", n.secured);
+        arr.push(std::move(o));
+    }
+    w.add("networks", std::move(arr));
 }
 
 namespace {

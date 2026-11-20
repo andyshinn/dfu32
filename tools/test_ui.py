@@ -94,9 +94,10 @@ class TestPage(unittest.TestCase):
             self.assertNotIn(sink, self.js, sink)
 
     def test_uses_only_known_endpoints(self):
-        paths = set(re.findall(r'"(/(?:status|claim|targets|jobs|runs|staging|ble|logs|config|system)[^"]*)"', self.js))
+        paths = set(re.findall(r'"(/(?:status|claim|targets|jobs|runs|staging|ble|logs|config|system|wifi)[^"]*)"', self.js))
         allowed = ("/status", "/claim", "/targets", "/jobs/current/abort", "/runs", "/staging", "/ble/scan",
-                   "/logs", "/config", "/system/reboot", "/system/token/rotate", "/system/token/clear", "/system/ota")
+                   "/logs", "/config", "/system/reboot", "/system/token/rotate", "/system/token/clear", "/system/ota",
+                   "/wifi", "/wifi/scan")
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
 
@@ -155,6 +156,71 @@ class TestPage(unittest.TestCase):
         self.assertEqual((want["prn"], want["interval_ms"]), (4, 30))
         got = {k: int(v) for k, v in re.findall(r"(\w+): (\d+)", re.search(r"const kDef = \{(.*?)\}", self.js).group(1))}
         self.assertEqual(got, want)
+
+    def test_ap_bounds_are_the_firmware_constants(self):
+        # The WiFi view's access-point limits (SPEC §9.5) come from dfu32_core/ap.hpp.
+        hdr = (ROOT / "components" / "dfu32_core" / "include" / "dfu32_core" / "ap.hpp").read_text()
+
+        def const(name):
+            return int(re.search(r"inline constexpr uint32_t %s = (\d+);" % name, hdr).group(1))
+        want = {"delay": const("kDefaultDelayS"), "min": const("kMinDelayS"), "max": const("kMaxDelayS"),
+                "idle": const("kDefaultIdleS"), "idleMax": const("kMaxIdleS"),
+                "pwMin": const("kMinPasswordLen"), "pwMax": const("kMaxPasswordLen")}
+        got = {k: int(v) for k, v in re.findall(r"(\w+): (\d+)", re.search(r"const kAp = \{(.*?)\}", self.js).group(1))}
+        self.assertEqual(got, want)
+
+    def test_ap_idle_limit_field(self):
+        # The idle limit (SPEC §9.5) is sent as ap_idle_s; 0 (off) must survive the save,
+        # so it is not read with `|| default` like the delay, and the help names the bound.
+        view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
+        self.assertIn("ap_idle_s: idle.value === \"\" ? kAp.idle : Number(idle.value)", view)
+        self.assertIn("value: cfg.ap_idle_s, min: 0, max: kAp.idleMax", view)
+        self.assertRegex(view, r'opt\("Idle limit \(s\)", "[^"]*open to anyone in range[^"]*0 for off')
+
+    def test_wifi_join_sends_ssid_hex_for_lossy_names(self):
+        # A scanned name that isn't valid UTF-8 shows sanitised and is marked; Connect then
+        # sends its raw bytes as ssid_hex, never both keys (SPEC §10.1, PUT /wifi).
+        view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
+        self.assertIn('n.ssid_hex ? " (non-UTF-8 name)" : ""', view)
+        self.assertIn("hex ? { ssid_hex: hex, password: pw.value } : { ssid: p ? p.ssid : s, password: pw.value }", view)
+        # The pick is compared with what the input holds after setting it (.value drops CR/LF),
+        # and an unchanged pick sends the entry's own bytes, never the input's text.
+        self.assertIn("ssid.value = n.ssid; picked = [n, ssid.value];", view)
+        self.assertIn("p = picked && s === picked[1] ? picked[0] : null, hex = p?.ssid_hex,", view)
+
+    def test_refused_attempt_does_not_claim_a_rollback(self):
+        # A web attempt refused when due ("busy") changed nothing (review item 8).
+        view = self.js[self.js.index("async function viewWifi"):self.js.index("// ---- system")]
+        self.assertIn('a.detail === "busy" ? "DFU32 was busy, so nothing was changed.', view)
+
+    def test_status_does_not_redraw_another_view(self):
+        # viewStatus()'s GET (or a Check) can finish after the user moved to another view.
+        body = self.js[self.js.index("function renderStatus()"):]
+        self.assertIn('if (view !== "status") return;', body[:body.index("const j = status.job")])
+
+    def test_wifi_station_part_has_no_null_child(self):
+        # replaceChildren() turns null into the text "null" (h() drops it, replaceChildren doesn't).
+        body = self.js[self.js.index("function renderWifi()"):]
+        call = body[body.index('$("#wsta")?.replaceChildren('):body.index("\n}")]
+        self.assertNotRegex(call, r":\s*null\s*\);")
+
+    def test_logs_have_copy_buttons(self):
+        # The run detail and the Logs view each have a Copy button. The device is served over
+        # plain http (no navigator.clipboard), so the textarea + execCommand fallback must stay,
+        # and nothing may be awaited before it or the browser drops the click's permission.
+        run = self.js[self.js.index("async function viewRun"):self.js.index("// ---- logs")]
+        logs = self.js[self.js.index("function viewLogs"):self.js.index("// ---- wifi")]
+        self.assertIn('copyBtn("Run log", asText)', run)
+        self.assertIn('copyBtn("System log", () => pre.textContent)', logs)
+        fn = self.js[self.js.index("async function copyText"):self.js.index("function copyBtn")]
+        self.assertIn("window.isSecureContext && navigator.clipboard", fn)
+        fallback = fn[fn.index("} else {"):]
+        self.assertIn('document.execCommand("copy")', fallback)
+        self.assertNotIn("await", fallback)
+
+    def test_wifi_view_is_routed(self):
+        self.assertIn('href="#wifi"', self.html)
+        self.assertIn("wifi: viewWifi", re.search(r"const VIEWS = \{(.*?)\}", self.js).group(1))
 
 
 if __name__ == "__main__":

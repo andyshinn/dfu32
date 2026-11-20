@@ -7,6 +7,13 @@ CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# Asserts still abort with a backtrace and core dump; only the file:line text
+# goes. Pays for the soft-AP on 4 MB boards (SPEC.md §12.1, -56 KB measured).
+# sdkconfig.debug restores full asserts.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+# Error-name table off (SPEC.md §12.1, decided 2026-11, about -7.5 KB): codes are
+# logged and reported as hex instead; sdkconfig.debug turns it back on.
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
 # C++ exceptions and RTTI stay at their IDF default (disabled).
 
 # ---- Bluetooth (NimBLE) --------------------------------------------------------
@@ -25,14 +32,17 @@ CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=32
 CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 
 # ---- WiFi / lwIP: drop what DFU32 never uses (app size, SPEC.md §12.1) ---------
-# Station only: no soft-AP. WPA2-Personal (and open) networks only: no
+# Station plus a fallback soft-AP (SPEC.md §9.5), open/WPA2 only; OWE soft-AP
+# off so mbedTLS EC code stays out. WPA2-Personal (and open) networks only: no
 # WPA3-Personal (SAE), no WPA2/3-Enterprise (and its 192-bit GMAC suites), no
 # OWE "enhanced open". WPA2/WPA3 transition-mode networks still connect over
 # WPA2; WPA3-only networks don't. With SAE/OWE gone nothing calls mbedTLS's
 # elliptic-curve code, so the linker drops it. ESP_WIFI_MBEDTLS_CRYPTO itself
 # stays on: in IDF 6.1 the supplicant's built-in crypto doesn't link
-# (undefined sha1_vector).
-# CONFIG_ESP_WIFI_SOFTAP_SUPPORT is not set
+# (undefined sha1_vector). LWIP_MAX_SOCKETS stays 10: the captive DNS uses a
+# raw udp_pcb, not a socket.
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+# CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP is not set
 # CONFIG_ESP_WIFI_ENABLE_WPA3_SAE is not set
 # CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
 # CONFIG_ESP_WIFI_GMAC_SUPPORT is not set

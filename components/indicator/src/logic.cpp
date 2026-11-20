@@ -67,6 +67,10 @@ Output decide(const Inputs& in) {
         o.pattern = Pattern::Failed;
     } else if (in.success_showing) {
         o.pattern = Pattern::Success;
+    } else if (in.ap_up && !in.wifi_connected && !in.wifi_stopped) {
+        // Provisioned or not: with the AP up, "join dfu32-xxxx" is the useful
+        // hint, not "WiFi down" or "idle" (SPEC.md §9.5, §13.4).
+        o.pattern = Pattern::AccessPoint;
     } else if (in.provisioned && !in.wifi_connected && !in.wifi_stopped) {
         o.pattern = Pattern::Offline;
     } else {

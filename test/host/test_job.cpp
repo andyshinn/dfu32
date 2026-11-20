@@ -137,6 +137,85 @@ TEST_CASE("Job: run deadline (SPEC §7.3)", "[job]") {
     CHECK(run_deadline_s(1, 1, 1200) == 181);  // rounds up
 }
 
+TEST_CASE("Job: restore step (SPEC §7.3 layer 4)", "[job]") {
+    // The full truth table, checked against the rules in order.
+    for (const bool expect : {false, true}) {
+        for (const bool ip : {false, true}) {
+            for (const bool fault : {false, true}) {
+                for (const bool alive : {false, true}) {
+                    for (const uint8_t attempt : {uint8_t{1}, uint8_t{2}}) {
+                        CAPTURE(expect, ip, fault, alive, attempt);
+                        const RestoreStep got = restore_step(expect, ip, fault, alive, attempt);
+                        RestoreStep want = RestoreStep::Reboot;
+                        if (!expect) {
+                            want = RestoreStep::Done;
+                        } else if (fault) {
+                            want = attempt < 2 ? RestoreStep::Retry : RestoreStep::Reboot;
+                        } else if (ip) {
+                            want = RestoreStep::Done;
+                        } else if (attempt < 2) {
+                            want = RestoreStep::Retry;
+                        } else if (alive) {
+                            want = RestoreStep::Done;
+                        }
+                        CHECK(got == want);
+                        // The home network was down at the handover: never insist.
+                        if (!expect) CHECK(got == RestoreStep::Done);
+                    }
+                }
+            }
+        }
+    }
+    // Fault injection (a dead radio) retries once, then reboots, whatever the
+    // IP or driver activity says, so the bench reaches the reboot path.
+    for (const bool ip : {false, true}) {
+        for (const bool alive : {false, true}) {
+            CHECK(restore_step(true, ip, true, alive, 1) == RestoreStep::Retry);
+            CHECK(restore_step(true, ip, true, alive, 2) == RestoreStep::Reboot);
+        }
+    }
+    // Home network gone, radio working (a disconnect reason, or the AP is up):
+    // keep running for the phones on the access point.
+    CHECK(restore_step(true, false, false, true, 1) == RestoreStep::Retry);
+    CHECK(restore_step(true, false, false, true, 2) == RestoreStep::Done);
+    // No sign of life from the driver after the retry: reboot.
+    CHECK(restore_step(true, false, false, false, 2) == RestoreStep::Reboot);
+    CHECK(restore_step(true, true, false, false, 1) == RestoreStep::Done);
+}
+
+TEST_CASE("Job: OTA verdict (SPEC §12.3)", "[job]") {
+    // Full truth table: ap_started never changes the verdict.
+    for (const bool ip : {false, true}) {
+        for (const bool ap : {false, true}) {
+            for (const bool prov : {false, true}) {
+                for (const uint8_t reason : {uint8_t{0}, uint8_t{201}}) {
+                    CAPTURE(ip, ap, prov, reason);
+                    OtaVerdict want = OtaVerdict::Rollback;
+                    if (ip) {
+                        want = OtaVerdict::Confirm;
+                    } else if (!prov) {
+                        want = OtaVerdict::ConfirmNoNetwork;
+                    } else if (reason != 0) {
+                        want = OtaVerdict::ConfirmRadioWorks;
+                    }
+                    CHECK(ota_verdict(ip, ap, prov, reason) == want);
+                    CHECK(ota_verdict(ip, ap, prov, reason) == ota_verdict(ip, !ap, prov, reason));
+                }
+            }
+        }
+    }
+    // A working SoftAP proves nothing about the station path (§9.5): a
+    // provisioned image with no IP and no disconnect reason rolls back.
+    CHECK(ota_verdict(false, true, true, 0) == OtaVerdict::Rollback);
+    CHECK(ota_verdict(false, false, true, 0) == OtaVerdict::Rollback);
+    CHECK(ota_verdict(false, true, true, 201) == OtaVerdict::ConfirmRadioWorks);
+    CHECK(ota_verdict(false, false, true, 201) == OtaVerdict::ConfirmRadioWorks);
+    CHECK(ota_verdict(false, true, false, 0) == OtaVerdict::ConfirmNoNetwork);
+    CHECK(ota_verdict(false, false, false, 0) == OtaVerdict::ConfirmNoNetwork);
+    CHECK(ota_verdict(true, true, true, 0) == OtaVerdict::Confirm);
+    CHECK(ota_verdict(true, false, true, 0) == OtaVerdict::Confirm);
+}
+
 TEST_CASE("Job: snapshot JSON", "[job]") {
     {
         json::ObjectWriter w;

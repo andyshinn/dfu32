@@ -268,6 +268,45 @@ class StagingPage(unittest.TestCase):
         self.assertIn(f"const LOGS_ITEM = '{fewt.HOOK_LABEL}';", self.DIALOG)
 
 
+class ApPage(unittest.TestCase):
+    """The installer's "Enable AP mode" (web/ap-console.js, SPEC §9.4) against the firmware it drives."""
+    AP_JS = (REPO / "web" / "ap-console.js").read_text()
+
+    def test_loaded_by_page(self):
+        self.assertIn("from './ap-console.js'", Page.HTML)
+        self.assertIn("from './stage-dialog.js'", Page.HTML)
+        self.assertIn("export const onDialogClosed", StagingPage.DIALOG)
+
+    def test_no_external_urls(self):
+        self.assertNotRegex(self.AP_JS, r"https?://")
+
+    def test_password_limits_match_firmware(self):
+        hpp = (REPO / "components" / "dfu32_core" / "include" / "dfu32_core" / "ap.hpp").read_text()
+        for js, cpp in (("MIN_PW", "kMinPasswordLen"), ("MAX_PW", "kMaxPasswordLen")):
+            want = int(re.search(rf"{cpp} = (\d+);", hpp).group(1))
+            self.assertEqual(int(re.search(rf"export const {js} = (\d+);", self.AP_JS).group(1)), want)
+            self.assertIn(f'{"minlength" if js == "MIN_PW" else "maxlength"}="{want}"', Page.HTML)
+
+    def test_stated_defaults_match_firmware(self):
+        # The checkbox text names the default start delay and idle limit (SPEC §9.5).
+        hpp = (REPO / "components" / "dfu32_core" / "include" / "dfu32_core" / "ap.hpp").read_text()
+        text = re.search(r'<span class="muted">Off by default\. DFU32 then broadcasts(.*?)</span>', Page.HTML, re.S).group(1)
+        delay = int(re.search(r"kDefaultDelayS = (\d+);", hpp).group(1))
+        idle = int(re.search(r"kDefaultIdleS = (\d+);", hpp).group(1))
+        self.assertIn(f"loses it for {delay // 60} minutes", text)
+        self.assertIn(f"goes off after {idle // 60} minutes and comes back {delay // 60} minutes later", text)
+
+    def test_console_replies_match(self):
+        # The page matches these first lines and the plain prompt (SPEC §9.5).
+        console = (REPO / "main" / "console.cpp").read_text()
+        self.assertIn('reg("ap"', console)
+        for reply in ("AP mode on.", "AP password set.", "Not saved: ", "Unrecognized command"):
+            self.assertIn(reply, console)
+            self.assertIn(f"'{reply}", self.AP_JS)
+        prompt = re.search(r'kPromptPlain = "([^"]+)";', console).group(1)
+        self.assertIn(f"const PROMPT = '{prompt}';", self.AP_JS)
+
+
 class PartitionBaseline(unittest.TestCase):
     TABLE = """nvs, data, nvs, 0x9000, 0x6000,
 otadata, data, ota, 0xF000, 0x2000,

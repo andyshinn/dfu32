@@ -33,6 +33,8 @@ TEST_CASE("API: route matching", "[api]") {
     CHECK(match_route("/api/v1/system/ota").route == Route::SystemOta);
     CHECK(match_route("/api/v1/jobs/current/abort").route == Route::JobAbort);
     CHECK(match_route("/api/v1/debug/fault").route == Route::DebugFault);
+    CHECK(match_route("/api/v1/wifi").route == Route::Wifi);
+    CHECK(match_route("/api/v1/wifi/scan").route == Route::WifiScan);
 
     auto t = match_route("/api/v1/targets/attic-repeater");
     CHECK(t.route == Route::Target);
@@ -60,9 +62,9 @@ TEST_CASE("API: route matching", "[api]") {
     for (const char* bad : {"/", "/api/v1/", "/api/v1", "/api/v2/status", "/api/v1/statuses", "/api/v1//status",
                             "/api/v1/targets/attic/erase", "/api/v1/targets/attic/check/x", "/api/v1/runs/0",
                             "/api/v1/runs/x", "/api/v1/runs/007", "/api/v1/runs/0x10", "/api/v1/runs/99999999999",
-                            "/api/v1/jobs/1/abort", "/api/v1/targets//check", "/api/v1/a/b/c/d/e",
-                            "/api/v1/targets//default", "/api/v1/targets/attic/default/x",
-                            "/api/v1/default"}) {
+                            "/api/v1/jobs/1/abort", "/api/v1/targets//check", "/api/v1/a/b/c/d/e", "/api/v1/wifi/x",
+                            "/api/v1/wifi/scan/1", "/api/v1/wifiscan", "/api/v1/targets//default",
+                            "/api/v1/targets/attic/default/x", "/api/v1/default"}) {
         INFO(bad);
         CHECK(match_route(bad).route == Route::NotFound);
         CHECK(match_route(bad).id.empty());
@@ -99,6 +101,17 @@ TEST_CASE("API: methods and public routes", "[api]") {
     CHECK_FALSE(is_public(Route::SystemOta));
     CHECK(method_allowed(Route::SystemOta, Method::Post));
     CHECK_FALSE(method_allowed(Route::SystemOta, Method::Get));
+
+    CHECK(method_allowed(Route::Wifi, Method::Put));
+    for (Method m : {Method::Get, Method::Post, Method::Delete, Method::Other}) {
+        CHECK_FALSE(method_allowed(Route::Wifi, m));
+    }
+    CHECK(method_allowed(Route::WifiScan, Method::Post));
+    for (Method m : {Method::Get, Method::Put, Method::Delete, Method::Other}) {
+        CHECK_FALSE(method_allowed(Route::WifiScan, m));
+    }
+    CHECK_FALSE(is_public(Route::Wifi));
+    CHECK_FALSE(is_public(Route::WifiScan));
 }
 
 TEST_CASE("API: query parameters", "[api]") {
@@ -323,7 +336,224 @@ TEST_CASE("API: device config", "[api]") {
 
     dfu32::json::ObjectWriter w;
     write_json(w, c);
-    CHECK(w.str() == R"({"hostname":"","ntp_server":"time.lan","wifi_off_dfu":false,"dfu_deadline_max_s":900})");
+    CHECK(w.str() == R"({"hostname":"","ntp_server":"time.lan","wifi_off_dfu":false,"dfu_deadline_max_s":900,)"
+                     R"("ap_enabled":false,"ap_delay_s":120,"ap_idle_s":1800,"ap_password_set":false})");
+}
+
+TEST_CASE("API: device config, access-point settings", "[api]") {
+    DeviceConfig c;
+    CHECK_FALSE(c.ap_enabled);
+    CHECK(c.ap_delay_s == 120);
+    CHECK(c.ap_password.empty());
+
+    CHECK(apply_json(R"({"ap_enabled":true,"ap_delay_s":30,"ap_password":"s3cret pass"})", c).empty());
+    CHECK(c.ap_enabled);
+    CHECK(c.ap_delay_s == 30);
+    CHECK(c.ap_password == "s3cret pass");
+    CHECK(apply_json(R"({"ap_delay_s":1800})", c).empty());
+    CHECK(c.ap_delay_s == 1800);
+    CHECK(c.ap_password == "s3cret pass");  // absent keeps it
+
+    // Write-only: GET /config never carries the password.
+    dfu32::json::ObjectWriter w;
+    write_json(w, c);
+    const std::string out = w.str();
+    CHECK(out.find("s3cret") == std::string::npos);
+    CHECK_THAT(out, Catch::Matchers::EndsWith(
+                        R"("ap_enabled":true,"ap_delay_s":1800,"ap_idle_s":1800,"ap_password_set":true})"));
+
+    const DeviceConfig before = c;
+    const auto refused = [&](const char* body) {
+        INFO(body);
+        CHECK_FALSE(apply_json(body, c).empty());
+        CHECK(c.ap_enabled == before.ap_enabled);
+        CHECK(c.ap_delay_s == before.ap_delay_s);
+        CHECK(c.ap_password == before.ap_password);
+        CHECK(c.ap_idle_s == before.ap_idle_s);
+    };
+    refused(R"({"ap_delay_s":29})");
+    refused(R"({"ap_delay_s":1801})");
+    refused(R"({"ap_delay_s":-1})");
+    refused(R"({"ap_delay_s":1.5})");
+    refused(R"({"ap_delay_s":"120"})");
+    refused(R"({"ap_password":"1234567"})");
+    refused(R"({"ap_password":"1234567890123456789012345678901234567890123456789012345678901234"})");
+    refused(R"({"ap_password":"line
+break"})");
+    refused(R"({"ap_password":12345678})");
+    refused(R"({"ap_enabled":"true"})");
+    refused(R"({"ap_enabled":false,"ap_delay_s":29})");  // nothing applied from a refused body
+    CHECK(apply_json(R"({"ap_password_set":false})", c) == "unknown field 'ap_password_set'");
+    CHECK(apply_json(R"({"ap_delay_s":29})", c) == "ap_delay_s must be 30-1800");
+
+    CHECK(apply_json(R"({"ap_password":""})", c).empty());  // open
+    CHECK(c.ap_password.empty());
+
+    DeviceConfig bad;
+    bad.ap_delay_s = 10;
+    CHECK_FALSE(validate(bad).empty());
+    bad.ap_delay_s = 120;
+    bad.ap_password = "short";
+    CHECK_FALSE(validate(bad).empty());
+    bad.ap_password.clear();
+    bad.ap_idle_s = 299;
+    CHECK(validate(bad) == "ap_idle_s must be 0 (never) or 300-86400");
+    bad.ap_idle_s = 0;
+    CHECK(validate(bad).empty());
+}
+
+TEST_CASE("API: device config, access-point idle limit", "[api]") {
+    DeviceConfig c;
+    CHECK(c.ap_idle_s == dfu32::ap::kDefaultIdleS);
+    CHECK(c.ap_idle_s == 1800);
+
+    // Boundaries: 0 = never, else 300-86400 s (SPEC.md §9.5).
+    for (const uint32_t ok : {0u, 300u, 301u, 1800u, 86400u}) {
+        INFO(ok);
+        CHECK(apply_json(R"({"ap_idle_s":)" + std::to_string(ok) + "}", c).empty());
+        CHECK(c.ap_idle_s == ok);
+        dfu32::json::ObjectWriter w;
+        write_json(w, c);
+        CHECK(w.str().find(R"("ap_idle_s":)" + std::to_string(ok) + ",") != std::string::npos);
+    }
+
+    CHECK(apply_json(R"({"ap_idle_s":600})", c).empty());
+    const DeviceConfig before = c;
+    const auto refused = [&](const char* body) {
+        INFO(body);
+        CHECK(apply_json(body, c) == "ap_idle_s must be 0 (never) or 300-86400");
+        CHECK(c.ap_idle_s == before.ap_idle_s);
+        CHECK(c.ap_enabled == before.ap_enabled);
+    };
+    refused(R"({"ap_idle_s":1})");
+    refused(R"({"ap_idle_s":299})");
+    refused(R"({"ap_idle_s":86401})");
+    refused(R"({"ap_idle_s":-1})");
+    refused(R"({"ap_idle_s":4294967296})");  // would wrap to 0 = never as a u32
+    refused(R"({"ap_idle_s":4294967295})");
+    refused(R"({"ap_idle_s":1.5})");
+    refused(R"({"ap_idle_s":"600"})");
+    refused(R"({"ap_idle_s":null})");
+    refused(R"({"ap_idle_s":false})");
+    refused(R"({"ap_enabled":true,"ap_idle_s":299})");  // nothing applied from a refused body
+
+    // Round trip: GET /config's value is accepted back by PUT unchanged.
+    dfu32::json::ObjectWriter w;
+    write_json(w, c);
+    dfu32::json::Doc doc;
+    REQUIRE(doc.parse(w.str()));
+    int64_t idle = 0;
+    REQUIRE(doc.root().get("ap_idle_s").integer(idle));
+    DeviceConfig back;
+    CHECK(apply_json(R"({"ap_idle_s":)" + std::to_string(idle) + "}", back).empty());
+    CHECK(back.ap_idle_s == c.ap_idle_s);
+}
+
+TEST_CASE("API: WiFi station request body", "[api][wifi]") {
+    std::string ssid = "keep", pw = "keep-pass";
+    CHECK(parse_wifi_request(R"({"ssid":"Cafe"})", ssid, pw).empty());
+    CHECK(ssid == "Cafe");
+    CHECK(pw.empty());
+    CHECK(parse_wifi_request(R"({"ssid":"Home Net","password":"correct horse"})", ssid, pw).empty());
+    CHECK(ssid == "Home Net");
+    CHECK(pw == "correct horse");
+
+    ssid = "keep";
+    pw = "keep-pass";
+    const auto refused = [&](std::string_view body) {
+        INFO(body);
+        CHECK_FALSE(parse_wifi_request(body, ssid, pw).empty());
+        CHECK(ssid == "keep");
+        CHECK(pw == "keep-pass");
+    };
+    refused(R"({"password":"correct horse"})");
+    refused(R"({"ssid":42})");
+    refused(R"({"ssid":"Home","password":"short"})");
+    refused(R"({"ssid":"Home","password":7})");
+    refused(R"({"ssid":""})");
+    refused(R"({"ssid":"Home","psk":"x"})");
+    refused(R"(["Home"])");
+    refused("");
+    CHECK(parse_wifi_request(R"({"password":"x"})", ssid, pw) == "ssid is required");
+    CHECK(parse_wifi_request(R"({"ssid":"a","bssid":"x"})", ssid, pw) == "unknown field 'bssid'");
+}
+
+TEST_CASE("API: WiFi station request body, ssid_hex", "[api][wifi]") {
+    std::string ssid, pw = "keep-pass";
+    // Raw bytes, decoded as is: invalid UTF-8 survives (SPEC.md §9.5).
+    CHECK(parse_wifi_request(R"({"ssid_hex":"61ff01","password":"correct horse"})", ssid, pw).empty());
+    CHECK(ssid == "a\xFF\x01");
+    CHECK(pw == "correct horse");
+    CHECK(parse_wifi_request(R"({"ssid_hex":"ff"})", ssid, pw).empty());  // open
+    CHECK(ssid == "\xFF");
+    CHECK(pw.empty());
+    CHECK(parse_wifi_request(R"({"ssid_hex":"C3a9Ff"})", ssid, pw).empty());  // either case
+    CHECK(ssid == "\xC3\xA9\xFF");
+    const std::string max(64, 'f');  // 32 bytes
+    CHECK(parse_wifi_request(R"({"ssid_hex":")" + max + R"("})", ssid, pw).empty());
+    CHECK(ssid == std::string(32, '\xFF'));
+
+    ssid = "keep";
+    pw = "keep-pass";
+    const auto refused = [&](const std::string& body, std::string_view why) {
+        INFO(body);
+        CHECK(parse_wifi_request(body, ssid, pw) == why);
+        CHECK(ssid == "keep");
+        CHECK(pw == "keep-pass");
+    };
+    constexpr std::string_view kBadHex = "ssid_hex must be 1-32 bytes as hex";
+    refused(R"({"ssid_hex":""})", kBadHex);
+    refused(R"({"ssid_hex":"6"})", kBadHex);      // odd length
+    refused(R"({"ssid_hex":"616"})", kBadHex);    // odd length
+    refused(R"({"ssid_hex":"6g"})", kBadHex);     // not hex
+    refused(R"({"ssid_hex":"0x61"})", kBadHex);
+    refused(R"({"ssid_hex":"61 62"})", kBadHex);
+    refused(R"({"ssid_hex":")" + max + R"(00"})", kBadHex);  // 33 bytes
+    refused(R"({"ssid_hex":6162})", kBadHex);
+    refused(R"({"ssid_hex":null})", kBadHex);
+    // NUL: net::set_credentials() can't store it, so it is refused here, not after the 202.
+    constexpr std::string_view kNul = "ssid_hex must not contain 00 (NUL)";
+    refused(R"({"ssid_hex":"00"})", kNul);
+    refused(R"({"ssid_hex":"61ff00"})", kNul);
+    refused(R"({"ssid_hex":"610062"})", kNul);
+    refused(R"({"ssid":"Home","ssid_hex":"486f6d65"})", "give ssid or ssid_hex, not both");
+    refused(R"({"ssid_hex":"486f6d65","ssid":""})", "give ssid or ssid_hex, not both");
+    refused(R"({"ssid_hex":"486f6d65","password":"short"})",
+            "password must be 8-63 printable ASCII characters or 64 hex digits");
+}
+
+TEST_CASE("API: WiFi scan view", "[api][wifi]") {
+    CHECK(sanitize_ssid("plain") == "plain");
+    CHECK(sanitize_ssid("caf\xC3\xA9 \xF0\x9F\x93\xB6") == "caf\xC3\xA9 \xF0\x9F\x93\xB6");  // valid UTF-8 kept
+    CHECK(sanitize_ssid("a\xFF" "b") == "a\xEF\xBF\xBD" "b");
+    CHECK(sanitize_ssid("\xC3") == "\xEF\xBF\xBD");                       // truncated sequence
+    CHECK(sanitize_ssid("\xC0\xAF") == "\xEF\xBF\xBD\xEF\xBF\xBD");     // overlong
+    CHECK(sanitize_ssid("\xED\xA0\x80") == "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD");  // surrogate
+    CHECK(sanitize_ssid(std::string("a\0b", 3)) == "a\xEF\xBF\xBD" "b");
+
+    const std::string nasty = "\"q\" \\ \x01\x1F <script>alert(1)</script>";
+    const std::vector<WifiNet> nets = {{nasty, -40, true}, {"open \xFF", -80, false}};
+    dfu32::json::ObjectWriter w;
+    write_wifi_scan(w, nets);
+    const std::string text = w.str();
+    dfu32::json::Doc doc;
+    REQUIRE(doc.parse(text));
+    const auto list = doc.root().get("networks").items();
+    REQUIRE(list.size() == 2);
+    CHECK(list[0].get("ssid").str() == nasty);
+    int64_t rssi = 0;
+    CHECK(list[0].get("rssi").integer(rssi));
+    CHECK(rssi == -40);
+    CHECK(list[0].get("secured").boolean());
+    CHECK(list[1].get("ssid").str() == "open \xEF\xBF\xBD");
+    CHECK_FALSE(list[1].get("secured").boolean(true));
+
+    CHECK(list[0].get("ssid_hex").missing());  // escaped by the writer, nothing lost
+    CHECK(list[1].get("ssid_hex").str() == "6f70656e20ff");
+
+    dfu32::json::ObjectWriter empty;
+    write_wifi_scan(empty, {});
+    CHECK(empty.str() == R"({"networks":[]})");
 }
 
 TEST_CASE("API: BLE scan view", "[api]") {
@@ -390,4 +620,51 @@ TEST_CASE("API: scan and fault request bodies", "[api]") {
     CHECK_FALSE(f.restore_fail);
     CHECK_FALSE(parse_fault_request(R"({"stall_s":601})", f).empty());
     CHECK_FALSE(parse_fault_request(R"({"boom":1})", f).empty());
+}
+
+TEST_CASE("API: WiFi scan ssid_hex round trip", "[api][wifi]") {
+    // Each name the scan had to sanitise comes back byte for byte through PUT /wifi's ssid_hex;
+    // a clean one is not given ssid_hex and round-trips through ssid.
+    const std::vector<std::string> raws = {
+        "Home",
+        "caf\xC3\xA9",
+        std::string("a\0b", 3),
+        std::string(1, '\0'),
+        "\xFF\xFE",
+        "\xC0\xAF",
+        "\xED\xA0\x80",
+        std::string(32, '\x80'),
+        "\x01ctl",
+    };
+    std::vector<WifiNet> nets;
+    for (const auto& r : raws) nets.push_back({r, -50, false});
+    dfu32::json::ObjectWriter w;
+    write_wifi_scan(w, nets);
+    dfu32::json::Doc doc;
+    REQUIRE(doc.parse(w.str()));
+    const auto list = doc.root().get("networks").items();
+    REQUIRE(list.size() == raws.size());
+    for (size_t i = 0; i < raws.size(); ++i) {
+        INFO(i);
+        const bool lossy = sanitize_ssid(raws[i]) != raws[i];
+        const auto hex = list[i].get("ssid_hex");
+        CHECK(hex.missing() == !lossy);
+        dfu32::json::ObjectWriter req;
+        if (lossy) {
+            const std::string h = hex.str();
+            CHECK(h.size() == raws[i].size() * 2);
+            CHECK(h.find_first_not_of("0123456789abcdef") == std::string::npos);  // lowercase
+            req.add("ssid_hex", h);
+        } else {
+            req.add("ssid", list[i].get("ssid").str());
+        }
+        std::string ssid, pw;
+        if (raws[i].find('\0') != std::string::npos) {
+            // The scan never gives one (C strings), and the driver couldn't store it.
+            CHECK(parse_wifi_request(req.str(), ssid, pw) == "ssid_hex must not contain 00 (NUL)");
+            continue;
+        }
+        CHECK(parse_wifi_request(req.str(), ssid, pw).empty());
+        CHECK(ssid == raws[i]);
+    }
 }

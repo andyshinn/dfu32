@@ -1,0 +1,31 @@
+# QuinLED ESP32 v4 (ESP32-PICO-MINI-02-N8R2: 8 MB flash, 2 MB PSRAM). Classic
+# ESP32, BLE 4.2 (DLE, no 2M PHY). Console on UART0 via the on-board CH340X,
+# which also does the auto-reset into download mode. Same SiP family as the
+# Feather V2 (ESP32-PICO-V3-02), so no extra PSRAM option is set.
+# Only the v4 is supported: the v1/v2 boards carry an ESP32-WROOM-32D/E, which
+# normally has no PSRAM (see SPEC.md §4).
+# Pins from QuinLED's v4 specifications and the v2r1 revision history (blue
+# GPIO LED on GPIO2; Boot button on GPIO0, pulled high, usable as a user button
+# once booted).
+CONFIG_IDF_TARGET="esp32"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/8mb.csv"
+
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Classic ESP32: run the controller in BLE-only mode (no BR/EDR memory).
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+
+CONFIG_DFU32_BOARD_NAME="quinled_esp32"
+# No addressable LED on the board.
+CONFIG_DFU32_NEOPIXEL_GPIO=-1
+CONFIG_DFU32_NEOPIXEL_POWER_GPIO=-1
+# Blue GPIO LED. GPIO2 is a strapping pin, but it only matters when GPIO0 is
+# also low (download mode), so a lit LED can't stop a normal boot. Polarity is
+# not documented; active high is assumed [bench]. On a Dig-Uno/Dig-Quad v4
+# carrier GPIO2 is also LED output 1, so a strip there sees the LED's level.
+CONFIG_DFU32_STATUS_LED_GPIO=2
+# Boot button: a strapping pin, like the Feather S3's BOOT. A long-press only
+# counts once the app is running.
+CONFIG_DFU32_BUTTON_GPIO=0

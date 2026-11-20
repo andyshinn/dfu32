@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
-// One WiFi connection attempt from Improv (SPEC.md §9.2), shared by the BLE
-// and Serial transports: only one attempt runs at a time, whichever started it.
-// The new network is saved to flash as it is applied; if it doesn't get an IP
-// in time, the previous network is put back (and saved), or cleared if there
-// was none. Not thread-safe: each
-// transport calls its own Attempt from its own task.
+// One WiFi connection attempt (SPEC.md §9.2), shared by Improv BLE, Improv
+// Serial and the web UI's station setup (§9.5): only one attempt runs at a
+// time, whichever started it. The new network is saved to flash as it is
+// applied; if it doesn't get an IP in time, the previous network is put back
+// (and saved), or cleared if there was none. Not thread-safe: each source
+// calls its own Attempt from its own task.
 #pragma once
 
 #include <cstdint>
@@ -16,6 +16,10 @@ namespace dfu32::improv {
 class Attempt {
 public:
     enum class Poll : uint8_t { Idle, Pending, Joined, TimedOut };
+
+    /// `lease_name` is the BLE lease holder while the attempt takes the lease
+    /// itself ("improv-serial", or "wifi-setup" for the web UI, §9.5).
+    explicit Attempt(const char* lease_name = "improv-serial") noexcept : lease_name_(lease_name) {}
 
     /// Starts connecting. False if another transport's attempt is running,
     /// something other than Improv holds the BLE lease (a flash: the radio
@@ -31,21 +35,30 @@ public:
     void give_up();
 
     bool active() const noexcept { return active_; }
-    /// An attempt from either transport is running.
+    /// An attempt from any source is running.
     static bool any_running();
     const std::string& ssid() const noexcept { return trying_ssid_; }
+    /// The station's disconnect reason (wifi_err_reason_t) when poll() first
+    /// reported TimedOut, so the web UI can say "wrong password" or "network
+    /// not found" (§9.5); 0 if none was reported during this attempt.
+    uint8_t last_reason() const noexcept { return last_reason_; }
 
 private:
     void end();
 
+    const char* lease_name_;
     bool active_ = false;
+    mutable bool timed_out_ = false;
+    mutable uint8_t last_reason_ = 0;
+    uint32_t reconnects_at_begin_ = 0;
     int64_t deadline_us_ = 0;
     bool had_previous_ = false;
     std::string previous_ssid_, previous_password_, trying_ssid_;
 };
 
-/// Improv BLE's close releases its lease through this: if a Serial attempt is
-/// running on that lease, the attempt keeps it (and releases it when it ends).
+/// Improv BLE's close releases its lease through this: if a Serial or web
+/// attempt is running on that lease, the attempt keeps it (and releases it
+/// when it ends).
 void release_ble_lease();
 
 }  // namespace dfu32::improv

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
 // Pure helpers behind the HTTP API (SPEC.md §9.3, §10.1): route matching,
-// bearer-token handling and the auth throttle, device-level settings, and
-// the BLE scan result view. The esp_http_server glue lives in components/api.
+// bearer-token handling and the auth throttle, device-level settings, the
+// BLE scan result view and the WiFi station setup bodies (§9.5). The
+// esp_http_server glue lives in components/api.
 #pragma once
 
 #include <array>
@@ -11,6 +12,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "dfu32_core/ap.hpp"
 
 namespace dfu32 {
 class TargetTable;
@@ -48,6 +51,8 @@ enum class Route : uint8_t {
     TokenRotate,   // POST /api/v1/system/token/rotate
     TokenClear,    // POST /api/v1/system/token/clear (turns token auth off)
     SystemOta,     // POST /api/v1/system/ota (raw firmware image)
+    Wifi,          // PUT  /api/v1/wifi (station credentials, from the AP's web UI)
+    WifiScan,      // POST /api/v1/wifi/scan
     DebugFault,    // POST /api/v1/debug/fault (CONFIG_DFU32_DEBUG_ENDPOINTS only)
 };
 
@@ -135,6 +140,10 @@ struct DeviceConfig {
     std::string ntp_server;       // "" = default pool.ntp.org
     bool wifi_off_dfu = false;    // default for a flash request's wifi_off (bench: on is fast enough)
     uint32_t dfu_deadline_max_s = 1200;  // cap on the §7.3 run deadline
+    bool ap_enabled = false;      // access-point fallback (§9.5); off by default
+    std::string ap_password;      // "" = open AP; write-only over the API
+    uint32_t ap_delay_s = ap::kDefaultDelayS;  // station without an IP this long -> AP up
+    uint32_t ap_idle_s = ap::kDefaultIdleS;    // AP with no client this long -> down; 0 = never
 };
 
 inline constexpr uint32_t kMinDeadlineMaxS = 120;
@@ -144,9 +153,11 @@ inline constexpr uint32_t kMaxDeadlineMaxS = 7200;
 /// ending with '-'. Empty = default.
 std::string validate_ntp_server(const std::string& s);
 std::string validate(const DeviceConfig& c);
+/// Reports ap_password_set, never the password itself.
 void write_json(json::ObjectWriter& w, const DeviceConfig& c);
 /// PUT /api/v1/config: merges present fields (unknown ones are refused) and
-/// validates. "" on success, else the reason (`c` unchanged).
+/// validates. "" on success, else the reason (`c` unchanged). An absent
+/// ap_password keeps the stored one; "" makes the AP open.
 std::string apply_json(std::string_view body, DeviceConfig& c);
 
 // ---- BLE scan view (POST /api/v1/ble/scan) ----------------------------------------
@@ -166,6 +177,28 @@ struct FaultRequest {
     uint32_t stall_s = 0;
 };
 std::string parse_fault_request(std::string_view body, FaultRequest& out);
+
+// ---- WiFi station setup (SPEC.md §9.5) ----------------------------------------------
+
+/// PUT /api/v1/wifi body {"ssid":"…","password":"…"} (password optional = open). Unknown fields refused.
+/// Instead of "ssid", "ssid_hex" carries the raw SSID bytes as 2-64 hex digits (either case), for a
+/// name that isn't valid UTF-8 (the scan's ssid_hex); giving both, or a NUL byte, is refused.
+/// "" on success (outputs set), else the reason (outputs untouched). Uses ap::validate_wifi_credentials.
+std::string parse_wifi_request(std::string_view body, std::string& ssid, std::string& password);
+
+/// One network from POST /api/v1/wifi/scan.
+struct WifiNet {
+    std::string ssid;
+    int rssi = 0;
+    bool secured = false;
+};
+/// Replaces invalid UTF-8 (and NUL, which would cut the C string) with U+FFFD so the JSON is valid and
+/// whole; other control chars are escaped by the writer.
+std::string sanitize_ssid(std::string_view raw);
+/// {"networks":[{"ssid":s,"rssi":n,"secured":b},...]} in the given order, SSIDs sanitized. An entry
+/// whose SSID sanitising changed also carries "ssid_hex" (lowercase hex of the raw bytes), so the
+/// UI can still join it (SPEC.md §9.5).
+void write_wifi_scan(json::ObjectWriter& w, std::span<const WifiNet> nets);
 
 /// What the advertiser probably is, from its name and services. Only a
 /// connection (Version characteristic) confirms it, so this is a hint.

@@ -31,7 +31,7 @@ That happens after `probe --no-reset`, or an abort before START. Run `blreset` (
 
 ### After a firmware update it came back on the old version
 
-That's the rollback working: the new firmware failed its self-check, couldn't start the HTTP API, or showed no WiFi activity at all within 90 seconds. The console log of the failed boot says why. Install a fixed build; the device keeps working on the old one meanwhile.
+That's the rollback working: the new firmware failed its self-check, couldn't start the HTTP API, or its WiFi station showed no activity within 90 seconds (DFU32's own access point being up doesn't count). The console log of the failed boot says why. Install a fixed build; the device keeps working on the old one meanwhile.
 
 A network problem outside DFU32 doesn't cause a rollback: if the router is down during the update (the radio reports "AP not found") or no network is stored, the new firmware is kept, and it joins once the network is back.
 
@@ -39,15 +39,15 @@ A network problem outside DFU32 doesn't cause a rollback: if the router is down 
 
 Connect it over USB and look at the console (`idf.py -p <port> monitor`). Then:
 
-- **Reflash just the app**, which keeps WiFi, the token, the target, the staged image and the runs:
+- **Reflash just the app**, which keeps WiFi, the token, the targets, the access-point settings, the staged image and the runs:
 
   ```bash
   python -m esptool --port <port> write-flash 0x20000 dfu32.bin
   ```
 
-  The offset is `0x20000` on the 4 MB layout (Feather S3) and `0x30000` on the 8 MB layout (Feather V2, N16R8, XIAO ESP32S3, XIAO ESP32C5). If the board was running from its second slot after a self-update, also write `ota_data_initial.bin` (from the same build) at `0xF000` (4 MB) or `0x18000` (8 MB) so it boots the first slot.
+  The offset is `0x20000` on the 4 MB layout (Feather S3) and `0x30000` on the 8 MB layout (Feather V2, N16R8, QuinLED ESP32, XIAO ESP32S3, XIAO ESP32C5). If the board was running from its second slot after a self-update, also write `ota_data_initial.bin` (from the same build) at `0xF000` (4 MB) or `0x18000` (8 MB) so it boots the first slot.
 
-- **Fresh install** with the `-merged.bin` at `0x0`. The merged image fills the gaps between its parts, so it erases WiFi, the token, the target and the run history. The staged image lies beyond the app slots and survives.
+- **Fresh install** with the `-merged.bin` at `0x0`. The merged image fills the gaps between its parts, so it erases WiFi, the token, the targets, the access-point settings and the run history. The staged image lies beyond the app slots and survives.
 
 ### Lost the API token
 

@@ -34,6 +34,14 @@
             }
         },
         {
+            "name": "quinled_esp32",
+            "displayName": "QuinLED ESP32 v4 (8 MB / 2 MB PSRAM)",
+            "binaryDir": "build/quinled_esp32",
+            "cacheVariables": {
+                "DFU32_BOARD": "quinled_esp32"
+            }
+        },
+        {
             "name": "xiao_esp32s3",
             "displayName": "Seeed Studio XIAO ESP32S3 (8 MB / 8 MB PSRAM)",
             "binaryDir": "build/xiao_esp32s3",

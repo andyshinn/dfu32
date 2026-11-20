@@ -1,4 +1,4 @@
-# Bench guide (M1–M5)
+# Bench guide (M1–M5, access point)
 
 This guide covers bench-testing on your desk: build DFU32, stage an image (over WiFi since M3a, from the browser over USB, or from the PC with esptool), then probe and flash an nRF52 repeater over BLE.
 
@@ -25,6 +25,8 @@ idf.py --preset feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 
 The monitor shows the boot banner, "layout self-check OK", the NimBLE address, and a `dfu32>` prompt. Type `help` to list the commands.
 
+Once the prompt is up, log lines no longer reach the console, so they don't land in the middle of what you type. They are still shown while a command runs (`flash` and `probe` report their progress as log lines), and they always go into the log ring: `logs` prints the recent ones. `logs on` shows them live at the prompt too, and `logs off` hides them again. The choice is stored, so it survives a reboot; a new or factory-reset device starts with it off (`DFU32_CONSOLE_LOG` changes that default; the bench build, `sdkconfig.debug`, has it on). Several checks below watch for log lines such as "new firmware confirmed": run `logs on` first.
+
 ### Or flash a CI build from macOS
 
 Each CI run uploads a `dfu32-<board>` artifact. Its `dfu32-<board>-merged.bin` contains the bootloader, partition table, OTA data and app as one image, written at offset 0. Use esptool, from your activated IDF environment (`python -m esptool`) or a standalone install (`brew install esptool` or `pipx install esptool`).
@@ -49,7 +51,7 @@ Each CI run uploads a `dfu32-<board>` artifact. Its `dfu32-<board>-merged.bin` c
 | Layout | Boards | App offset |
 |---|---|---|
 | 4 MB | Feather S3 | `0x20000` |
-| 8 MB | Feather V2, N16R8, XIAO ESP32S3, XIAO ESP32C5 | `0x30000` |
+| 8 MB | Feather V2, N16R8, QuinLED ESP32, XIAO ESP32S3, XIAO ESP32C5 | `0x30000` |
 
 ```bash
 python -m esptool --port /dev/cu.usbserial-575E0522651 --baud 460800 write-flash 0x30000 build/feather_esp32_v2/dfu32.bin
@@ -147,7 +149,7 @@ Worth trying on the bench:
 - **Bad hash:** edit one character of `bin.sha256` in `manifest.json`, then `stage --force`. Expect `HASH_MISMATCH`. The old image is gone at this point, because the download had already started.
 - **Wrong size:** append a byte to `firmware.bin`. Expect `SIZE_MISMATCH` before anything is erased, because the server's `Content-Length` disagrees with the manifest.
 - **404:** point `target url` at a missing file. Expect `HTTP_ERROR: HTTP 404`.
-- **WiFi drop:** turn the access point off and on again. `wifi` should show it reconnecting, with the backoff capped at 30 s.
+- **WiFi drop:** turn the router's WiFi off and on again. `wifi` should show it reconnecting, with the backoff capped at 30 s.
 
 ### Uploaded to DFU32 over WiFi
 
@@ -190,7 +192,7 @@ The tool validates the image and prints the flash command. Quit the monitor (`Ct
 python -m esptool --port /dev/cu.usbmodem1101 write-flash 0x300000 staging.img
 ```
 
-On the 8 MB layout (Feather V2, N16R8, XIAO ESP32S3, XIAO ESP32C5) the offset is `0x630000`.
+On the 8 MB layout (Feather V2, N16R8, QuinLED ESP32, XIAO ESP32S3, XIAO ESP32C5) the offset is `0x630000`.
 
 Back in the monitor, check the image:
 
@@ -308,19 +310,20 @@ The console's `job` shows the same state as `status`; `job abort` aborts.
 - **Arm timeout:** flash with `{"arm_timeout_s":30}` and don't run `start ota`. `FAILED`, `TARGET_NOT_FOUND`, with a run record.
 - **Busy:** while a job runs, a second `flash`, `stage`, `ble/scan` or target `PUT` gets `409`; so does the console's `scan`.
 - **Abort while armed:** `POST /jobs/current/abort` during `AWAITING_TARGET`: `FAILED`, `ABORTED`, target untouched.
-- **Offline re-flash from staging:** stage while the AP is up, start a flash with `{"source":"staged"}`, then switch the access point off and run `start ota`. Follow it on the console with `job`. It must succeed without the network. Because WiFi was already down when the target was seen, DFU32 doesn't insist on reconnecting afterwards (no reboot); `status` answers again once the AP is back.
+- **Offline re-flash from staging:** stage while the router is up, start a flash with `{"source":"staged"}`, then switch the router's WiFi off and run `start ota`. Follow it on the console with `job`. It must succeed without the network. Because WiFi was already down when the target was seen, DFU32 doesn't insist on reconnecting afterwards (no reboot); `status` answers again once the router is back.
 - **Restore watchdog and run deadline** (needs the debug build: the `dfu32-<board>-debug` CI artifact, or `idf.py --preset <profile> -B build/<profile>-debug -DDFU32_DEBUG_ENDPOINTS=ON build`; never ship it):
-  - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 restarts WiFi and counts the restore as failed, retries once, then reboots. Each wait ends as soon as WiFi reconnects (60 s at most), so on a working network this takes seconds, not minutes. The run record is already written and WiFi comes back after the reboot.
+  - `POST /debug/fault` `{"restore_fail":true}`, then flash with `"wifi_off":true`. After the transfer, DFU32 restarts WiFi and counts the restore as failed (the fault stands for a dead radio), retries once, then reboots. Each wait ends as soon as WiFi reconnects (60 s at most), so on a working network this takes seconds, not minutes. The run record is already written and WiFi comes back after the reboot.
   - `{"deadline_s":20}`: the run is aborted 20 s after the target is seen, recorded as `DEADLINE_EXCEEDED`, and WiFi is restored.
   - `{"stall_s":40}`: the DFU task blocks without a heartbeat; the stall watchdog reboots after about 30 s and the next boot records `ABORTED_BY_REBOOT`.
+- **Router gone during the transfer** (normal build, SPEC §7.3 layer 4): flash with `"wifi_off":true` and switch the router's WiFi off once the transfer starts. After the transfer DFU32 waits up to 60 s for WiFi, tries once more, then logs a warning that the home network is gone but the radio works, and keeps running (no reboot). With AP mode on, its access point is up by then and a phone on it stays connected. WiFi comes back by itself once the router does.
 - **WiFi on vs off:** at least 5 runs each with `"wifi_off":true` and `false`. Compare `rate_x10_kBps`, attempts and failures in `GET /targets/t096/runs`. Done 2026-11-07 (results below): WiFi off is about 20% faster, but both finish in under a minute with no failures, so `wifi_off_dfu` defaults to off (WiFi stays on).
 
 ## 7. Automated bench run
 
-`tools/dfu32_bench.py` runs the §6 checklist (all but the offline re-flash, which needs the access point switched off), plus the M2b run-record checks, from your computer. It types on DFU32's console over USB serial, calls the HTTP API, serves the firmware itself (with deliberately broken copies for the failure cases), and uses esptool when a check needs a different DFU32 build. It only stops for things it can't do:
+`tools/dfu32_bench.py` runs the §6 checklist (all but the offline re-flash, which needs the router switched off), plus the M2b run-record checks, from your computer. It types on DFU32's console over USB serial, calls the HTTP API, serves the firmware itself (with deliberately broken copies for the failure cases), and uses esptool when a check needs a different DFU32 build. It only stops for things it can't do:
 
 - **`start ota` on the repeater.** It rings the terminal bell, prints what to do, and carries on by itself once DFU32 sees the repeater. With `--repeater-port` it sends `start ota` over the repeater's USB console instead. Check 3.5, the M3 "done when", always asks you to send it **over LoRa from the companion app**.
-- Nothing needs the access point switched off. The WiFi-drop test (§4) and the offline re-flash (§6) are left to do by hand.
+- Nothing needs the router switched off. The WiFi-drop test (§4) and the offline re-flash (§6) are left to do by hand.
 - **Fully unattended:** with `--repeater-port` and `--unattended`, nothing waits for you. 3.5 sends `start ota` over USB instead of LoRa (the report says so), and any check that would need a person is skipped.
 
 You need Python 3.8+ and esptool, which brings pyserial with it: `pip install esptool`. Close any serial monitor first, so the port is free.
@@ -347,6 +350,7 @@ A full run flashes the repeater about 20 times and takes roughly an hour, most o
 
 ### What it changes on DFU32
 
+- It turns live log output on (`logs on`) after every boot, since it reads DFU32's log lines off the console. It leaves it on.
 - It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also turns the token off and on again (with `token clear` and `POST /system/token/clear`).
 - It creates or overwrites its own target (`--target-id`, default `t096`) next to yours. It leaves it there when the run ends.
 - The console checks act on the default target, so they make the bench target the default. When the run ends, your default is the default again. This also happens after Ctrl+C.
@@ -413,14 +417,14 @@ These need a phone or a computer with Bluetooth, and eyes on the board, so the b
 5. **Busy:** while Improv is open, the console's `scan` says "Improv BLE provisioning is open", and `POST /flash` answers `409` with holder `improv`. `improv stop` frees it.
 6. **Device info:** the Improv web page shows DFU32, the firmware version (from `git describe`, e.g. `v0.3.0-12-gabc1234`), the chip and board (e.g. `ESP32-S3 / feather_esp32s3`) and the hostname. `/api/v1/status` shows the same version.
 
-**Button** (BOOT on the Feather S3, N16R8, XIAO ESP32S3 and XIAO ESP32C5, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
+**Button** (BOOT on the Feather S3, N16R8, QuinLED ESP32, XIAO ESP32S3 and XIAO ESP32C5, GPIO38 on the Feather V2). Watch the NeoPixel while holding:
 
 7. **Hold 2–5 s:** amber slow blink while held; on release `improv` shows "open" and the NeoPixel blinks white. It closes by itself after 5 minutes.
 8. **Hold 5–15 s:** amber fast blink; on release the log says "API token cleared", `GET /status` shows `"claimed":false`, and the API works without a token again.
 9. **Hold 15 s or more:** solid amber; on release DFU32 erases its settings and WiFi and reboots into Improv. `runs` and `staged` still show the run history and the staged image.
 10. **Short press (< 2 s):** nothing happens.
 
-**LEDs** during an API flash with `"wifi_off":false`: blue pulse while fetching or verifying, cyan blink while armed, magenta getting brighter during the transfer (the red LED blinks), solid green for 10 s on success. For a failure, abort mid-transfer: the NeoPixel blinks red fast and the red LED stays on until a later flash succeeds. A failure before START (e.g. arm timeout) shows solid red until the next job. With the access point off, the NeoPixel blinks dim yellow.
+**LEDs** during an API flash with `"wifi_off":false`: blue pulse while fetching or verifying, cyan blink while armed, magenta getting brighter during the transfer (the red LED blinks), solid green for 10 s on success. For a failure, abort mid-transfer: the NeoPixel blinks red fast and the red LED stays on until a later flash succeeds. A failure before START (e.g. arm timeout) shows solid red until the next job. With the router off (and DFU32's AP mode off), the NeoPixel blinks dim yellow.
 
 ## 9. Web UI and firmware update (M4b)
 
@@ -432,12 +436,13 @@ Open `http://dfu32-xxxx.local/` (or the IP) in a desktop and a phone browser.
 4. **Happy path from the UI only:** **Check** shows the version and board match; **Flash**, then `start ota` over LoRa from the companion app. The job card shows armed (countdown), then the progress bar and rate, then succeeded, with a link to the run. This is the M4 "done when" (after joining WiFi over Improv).
 5. **Abort mid-transfer:** the page asks first and then warns that the repeater is erased; **Flash** with *staged image* recovers it.
 6. **Runs:** the list shows the flashes; a run's page has the attempts and the log. **Logs** tails live while a flash runs.
-7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the target and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
+7. **Firmware update:** **System → Firmware update** with the CI `dfu32.bin` for this board. The bar fills, the device reboots, and the page says "Back up on <version>". `runs`, the targets and WiFi are kept. Start a flash within a second of the reboot announcement: it is refused as busy.
 8. **Wrong image:** upload another board's `dfu32.bin` (e.g. the N16R8 build to a Feather S3): refused before anything is written, naming both boards, and the page shows that error (not a connection reset). The merged `.bin`, on any chip: refused as "this is the merged image, for a fresh install over USB", naming `dfu32-<board>.bin` to upload instead.
 9. **Rollback rules:**
-   - With the access point on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
-   - Switch the access point off as soon as the upload finishes. After 90 s the console says "confirmed: WiFi works but … isn't reachable" (a router outage is not the firmware's fault), and it stays on the new version once the access point is back.
-   - A real rollback needs a build that breaks itself, which a normal build can't do. Use the console log: a self-check failure, or "shows no WiFi activity", followed by "rolling back to the previous image", and the page reports the old version.
+   - With the router on throughout, the console says "new firmware confirmed: WiFi and the HTTP API are up", and a later reboot stays on the new version.
+   - Switch the router's WiFi off as soon as the upload finishes. After 90 s the console says "confirmed: WiFi works but … isn't reachable" (a router outage is not the firmware's fault), and it stays on the new version once the router is back.
+   - DFU32's own access point never confirms a provisioned image (SPEC §9.5): the confirm log never names the access point.
+   - A real rollback needs a build that breaks itself, which a normal build can't do. Use the console log: a self-check failure, or "shows no station WiFi activity", followed by "rolling back to the previous image", and the page reports the old version.
 10. **Busy:** while a flash runs, **Install** answers busy.
 
 ## 10. Improv Serial and the browser installer (M5)
@@ -468,11 +473,49 @@ Once `main` has it, the installer page itself (MILESTONES M5 bench):
     - b. **Wrong passphrase:** give Improv a wrong passphrase. It reports "unable to connect"; after a RESET, the previous network is still the one in use.
     - c. **Corrected passphrase:** give Improv the same SSID with the right passphrase, then RESET. It rejoins (a config that differs only in the password is saved).
     - d. **Wrong passphrase on an erased board:** on a board with no network (installed with "Erase device"), give a wrong passphrase. It reports "unable to connect"; after a RESET the boot log says there are no WiFi credentials and Improv BLE opens by itself.
-11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the target and the staged image are kept, and the page recognises DFU32 afterwards.
+11. **Update keeps settings:** install again on a configured device without "Erase device": WiFi, the token, the targets and the staged image are kept, and the page recognises DFU32 afterwards.
 12. **Notices:** the page's "Third-party notices" link opens `THIRD_PARTY_NOTICES.txt`.
 13. **No board chosen:** reload the page, pick no board, and click **Connect device** on a configured device that runs an older build. The dialog shows the board in the device line, the page's picker switches to that board, and **Update DFU32** installs the right image and keeps settings. On an erased chip, **Install DFU32** with no board says the board is not supported.
 14. **Earlier version:** choose an earlier release under **Choose a version** and update a configured device without erasing: `/api/v1/status` reports that version, and settings are kept. Choose the latest again to go back.
 15. **Custom build:** download a PR run's `dfu32-<board>` artifact, choose **Custom build from a .zip…** and pick it. The page names the board and version; installing keeps settings and the device reports the PR's version. With another board's artifact, the dialog refuses to install and the page says which board the device is.
+
+## 11. Access point fallback (SPEC §9.5)
+
+These need a phone (ideally an iPhone and an Android phone), a laptop, and the console. Start with `ap on` and no password unless a step says otherwise; `ap` shows the state after every change.
+
+**Basics:**
+
+1. **Off by default:** a freshly erased board has `ap` "off" and no `dfu32-xxxx` network, even with no WiFi stored.
+2. **No network stored:** `wifi forget`, then `ap on`. `dfu32-xxxx` appears at once, open; the NeoPixel blinks dim blue; `ap` and the web UI show the open-AP warning while no token is set.
+3. **Start delay:** with a network stored, `ap delay 30` and switch the router off. The access point comes up about 30 s after the IP is lost, and `ap` counts down meanwhile. Switch the router back on with no phone on the access point: it goes away about 30 s after DFU32 has its IP again.
+4. **Idle limit:** with a network stored, `ap delay 30`, `ap idle 300` and the router off, with no phone on it. The access point comes up about 30 s after the IP is lost and goes away 5 minutes later (the log says "access point down: idle limit reached"); `ap` then counts down and it is back about 30 s later. Join a phone before the 5 minutes are up: it stays up while the phone is on, and the 5 minutes start again when it leaves. `ap idle off`: it stays up. `ap idle 299` answers `Not saved: …`. Repeat with `wifi forget`: the access point comes up at once, and after an idle take-down it returns after the start delay.
+5. **Password:** `ap password "two words here"`; `ap` says WPA2, a phone on it is dropped and joins with the new password. `ap password clear` opens it again. `ap password short` answers `Not saved: …` and changes nothing. The password never appears in `logs`, `GET /config` (only `ap_password_set`) or `/status`.
+6. **Off wins:** `ap off` with a phone on it takes it down.
+7. **Factory reset:** with the access point up, hold the button 15 s. No `dfu32-xxxx` appears before the reboot, and afterwards `ap` is off.
+
+**From a phone:**
+
+8. **Captive pop-up** on iOS, Android, Windows and macOS: joining `dfu32-xxxx` opens the sign-in sheet with the web UI on the WiFi view. Note per OS that the sign-in sheet has short-lived storage (the token must be pasted again) and may block file inputs (Image upload, firmware update). `http://192.168.4.1/` in a normal browser always works, and so does `http://dfu32-xxxx.local/` where the phone resolves `.local`.
+9. **Set the network:** **Scan**, pick the network, **Connect**. The phone drops for a few seconds while the AP moves to the router's channel (CSA), then the page shows "joined" with the new address. Note per OS how long the drop lasts, and whether the 30 s grace is enough for the page to show the result before the AP goes away. A wrong password shows "wrong password", and the previous network is still stored.
+10. **Failed attempt under the pause:** with a network stored, the router off and a phone on the access point, **Connect** to a network with a wrong password. After the failure the previous network is stored again, and `ap` says station retries are paused (no connect attempts in the log) until the phone leaves; then the station retries at once.
+11. **Android without internet:** whether Android offers "Keep WiFi connection?" or quietly switches to mobile data or another WiFi network.
+12. **Strict pause:** with a network stored and the router off, keep a phone on the access point. `ap` and the web UI say station retries are paused, the console shows no connect attempts, and the page loads without drops. Leave: the station retries at once. **Connect** from the phone still runs while it is paused.
+13. **Sleeping phone:** lock a phone that's on the access point for several minutes. It isn't dropped by the 60 s inactivity limit while it is merely asleep, and a phone switched off without leaving is dropped after about 60 s (`ap` client count), so retries resume.
+14. **Scan disruption:** while a phone on the access point loads pages, run **Scan**. The phone stays associated (IDF's default 30 ms home-channel dwell between scanned channels).
+15. **Rebinding guard:** from a laptop on the access point, `curl -i -H 'Host: example.com' http://192.168.4.1/api/v1/status` answers `421`, and `curl -i http://192.168.4.1/generate_204` answers `302` to `http://192.168.4.1/`. From the LAN nothing changes (unknown paths are 404). A Host too long to read fails closed: `curl -i -H "Host: $(printf 'a%.0s' $(seq 80))" http://192.168.4.1/api/v1/status` answers `421`; with no Host at all (`curl -0 -i -H 'Host:' …`) it answers `200`.
+
+**Radio and driver:**
+
+16. **Mode changes:** `set_mode(APSTA→STA)` keeps an associated station connected (the access point going down doesn't drop the home network), and the RAM-stored AP config survives `APSTA→STA→APSTA`: the AP comes back with its own name and security, never the driver's default open `ESP_xxxxxx` network, also right after boot.
+17. **Default route:** with the access point up and the station then joining, manifest fetches and SNTP work again once the station has its IP (esp_netif switches the default route back on `GOT_IP`).
+18. **Transfer with WiFi off:** with a phone on the access point, flash with `"wifi_off":true`. The access point and the phone drop during the transfer and come back after it.
+19. **Heap:** on the classic ESP32 (RAK11200, Feather V2), record the minimum free internal heap with the access point up, a phone joined and a BLE flash with WiFi on.
+20. **ESP32-C5:** the access point follows the station to a 5 GHz channel, which 2.4 GHz-only phones can't see; record that, and the DFS scan time.
+21. **Subnet clash:** a home LAN on 192.168.4.0/24 collides with the access point's subnet while both are up. This is documented, not handled: note what breaks.
+
+**Installer page:**
+
+22. **Enable AP mode:** install with **Enable AP mode** ticked and a password. After the dialog closes, the page reports "AP password set" and "AP mode on"; `ap` on the console agrees, and the password never shows on the page or in its `?trace=1` log. A password containing `IMPROV` is refused before anything is sent. On older firmware the page says it is too old. A native-USB board that re-enumerated asks for **Connect** again.
 
 ## Bench results so far
 
@@ -522,6 +565,7 @@ Every `flash` is recorded in the `runlog` partition (14 slots on 4 MB flash, 16 
 - `runs`: one line per run (result, duration, attempts, whether the target was erased, version or error).
 - `run N`: that run's full JSON summary and its log.
 - `logs [bytes]`: recent captured log output (default 4 KB).
+- `logs on` / `logs off`: show log lines live at the prompt, or not (§1; stored, off on a new device).
 
 If DFU32 reboots in the middle of a flash, the next boot logs a warning and records `ABORTED_BY_REBOOT`. When the transfer had begun, the record has `target_erased: possibly`; run `flash --yes` again.
 

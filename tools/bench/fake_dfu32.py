@@ -62,6 +62,10 @@ class FakeDfu32:
         self.console_busy: Optional[threading.Thread] = None
         self.console_abort = threading.Event()
         self.logs: list[str] = []
+        # `logs on|off` (NVS, so it survives a reboot). Off: log lines reach the console only
+        # during boot and while a command runs, never at the prompt, as on the device.
+        self.live_logs = False
+        self.at_prompt = False
         self.http_port = 0
         self._server: Optional[ThreadingHTTPServer] = None
         self._reset_flag = False
@@ -172,15 +176,18 @@ class FakeDfu32:
     def log(self, tag: str, msg: str, level: str = "I") -> None:
         line = f"{level} ({int((time.monotonic() - self.boot_t) * 1000)}) {tag}: {msg}"
         self.logs.append(line)
-        self.emit(f"\x1b[0;32m{line}\x1b[0m\n")
+        if self.live_logs or not self.at_prompt:
+            self.emit(f"\x1b[0;32m{line}\x1b[0m\n")
 
     def prompt(self) -> None:
+        self.at_prompt = True
         self.emit("dfu32> ")
 
     # ---- boot -----------------------------------------------------------------------------
 
     def boot(self, first: bool = False) -> None:
         self.gen += 1
+        self.at_prompt = False
         self.boot_t = time.monotonic()
         self.console_abort.set()
         self.job_abort.set()
@@ -210,6 +217,8 @@ class FakeDfu32:
         self.console_abort = threading.Event()
         self.log("console", "console ready; type 'help'")
         self.emit("\nYour terminal application does not support escape sequences.\n\n")
+        if not self.live_logs:
+            self.emit("Live log output is off at the prompt: `logs` shows recent lines, `logs on` turns it on.\n")
         self.prompt()
 
     def reboot(self, why: str) -> None:
@@ -231,6 +240,7 @@ class FakeDfu32:
             self.prompt()
             return
         fn = getattr(self, "c_" + argv[0], None)
+        self.at_prompt = False
         if fn is None:
             self.emit("Unrecognized command\n")
             self.prompt()
@@ -420,6 +430,14 @@ class FakeDfu32:
             self.emit("Token cleared: the API is open (no token needed). `token rotate` sets one again.\n")
         else:
             self.emit("API token required.\n" if self.claimed else "API open: no token set.\n")
+
+    def c_logs(self, argv) -> None:
+        if len(argv) > 1 and argv[1] in ("on", "off"):
+            self.live_logs = argv[1] == "on"
+            self.emit("Live log output at the prompt: " + ("on" if self.live_logs else
+                      "off (still shown while a command runs; `logs` shows recent lines)") + ".\n")
+            return
+        self.emit("".join(ln + "\n" for ln in self.logs[-20:]))
 
     def c_runs(self, argv) -> None:
         if not self.runs:
