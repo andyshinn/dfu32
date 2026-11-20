@@ -38,8 +38,11 @@ int log_hook(const char* fmt, va_list ap) {
     // ISR context can't take a mutex; such output only goes to the console.
     // Otherwise never block a logging task for long: if a reader holds the
     // ring, skip the capture (not the console output). The ring gets every
-    // line even while console output is off.
+    // line even while console output is off; a line the ring didn't get (no
+    // ring, ISR, contended mutex) goes to the console anyway, so it isn't lost.
+    bool captured = false;
     if (s_ring != nullptr && !xPortInIsrContext() && xSemaphoreTake(s_ring_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        captured = true;
         va_list copy;
         va_copy(copy, ap);
         const int n = std::vsnprintf(s_line, sizeof(s_line), fmt, copy);
@@ -55,7 +58,7 @@ int log_hook(const char* fmt, va_list ap) {
         }
         xSemaphoreGive(s_ring_mutex);
     }
-    if (!s_console_out.load(std::memory_order_relaxed)) return 0;
+    if (captured && !s_console_out.load(std::memory_order_relaxed)) return 0;
     return s_prev_vprintf != nullptr ? s_prev_vprintf(fmt, ap) : std::vprintf(fmt, ap);
 }
 
