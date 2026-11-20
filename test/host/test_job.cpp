@@ -243,10 +243,12 @@ TEST_CASE("Job: snapshot JSON", "[job]") {
     CHECK(left == 600);
     CHECK(root.get("error").missing());
     CHECK(root.get("reused").missing());
+    CHECK(root.get("duration_ms").missing());  // no run record yet
 
     s.state = State::Failed;
     s.error = "BOARD_MISMATCH: x";
     s.run_seq = 12;
+    s.run_duration_ms = 38400;
     json::ObjectWriter w2;
     write_json(w2, s, 100);
     json::Doc d2;
@@ -256,4 +258,7 @@ TEST_CASE("Job: snapshot JSON", "[job]") {
     int64_t run = 0;
     REQUIRE(d2.root().get("run").integer(run));
     CHECK(run == 12);
+    int64_t took = 0;
+    REQUIRE(d2.root().get("duration_ms").integer(took));
+    CHECK(took == 38400);
 }

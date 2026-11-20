@@ -147,6 +147,7 @@ struct Snapshot {
     std::string bootloader;          // DIS firmware revision, once connected
     std::string error;               // SPEC.md §13.3 code + detail, when Failed
     uint32_t run_seq = 0;            // run record written for this job (flash only)
+    uint32_t run_duration_ms = 0;    // that run's duration_ms, once it is written
 };
 
 /// Writes the snapshot's fields into `w` (the "job" object of /status).

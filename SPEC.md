@@ -797,6 +797,8 @@ Results are deduplicated by address and sorted by RSSI. In the UI each row has a
 
 (This is visible during the transfer only when the run has `wifi_off: false`.)
 
+Once a flash has written its run record (§13.2), `job` also carries `run` (the record's `seq`) and `duration_ms` (the record's duration), which the web UI's job card shows as **Took**.
+
 On a phone joined to DFU32's access point while the station is down (§9.5), the same fields read, for example:
 
 ```json
