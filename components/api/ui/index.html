@@ -214,19 +214,28 @@ function header() {
 
 // ---- router -----------------------------------------------------------------------------
 const VIEWS = { status: viewStatus, image: viewImage, target: viewTarget, runs: viewRuns, logs: viewLogs, wifi: viewWifi, system: viewSystem };
+// Bumped on every navigation. A view that awaits the device before drawing captures it
+// first and draws only if it is still current, so a slow reply for the page just left
+// can't draw over the one Back (or a nav link) went to.
+let nav = 0;
 async function route() {
+  const g = ++nav;
   stopLogs(); clearTimeout(wifiTimer);
   if (!status) await refresh();
-  if (!status) return;
+  if (!status || g !== nav) return;
   // Token auth is opt-in: with no token set on the device, everything is open.
   if (!status.device.claimed) { if (token) setToken(""); newToken = ""; }
   else if (!token) return viewToken();
   $("#nav").hidden = false;
   if (!cfg) cfg = await api("GET", "/config").catch(() => null);
+  if (g !== nav) return;
   // A phone on the access point with no WiFi up is there to set the WiFi (§9.5).
   const [name, arg] = (location.hash.slice(1) || (status.device.ap?.via_ap && !status.device.wifi.connected ? "wifi" : "status")).split("/");
   view = VIEWS[name] ? name : "status";
   for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("on", a.getAttribute("href") === "#" + view);
+  // Clear the old page at once: a view that waits on the device would leave it showing,
+  // as if the navigation hadn't happened. Views that draw at once replace this unseen.
+  $("#main").replaceChildren(h("section", h("p.mute", "Loading…")));
   VIEWS[view](arg);
 }
 window.addEventListener("hashchange", route);
@@ -456,8 +465,10 @@ function newTargetId(name, board, taken) {
 }
 // #target edits the selected target; #target/new (or no target yet) makes a new one.
 async function viewTarget(arg) {
+  const g = nav;
   const r = await api("GET", "/targets").catch((e) => { toast(e.message); return null; });
-  if (!r) return;
+  if (g !== nav) return;
+  if (!r) return $("#main").replaceChildren(h("section", h("p", "Could not load the targets.")));
   const ts = r.targets || [], max = r.max_targets || 1, full = ts.length >= max;
   const cur = arg === "new" ? null : pickTarget(ts), tid = cur ? cur.id : "", t = cur || {};
   const out = [];
@@ -551,7 +562,9 @@ async function viewRuns(seq) {
   if (seq) return viewRun(seq);
   const t = selTarget(), tid = t ? t.id : "";
   if (!tid) return $("#main").replaceChildren(h("section", h("p", "No target yet.")));
+  const g = nav;
   const r = await api("GET", tpath(tid) + "/runs").catch((e) => { toast(e.message); return { runs: [] }; });
+  if (g !== nav) return;
   r.runs = r.runs || [];
   $("#main").replaceChildren(h("section", h("h2", "Runs" + (targets().length > 1 ? " of " + tlabel(t) : "")),
     targetPicker(() => viewRuns(), "The saved repeater whose runs are listed."), !r.runs.length ? h("p.mute", "No runs recorded yet.") :
@@ -562,8 +575,10 @@ async function viewRuns(seq) {
         h("td.small", x.error || x.image_version))))));
 }
 async function viewRun(seq) {
+  const g = nav;
   const r = await api("GET", "/runs/" + seq).catch((e) => { toast(e.message); return null; });
-  if (!r) return;
+  if (g !== nav) return;
+  if (!r) return $("#main").replaceChildren(h("section", h("p", h("a", { href: "#runs" }, "← Runs")), h("p", "Could not load run #" + seq + ".")));
   const x = r.run;
   const facts = [["Error", x.error], ["Started", x.started_unix ? when(x.started_unix) : "uptime " + x.started_uptime_s + " s"], ["Took", dur(x.duration_ms)], ["Trigger", [x.trigger, x.source].filter(Boolean).join(", ")],
       ["Image", x.image_version + " · " + kB(x.image_size)], ["Target", [x.target_id, x.target].filter(Boolean).join(" · ")], ["Target erased", x.target_erased],
@@ -625,7 +640,9 @@ function renderWifi() {
     ap.via_ap ? note("info", "You're on DFU32's own access point (" + ap.ssid + "). It has no internet.") : "");
 }
 async function viewWifi() {
+  const g = nav;
   cfg = await api("GET", "/config", undefined, 4000).catch(() => cfg);
+  if (g !== nav) return;
   const ap = status.device.ap || {}, out = [h("section", { id: "wsta" })], list = h("div"), prog = h("div");
   const ssid = h("input", { placeholder: "Other network…", maxlength: 32, autocomplete: "off" });
   const pw = h("input", { type: "password", autocomplete: "off" });
@@ -704,7 +721,9 @@ async function viewWifi() {
 
 // ---- system -----------------------------------------------------------------------------
 async function viewSystem() {
+  const g = nav;
   cfg = await api("GET", "/config").catch(() => cfg);
+  if (g !== nav) return;
   if (!cfg) return $("#main").replaceChildren(h("section", h("p", "Could not load the settings.")));
   const d = status.device, w = d.wifi || {};
   const appFile = "dfu32-" + (d.board || "<board>") + ".bin";  // the release asset for this board
