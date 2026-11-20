@@ -100,6 +100,24 @@ function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.s
 function badge(text, kind) { return h("span.badge" + (kind ? ".b-" + kind : ""), text); }
 function dl(pairs) { const d = h("dl.grid"); for (const [k, v] of pairs) if (v !== undefined && v !== null && v !== "") d.append(h("dt", k), h("dd", v)); return d; }
 function note(kind, ...kids) { return h("div.note.n-" + kind, ...kids); }
+// Puts text on the clipboard. navigator.clipboard needs a secure context, and the device
+// is served over plain http, so the usual path is a selected textarea and execCommand,
+// which must run inside the click (no await before it).
+async function copyText(text, what) {
+  if (!text) return toast("Nothing to copy yet.", 2500);
+  let ok = false;
+  if (window.isSecureContext && navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {}
+  } else {
+    const ta = h("textarea", { value: text, style: "position:fixed;top:0;left:0;opacity:0" });
+    document.body.append(ta);
+    ta.select(); ta.setSelectionRange(0, text.length);
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  }
+  toast(ok ? what + " copied." : "Couldn't copy: select the text and copy it by hand.", 2500);
+}
+function copyBtn(what, text) { return h("button", { type: "button", title: "Copy the " + what.toLowerCase() + " to the clipboard", onclick: () => copyText(text(), what) }, "Copy"); }
 // A labelled control with a "?" beside the label: it opens a short explanation of
 // what the option is and where its value comes from. chk = a checkbox row.
 // The "?" and the explanation sit outside the <label>, which would otherwise
@@ -547,14 +565,20 @@ async function viewRun(seq) {
   const r = await api("GET", "/runs/" + seq).catch((e) => { toast(e.message); return null; });
   if (!r) return;
   const x = r.run;
-  $("#main").replaceChildren(h("section", h("p", h("a", { href: "#runs" }, "← Runs")), h("h2", "Run #" + x.seq + " "), badge(x.result.toLowerCase().replace(/_/g, " "), RESULT_KIND[x.result]),
-    dl([["Error", x.error], ["Started", x.started_unix ? when(x.started_unix) : "uptime " + x.started_uptime_s + " s"], ["Took", dur(x.duration_ms)], ["Trigger", [x.trigger, x.source].filter(Boolean).join(", ")],
+  const facts = [["Error", x.error], ["Started", x.started_unix ? when(x.started_unix) : "uptime " + x.started_uptime_s + " s"], ["Took", dur(x.duration_ms)], ["Trigger", [x.trigger, x.source].filter(Boolean).join(", ")],
       ["Image", x.image_version + " · " + kB(x.image_size)], ["Target", [x.target_id, x.target].filter(Boolean).join(" · ")], ["Target erased", x.target_erased],
       ["Bootloader", x.bootloader + (x.bootloader_class ? " (" + x.bootloader_class + ")" : "")], ["Link", x.mtu ? "MTU " + x.mtu + ", " + x.packet_size + " B packets, interval " + (x.conn_interval_x125 * 1.25) + " ms" : ""],
-      ["Throughput", x.rate_x10_kBps ? (x.rate_x10_kBps / 10) + " kB/s" : ""], ["WiFi", x.wifi_off ? "off during the transfer" : "on"], ["Last phase", x.last_phase]]),
+      ["Throughput", x.rate_x10_kBps ? (x.rate_x10_kBps / 10) + " kB/s" : ""], ["WiFi", x.wifi_off ? "off during the transfer" : "on"], ["Last phase", x.last_phase]];
+  // Copy gives the run's facts, attempts and log as plain text, for a bug report or a chat.
+  const asText = () => [["DFU32 run #" + x.seq + ": " + x.result + (status ? " (DFU32 " + status.device.version + ")" : "")],
+    facts.filter(([, v]) => v !== undefined && v !== null && v !== "").map(([k, v]) => k + ": " + v),
+    (x.attempts || []).map((t) => "Attempt " + t.n + ": interval " + t.interval_ms + " ms, PRN " + t.prn + ", " + t.outcome + (t.kind && t.kind !== "NONE" ? " [" + t.kind + "]" : "") + ", acked " + t.bytes_acked + " B"),
+    ["", r.log || "(no log)"]].flat().join("\n");
+  $("#main").replaceChildren(h("section", h("p", h("a", { href: "#runs" }, "← Runs")), h("h2", "Run #" + x.seq + " "), badge(x.result.toLowerCase().replace(/_/g, " "), RESULT_KIND[x.result]),
+    dl(facts),
     x.attempts && x.attempts.length ? [h("h3", "Attempts"), h("table", h("tr", h("th", "#"), h("th", "Interval"), h("th", "PRN"), h("th", "Outcome"), h("th", "Acked")),
       x.attempts.map((t) => h("tr", h("td", t.n), h("td", t.interval_ms + " ms"), h("td", t.prn), h("td.small", t.outcome + (t.kind && t.kind !== "NONE" ? " [" + t.kind + "]" : "")), h("td", kB(t.bytes_acked)))))] : "",
-    h("h3", "Log"), h("pre", r.log || "(no log)")));
+    h("div.row", { style: "margin:1rem 0 .5rem" }, h("h3", { style: "flex:1;margin:0" }, "Log"), copyBtn("Run log", asText)), h("pre", r.log || "(no log)")));
 }
 
 // ---- logs -------------------------------------------------------------------------------
@@ -563,7 +587,7 @@ function stopLogs() { clearTimeout(logTimer); logTimer = 0; }
 function viewLogs() {
   const pre = h("pre", { style: "max-height:70vh" });
   const pause = h("button", { onclick: () => { logPaused = !logPaused; pause.textContent = logPaused ? "Resume" : "Pause"; if (!logPaused) poll(); } }, logPaused ? "Resume" : "Pause");
-  $("#main").replaceChildren(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Log"), pause, h("button", { onclick: () => pre.textContent = "" }, "Clear")), h("div", { style: "margin-top:.7rem" }, pre)));
+  $("#main").replaceChildren(h("section", h("div.row", h("h2", { style: "margin:0;flex:1" }, "Log"), pause, copyBtn("System log", () => pre.textContent), h("button", { onclick: () => pre.textContent = "" }, "Clear")), h("div", { style: "margin-top:.7rem" }, pre)));
   logNext = null;
   async function poll() {
     stopLogs();

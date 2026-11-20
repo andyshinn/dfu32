@@ -204,6 +204,20 @@ class TestPage(unittest.TestCase):
         call = body[body.index('$("#wsta")?.replaceChildren('):body.index("\n}")]
         self.assertNotRegex(call, r":\s*null\s*\);")
 
+    def test_logs_have_copy_buttons(self):
+        # The run detail and the Logs view each have a Copy button. The device is served over
+        # plain http (no navigator.clipboard), so the textarea + execCommand fallback must stay,
+        # and nothing may be awaited before it or the browser drops the click's permission.
+        run = self.js[self.js.index("async function viewRun"):self.js.index("// ---- logs")]
+        logs = self.js[self.js.index("function viewLogs"):self.js.index("// ---- wifi")]
+        self.assertIn('copyBtn("Run log", asText)', run)
+        self.assertIn('copyBtn("System log", () => pre.textContent)', logs)
+        fn = self.js[self.js.index("async function copyText"):self.js.index("function copyBtn")]
+        self.assertIn("window.isSecureContext && navigator.clipboard", fn)
+        fallback = fn[fn.index("} else {"):]
+        self.assertIn('document.execCommand("copy")', fallback)
+        self.assertNotIn("await", fallback)
+
     def test_wifi_view_is_routed(self):
         self.assertIn('href="#wifi"', self.html)
         self.assertIn("wifi: viewWifi", re.search(r"const VIEWS = \{(.*?)\}", self.js).group(1))
