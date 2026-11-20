@@ -7,6 +7,12 @@
 // API job does (and vice versa). The target commands act on the default
 // target (`target use <id>` picks it). Ctrl+C or Ctrl+D aborts the BLE commands
 // (scan, probe, flash, blreset); `job abort` stops an API job.
+//
+// Live log output: boot output reaches the console as always, but once the
+// prompt is up log lines go only to the ring unless `logs on` (stored in NVS;
+// CONFIG_DFU32_CONSOLE_LOG when unset), so they don't land in the middle of
+// what is typed. While a command runs they are shown either way: nothing is
+// being typed then, and flash/probe report their progress as log lines.
 #include "console.hpp"
 
 #include <array>
@@ -870,7 +876,19 @@ int cmd_run(int argc, char** argv) {
     return 0;
 }
 
+// `logs on|off` (stored); the REPL applies it at the prompt (see run_and_flush).
+std::atomic<bool> g_live_logs{false};
+
 int cmd_logs(int argc, char** argv) {
+    if (argc >= 2 && (std::strcmp(argv[1], "on") == 0 || std::strcmp(argv[1], "off") == 0)) {
+        const bool on = std::strcmp(argv[1], "on") == 0;
+        g_live_logs.store(on);
+        const bool saved = config::save_console_log(on);
+        std::printf("Live log output at the prompt: %s%s.\n",
+                    on ? "on" : "off (still shown while a command runs; `logs` shows recent lines)",
+                    saved ? "" : ". Not saved (NVS write failed): this boot only");
+        return saved ? 0 : 1;
+    }
     const long bytes = argc >= 2 ? std::strtol(argv[1], nullptr, 0) : 4096;
     const std::string tail = runlog::idf::log_tail(static_cast<size_t>(bytes > 0 ? bytes : 4096));
     std::fwrite(tail.data(), 1, tail.size(), stdout);
@@ -1096,11 +1114,15 @@ int cmd_ap(int argc, char** argv) {
 // linenoise redraws the prompt with a raw write() that starts with "\r" and
 // "erase to end of line". Anything still in the stdio buffer at that point is
 // overwritten or appears after the prompt, so flush before returning.
+// Log output is on while the command runs (see the top of this file) and back
+// to the `logs on|off` setting once it returns to the prompt.
 int run_and_flush(void* context, int argc, char** argv) {
     const auto fn = reinterpret_cast<esp_console_cmd_func_t>(context);
+    runlog::idf::log_console_output(true);
     const int ret = fn(argc, argv);
     std::fflush(stdout);
     fsync(fileno(stdout));
+    runlog::idf::log_console_output(g_live_logs.load());
     return ret;
 }
 
@@ -1163,7 +1185,15 @@ void repl_task(void*) {
         std::printf("\nYour terminal application does not support escape sequences.\n"
                     "Line editing and history features are disabled.\n");
     }
+    // The last boot line on the console (the bench waits for it), then the
+    // prompt takes over the console.
+    ESP_LOGI(TAG, "console ready; type 'help'");
+    g_live_logs.store(config::load_console_log());
+    if (!g_live_logs.load()) {
+        std::printf("Live log output is off at the prompt: `logs` shows recent lines, `logs on` turns it on.\n");
+    }
     std::fflush(stdout);
+    runlog::idf::log_console_output(g_live_logs.load());
     for (;;) {
         char* line = linenoise(prompt);
         if (line == nullptr) {
@@ -1228,7 +1258,10 @@ void start_console(void (*on_improv_start)()) {
         &cmd_flash);
     reg("runs", "List recorded flash runs (newest first).", "[count]", &cmd_runs);
     reg("run", "Show one run record and its log tail.", "<N>", &cmd_run);
-    reg("logs", "Show recent captured log output.", "[bytes]", &cmd_logs);
+    reg("logs",
+        "Show recent captured log output, or turn live log output at the prompt on or off (stored; shown while a "
+        "command runs either way).",
+        "[bytes | on | off]", &cmd_logs);
     reg("blreset", "Send SYS_RESET to the target's bootloader (recover a stuck session).", "[--wait S]",
         &cmd_blreset);
     reg("job", "Show the current (or last) API job, or abort it.", "[abort]", &cmd_job);
@@ -1240,9 +1273,7 @@ void start_console(void (*on_improv_start)()) {
     // HTTP client and manifest parsing run on this task.
     if (xTaskCreate(&repl_task, "console_repl", 12288, nullptr, 2, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "console task failed to start");
-        return;
     }
-    ESP_LOGI(TAG, "console ready; type 'help'");
 }
 
 }  // namespace dfu32

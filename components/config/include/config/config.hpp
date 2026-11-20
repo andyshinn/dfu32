@@ -59,16 +59,22 @@ bool save_device(const api::DeviceConfig& c);
 std::string update_device(const std::function<std::string(api::DeviceConfig&)>& edit,
                           api::DeviceConfig* out = nullptr);
 
+/// Live log output on the console once its prompt is up (key `console_log`,
+/// u8; the console's `logs on|off`). Unset: CONFIG_DFU32_CONSOLE_LOG. Not part
+/// of DeviceConfig, so the API neither shows nor changes it.
+bool load_console_log();
+bool save_console_log(bool on);
+
 /// SHA-256 of the API token (SPEC.md §9.3). False when none is set (the API is open).
 bool load_token_hash(std::array<uint8_t, 32>& out);
 bool save_token_hash(const std::array<uint8_t, 32>& hash);
 bool clear_token();
 
 /// Factory reset (SPEC.md §9.3): erases the whole `dfu32` namespace (targets,
-/// device settings including the AP settings, token hash). WiFi credentials
-/// are the WiFi driver's and are cleared separately (net::factory_reset(),
-/// called first so the AP can't come up before the reboot); the staging
-/// partition and run log are kept.
+/// device settings including the AP settings and console_log, token hash).
+/// WiFi credentials are the WiFi driver's and are cleared separately
+/// (net::factory_reset(), called first so the AP can't come up before the
+/// reboot); the staging partition and run log are kept.
 bool erase_all();
 
 }  // namespace dfu32::config
