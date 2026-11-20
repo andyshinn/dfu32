@@ -1088,7 +1088,7 @@ Improv uses `improv-wifi/sdk-cpp` (§4.1). It isn't in the registry, so it is ve
 - An `esp_log_set_vprintf` hook tees output to the console and to a **64 KB ring in PSRAM** (`CONFIG_DFU32_LOG_RING_KB`).
   - Console output can be switched off; the ring always gets every line. Boot output reaches the console until the REPL's prompt is up. From then on, log lines reach it only while a console command runs, unless the `console_log` setting (§9.1, `logs on|off`) is on, so they don't break into what the operator types. If the ring can't be allocated the hook isn't installed and everything goes to the console.
   - Positions are absolute byte offsets, so a run remembers where it started and stores everything logged since. Lines carry esp_log's own uptime timestamp.
-  - A logging task never waits more than 5 ms for the ring; if it would, that line is skipped in the ring (it still reaches the console).
+  - A logging task never waits more than 5 ms for the ring; if it would, that line is skipped in the ring and reaches the console instead, even while console output is off (as does output from an ISR), so no line is lost.
   - Implemented in `components/runlog` (`LogRing`, host-tested; glue in `runlog_idf`).
 - DFU phase transitions are logged as one-line `key=value` events, so they can be parsed: `evt=phase run=42 attempt=1 from=START to=INIT dt_ms=17234`.
 - The access-point password is never logged; access-point client logs carry the count only, no MAC (§9.5). The log ring is readable over the API.
