@@ -939,16 +939,18 @@ class FakeDfu32:
                     rec = self.add_run({"result": "FAILED", "error": "DEADLINE_EXCEEDED: took too long",
                                         "target_id": t["id"], "trigger": "api", "source": src,
                                         "started_unix": int(time.time()), "attempts": []})
-                    self.set_job(state="FAILED", error="DEADLINE_EXCEEDED: took too long", run=rec["seq"])
+                    self.set_job(state="FAILED", error="DEADLINE_EXCEEDED: took too long", run=rec["seq"],
+                                 duration_ms=rec.get("duration_ms", 0))
                 elif timeout.is_set() and not self.job_abort.is_set():
                     rec = self.add_run({"result": "FAILED", "error": "TARGET_NOT_FOUND", "target_id": t["id"],
                                         "trigger": "api", "source": src, "started_unix": int(time.time()),
                                         "attempts": []})
-                    self.set_job(state="FAILED", error="TARGET_NOT_FOUND: no advert", run=rec["seq"])
+                    self.set_job(state="FAILED", error="TARGET_NOT_FOUND: no advert", run=rec["seq"],
+                                 duration_ms=rec.get("duration_ms", 0))
                 else:
                     self.set_job(state="FAILED", error="ABORTED", target_erased=erased)
                 return
-            self.set_job(state="RESTORING", phase="RESTORE", run=rec["seq"])
+            self.set_job(state="RESTORING", phase="RESTORE", run=rec["seq"], duration_ms=rec.get("duration_ms", 0))
             if faults.get("restore_fail") and wifi_off:
                 self.log("job", "fault injection: treating WiFi restore as failed", "W")
                 time.sleep(0.5)

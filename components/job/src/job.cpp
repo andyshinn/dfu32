@@ -344,13 +344,17 @@ void run_flash(const Request& q, StagedImage& img, const StagingVerify& v) {
 
     ctx.wifi_off = wifi_stopped;
     uint32_t recorded = 0;
+    const uint32_t took_ms = r.total_ms;
     if (run_log != nullptr) {
         runlog::RunRecord rec = make_run_record(ctx, mac, img, r);
         rec.error = error;
         recorded = run_log->append(runlog::to_json(rec), runlog::idf::log_since(log_mark, runlog::kSlotPayloadMax));
         runlog::idf::job_end();
     }
-    update([&](Snapshot& s) { s.run_seq = recorded; });
+    update([&](Snapshot& s) {
+        s.run_seq = recorded;
+        s.run_duration_ms = took_ms;
+    });
 
     if (r.ok) {
         // Reload: the target may have been edited (or deleted) during the run.

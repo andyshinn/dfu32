@@ -203,7 +203,7 @@ void write_json(json::ObjectWriter& w, const Snapshot& s, uint32_t now_uptime_s)
     if (s.kind == Kind::Stage) w.add_bool("reused", s.reused);
     if (!s.bootloader.empty()) w.add("bootloader", s.bootloader);
     if (!s.error.empty()) w.add("error", s.error);
-    if (s.run_seq != 0) w.add("run", int64_t{s.run_seq});
+    if (s.run_seq != 0) w.add("run", int64_t{s.run_seq}).add("duration_ms", int64_t{s.run_duration_ms});
 }
 
 }  // namespace dfu32::job
