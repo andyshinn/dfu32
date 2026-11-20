@@ -175,6 +175,7 @@ constexpr const char* kApPassword = "ap_password";
 constexpr const char* kApDelay = "ap_delay";
 constexpr const char* kApIdle = "ap_idle";  // u32 seconds, 0 = never
 constexpr const char* kToken = "token_sha256";
+constexpr const char* kConsoleLog = "console_log";
 
 bool set_or_erase_str(nvs_handle_t h, const char* key, const std::string& v) {
     return v.empty() ? erase_key(h, key) : nvs_set_str(h, key, v.c_str()) == ESP_OK;
@@ -288,6 +289,28 @@ std::string update_device(const std::function<std::string(api::DeviceConfig&)>& 
     if (!save(c, keep_pw)) return "NVS write failed";
     if (out != nullptr) *out = std::move(c);
     return {};
+}
+
+bool load_console_log() {
+#ifdef CONFIG_DFU32_CONSOLE_LOG
+    bool on = true;
+#else
+    bool on = false;  // a `bool` Kconfig option that is off isn't defined at all
+#endif
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READONLY, &h) != ESP_OK) return on;
+    uint8_t v = 0;
+    if (nvs_get_u8(h, kConsoleLog, &v) == ESP_OK) on = v != 0;
+    nvs_close(h);
+    return on;
+}
+
+bool save_console_log(bool on) {
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return false;
+    const bool ok = nvs_set_u8(h, kConsoleLog, on ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
 }
 
 bool load_token_hash(std::array<uint8_t, 32>& out) {

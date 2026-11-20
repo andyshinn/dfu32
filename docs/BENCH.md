@@ -25,6 +25,8 @@ idf.py --preset feather_esp32s3 -p /dev/cu.usbmodem1101 flash monitor
 
 The monitor shows the boot banner, "layout self-check OK", the NimBLE address, and a `dfu32>` prompt. Type `help` to list the commands.
 
+Once the prompt is up, log lines no longer reach the console, so they don't land in the middle of what you type. They are still shown while a command runs (`flash` and `probe` report their progress as log lines), and they always go into the log ring: `logs` prints the recent ones. `logs on` shows them live at the prompt too, and `logs off` hides them again. The choice is stored, so it survives a reboot; a new or factory-reset device starts with it off (`DFU32_CONSOLE_LOG` changes that default; the bench build, `sdkconfig.debug`, has it on). Several checks below watch for log lines such as "new firmware confirmed": run `logs on` first.
+
 ### Or flash a CI build from macOS
 
 Each CI run uploads a `dfu32-<board>` artifact. Its `dfu32-<board>-merged.bin` contains the bootloader, partition table, OTA data and app as one image, written at offset 0. Use esptool, from your activated IDF environment (`python -m esptool`) or a standalone install (`brew install esptool` or `pipx install esptool`).
@@ -348,6 +350,7 @@ A full run flashes the repeater about 20 times and takes roughly an hour, most o
 
 ### What it changes on DFU32
 
+- It turns live log output on (`logs on`) after every boot, since it reads DFU32's log lines off the console. It leaves it on.
 - It needs an API token, so it claims the device, or takes a new one with `token rotate`. **Any token you were using stops working.** The new one is saved as `token.txt` in the results folder. 3.1 also turns the token off and on again (with `token clear` and `POST /system/token/clear`).
 - It creates or overwrites its own target (`--target-id`, default `t096`) next to yours. It leaves it there when the run ends.
 - The console checks act on the default target, so they make the bench target the default. When the run ends, your default is the default again. This also happens after Ctrl+C.
@@ -562,6 +565,7 @@ Every `flash` is recorded in the `runlog` partition (14 slots on 4 MB flash, 16 
 - `runs`: one line per run (result, duration, attempts, whether the target was erased, version or error).
 - `run N`: that run's full JSON summary and its log.
 - `logs [bytes]`: recent captured log output (default 4 KB).
+- `logs on` / `logs off`: show log lines live at the prompt, or not (§1; stored, off on a new device).
 
 If DFU32 reboots in the middle of a flash, the next boot logs a warning and records `ABORTED_BY_REBOOT`. When the transfer had begun, the record has `target_erased: possibly`; run `flash --yes` again.
 

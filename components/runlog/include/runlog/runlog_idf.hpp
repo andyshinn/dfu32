@@ -3,7 +3,8 @@
 // ESP-IDF glue for runlog (SPEC.md §7.3, §13):
 //  - log capture: an esp_log vprintf hook tees every log line into a LogRing
 //    held in PSRAM, so runs can store their log tail and the console can show
-//    recent output;
+//    recent output; console output itself can be switched off (the console's
+//    `logs on|off`);
 //  - the persisted RunLog on the raw `runlog` partition;
 //  - the job marker in NVS (`job_active`): set while a flash runs, so a reboot
 //    mid-run is recorded as ABORTED_BY_REBOOT on the next boot.
@@ -21,6 +22,10 @@ namespace runlog::idf {
 /// Allocates the ring (PSRAM preferred) and installs the vprintf hook. Call
 /// early in app_main; safe to call once.
 bool log_capture_start(size_t bytes);
+/// Whether log lines also go to the console (on at boot). Off, they still go
+/// into the ring. Works only once log_capture_start() succeeded: without a
+/// ring, output always reaches the console, or it would go nowhere.
+void log_console_output(bool on);
 uint64_t log_position();
 std::string log_since(uint64_t from, size_t max_bytes);
 std::string log_tail(size_t max_bytes);

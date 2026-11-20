@@ -423,6 +423,9 @@ class SerialConsole:
             raise ConsoleError(f"DFU32 boot failed: {hit[1].text}")
         time.sleep(0.5)  # let linenoise probe the terminal and print the prompt
         self.sync(attempts=5)
+        # The checks read DFU32's log lines off the console, also while it sits at its prompt:
+        # turn live log output on (stored in NVS; a new or factory-reset device has it off).
+        self.cmd("logs on")
 
     def boot_lines(self, boot: dict) -> str:
         """The log of one boot, from its banner up to the next boot (or now)."""

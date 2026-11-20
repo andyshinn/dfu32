@@ -431,6 +431,7 @@ All configuration lives in NVS namespace `dfu32`, with a `schema_ver` key for mi
 | `ap_password` | str | WPA2 passphrase for the access point, 8–63 printable ASCII; absent = open. Plaintext, write-only over the API. An invalid stored value turns AP mode off (never open); `ap on` is needed again once a valid password is stored. |
 | `ap_delay` | u32 | Station-down time before the access point comes up, default 120, 30–1800 s. |
 | `ap_idle` | u32 | Idle limit (API `ap_idle_s`): the access point goes down after this long up with no client while the station has no IP. Default 1800 (30 min), 0 = never, else 300–86400 s; out of range loads as 1800 with a warning. |
+| `console_log` | u8 | Live log output on the console at the prompt (§13.1), set with the console's `logs on` and `logs off`. Absent = `CONFIG_DFU32_CONSOLE_LOG` (off; on in `sdkconfig.debug`). Console only: not in the API's device config. |
 | `tgt0` … `tgt9` | str (JSON) | One target per slot, up to `DFU32_MAX_TARGETS` of them (§12.3). Each is one JSON record (`components/config`), so saving a target is a single atomic NVS write. Keys missing from an older record take their defaults: |
 | ↳ `id` | str ≤ 31 | slug, e.g. `attic-repeater` |
 | ↳ `name` | str | display name |
@@ -1082,6 +1083,7 @@ Improv uses `improv-wifi/sdk-cpp` (§4.1). It isn't in the registry, so it is ve
 
 - Every module logs through `ESP_LOGx` with a stable tag (`dfu`, `ble`, `fetch`, `stage`, `api`, `net`, `job`).
 - An `esp_log_set_vprintf` hook tees output to the console and to a **64 KB ring in PSRAM** (`CONFIG_DFU32_LOG_RING_KB`).
+  - Console output can be switched off; the ring always gets every line. Boot output reaches the console until the REPL's prompt is up. From then on, log lines reach it only while a console command runs, unless the `console_log` setting (§9.1, `logs on|off`) is on, so they don't break into what the operator types. If the ring can't be allocated the hook isn't installed and everything goes to the console.
   - Positions are absolute byte offsets, so a run remembers where it started and stores everything logged since. Lines carry esp_log's own uptime timestamp.
   - A logging task never waits more than 5 ms for the ring; if it would, that line is skipped in the ring (it still reaches the console).
   - Implemented in `components/runlog` (`LogRing`, host-tested; glue in `runlog_idf`).
@@ -1101,7 +1103,7 @@ The `runlog` partition is a ring of 4 KB slots: 14 slots on 4 MB, 16 on 8 MB. A 
   `wifi_off` was added in M3a (console `flash --wifi on|off`). M3b added `target_id`, `trigger` (`console` / `api`), `source` (`staged` / `manifest`) and `started_unix` (wall clock from SNTP, 0 if not synced). For API runs, `error` carries the job's code (`TARGET_NOT_FOUND`, `DEADLINE_EXCEEDED`, `ABORTED`, or the DFU error).
 - The log since the run started, trimmed from the front to fit the 4 KB slot (normally about 3 KB).
 - Slot layout: magic `DF32RUN1`, seq, lengths and a CRC32 over the payload (`components/runlog/include/runlog/run_log.hpp`). A torn or corrupted slot is ignored, and the next record goes into the slot after the newest valid one.
-- Console: `runs` lists records, `run N` shows one with its log, and `logs [bytes]` shows recent captured output.
+- Console: `runs` lists records, `run N` shows one with its log, `logs [bytes]` shows recent captured output, and `logs on|off` turns live log output at the prompt on or off (§13.1).
 - **Abort detection (§7.3):** a `job_active` marker in NVS is set when a flash starts. It's raised to "transferring" right before each attempt's transfer, since START may erase the target, and cleared when the run is recorded. If it's still there at boot, an `ABORTED_BY_REBOOT` record is written with the reset reason; `target_erased: possibly` if the transfer had begun.
 
 Writes are rare (one sector per run), so wear isn't a concern.
