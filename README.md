@@ -18,7 +18,7 @@ You could also flash using `esptool.py`:
 esptool.py --chip auto -p PORT write_flash 0x0 dfu32-feather_esp32s3-merged.bin
 ```
 
-The merged image is for a fresh install and resets settings (WiFi, token, targets). To update a running DFU32 from its web UI (**System → Firmware update**), use the app-only `dfu32-<board>.bin` from the same release instead (releases up to v0.4.0-rc.10 don't carry it: take `dfu32.bin` from the `dfu32-<board>` artifact of the release's Actions run).
+The merged image is for a fresh install and resets settings (WiFi, token, targets). To update a running DFU32 from its web UI (**System → Firmware update**), use the app-only `dfu32-<board>.bin` from the same release instead (releases up to v0.4.0-rc.10 don't carry it: take `dfu32.bin` from the `dfu32-<board>` artifact of the release's Actions run). Each release also has `dfu32-release.json` (earlier ones get it from a one-off backfill), which lists every image with its SHA-256 and, per board, where each flash part sits inside the merged image (SPEC §9.4).
 
 ### Preview the installer page
 
