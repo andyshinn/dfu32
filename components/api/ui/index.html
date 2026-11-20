@@ -207,7 +207,8 @@ function header() {
   const d = status.device || {}, w = d.wifi || {}, ap = d.ap || {};
   $("#hdr").textContent = [d.hostname, d.version, w.connected ? ((cfg && cfg.wifi_ssid) || "WiFi") + " " + w.rssi + " dBm" : ap.active ? "AP " + ap.ssid + " · " + ap.clients + " client(s)" : "WiFi down"].filter(Boolean).join(" · ");
   const j = status.job;
-  $("#hjob").replaceChildren(j && j.id ? badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]) : "");
+  // A finished flash is shown on the status page only; the header shows jobs that still need attention.
+  $("#hjob").replaceChildren(j && j.id && j.state !== "SUCCEEDED" ? badge(j.state.replace(/_/g, " ").toLowerCase(), STATE_KIND[j.state]) : "");
   // Open access point and no token (§9.5).
   $("#warn").replaceChildren(ap.warning ? note("warn", ap.warning, " ", h("a", { href: "#wifi" }, "Set an access-point password"), " or ", h("a", { href: "#system" }, "require a token"), ".") : "");
 }
